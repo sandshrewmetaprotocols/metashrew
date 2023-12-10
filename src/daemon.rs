@@ -79,7 +79,7 @@ fn read_cookie(path: &Path) -> Result<(String, String)> {
 fn rpc_connect(config: &Config) -> Result<Client> {
     let rpc_url = format!("http://{}", config.daemon_rpc_addr);
     // Allow `wait_for_new_block` to take a bit longer before timing out.
-    // See https://github.com/romanz/electrs/issues/495 for more details.
+    // See https://github.com/romanz/metashrew/issues/495 for more details.
     let builder = jsonrpc::simple_http::SimpleHttpTransport::builder()
         .url(&rpc_url)?
         .timeout(config.jsonrpc_timeout);
@@ -126,14 +126,14 @@ impl Daemon {
 
         let network_info = rpc.get_network_info()?;
         if network_info.version < 21_00_00 {
-            bail!("electrs requires bitcoind 0.21+");
+            bail!("metashrew requires bitcoind 0.21+");
         }
         if !network_info.network_active {
-            bail!("electrs requires active bitcoind p2p network");
+            bail!("metashrew requires active bitcoind p2p network");
         }
         let info = rpc.get_blockchain_info()?;
         if info.pruned {
-            bail!("electrs requires non-pruned bitcoind node");
+            bail!("metashrew requires non-pruned bitcoind node");
         }
 
         let p2p = Mutex::new(Connection::connect(

@@ -41,6 +41,7 @@ impl Tracker {
         let chain = Chain::new(config.network);
         Ok(Self {
             index: Index::load(
+                config.indexer.clone(),
                 store,
                 chain,
                 &metrics,

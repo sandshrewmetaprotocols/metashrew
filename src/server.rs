@@ -52,12 +52,12 @@ pub fn run() -> Result<()> {
     if let Err(e) = &result {
         for cause in e.chain() {
             if cause.downcast_ref::<ExitError>().is_some() {
-                info!("electrs stopped: {:?}", e);
+                info!("metashrew stopped: {:?}", e);
                 return Ok(());
             }
         }
     }
-    result.context("electrs failed")
+    result.context("metashrew failed")
 }
 
 fn serve() -> Result<()> {

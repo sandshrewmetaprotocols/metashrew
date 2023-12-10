@@ -29,7 +29,7 @@ use crate::{
 const PROTOCOL_VERSION: &str = "1.4";
 const UNKNOWN_FEE: isize = -1; // (allowed by Electrum protocol)
 
-const UNSUBSCRIBED_QUERY_MESSAGE: &str = "your wallet uses less efficient method of querying electrs, consider contacting the developer of your wallet. Reason:";
+const UNSUBSCRIBED_QUERY_MESSAGE: &str = "your wallet uses less efficient method of querying metashrew, consider contacting the developer of your wallet. Reason:";
 
 /// Per-client Electrum protocol state
 #[derive(Default)]
@@ -436,7 +436,7 @@ impl Rpc {
     }
 
     fn server_id(&self) -> String {
-        format!("electrs/{}", ELECTRS_VERSION)
+        format!("metashrew/{}", ELECTRS_VERSION)
     }
 
     fn version(&self, (client_id, client_version): &(String, VersionRequest)) -> Result<Value> {

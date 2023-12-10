@@ -6,7 +6,7 @@
 # If you don't know what you're doing consider using automated setup or ask an experienced friend.
 
 # This example contains only the most important settings.
-# See docs or electrs man page for advanced settings.
+# See docs or metashrew man page for advanced settings.
 
 # File where bitcoind stores the cookie, usually file .cookie in its datadir
 cookie_file = "/var/run/bitcoin-mainnet/cookie"
@@ -23,9 +23,9 @@ db_dir = "/some/fast/storage/with/big/size"
 # bitcoin means mainnet. Don't set to anything else unless you're a developer.
 network = "bitcoin"
 
-# The address on which electrs should listen. Warning: 0.0.0.0 is probably a bad idea!
-# Tunneling is the recommended way to access electrs remotely.
+# The address on which metashrew should listen. Warning: 0.0.0.0 is probably a bad idea!
+# Tunneling is the recommended way to access metashrew remotely.
 electrum_rpc_addr = "127.0.0.1:50001"
 
-# How much information about internal workings should electrs print. Increase before reporting a bug.
+# How much information about internal workings should metashrew print. Increase before reporting a bug.
 log_filters = "INFO"

@@ -3,6 +3,9 @@ use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use bitcoin_slices::{bsl, Visit, Visitor};
 use std::ops::ControlFlow;
+use std::path::PathBuf;
+use std::sync::Arc;
+use wasmtime::{Config, Engine, Linker, Module, Store};
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -87,10 +90,13 @@ pub struct Index {
     stats: Stats,
     is_ready: bool,
     flush_needed: bool,
+    engine: wasmtime::Engine,
+    module: wasmtime::Module
 }
 
 impl Index {
     pub(crate) fn load(
+        indexer: PathBuf,
         store: DBStore,
         mut chain: Chain,
         metrics: &Metrics,
@@ -111,6 +117,8 @@ impl Index {
         let stats = Stats::new(metrics);
         stats.observe_chain(&chain);
         stats.observe_db(&store);
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
         Ok(Index {
             store,
             batch_size,
@@ -119,6 +127,8 @@ impl Index {
             stats,
             is_ready: false,
             flush_needed: false,
+            engine,
+            module
         })
     }
 
@@ -212,8 +222,10 @@ impl Index {
 
         daemon.for_blocks(blockhashes, |blockhash, block| {
             let height = heights.next().expect("unexpected block");
+            let engine = Arc::new(&self.engine);
+            let module = Arc::new(&self.module);
             self.stats.observe_duration("block", || {
-                index_single_block(blockhash, block, height, &mut batch);
+                index_single_block(engine, module,  blockhash, block, height, &mut batch);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -241,6 +253,8 @@ fn db_rows_size(rows: &[Row]) -> usize {
 }
 
 fn index_single_block(
+    engine: Arc<&wasmtime::Engine>,
+    module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
     block: SerBlock,
     height: usize,

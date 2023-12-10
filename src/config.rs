@@ -127,6 +127,7 @@ pub struct Config {
     // See below for the documentation of each field:
     pub network: Network,
     pub db_path: PathBuf,
+    pub indexer: PathBuf,
     pub db_log_dir: Option<PathBuf>,
     pub daemon_dir: PathBuf,
     pub daemon_auth: SensitiveAuth,
@@ -181,12 +182,12 @@ fn default_daemon_dir() -> PathBuf {
 }
 
 fn default_config_files() -> Vec<OsString> {
-    let mut files = vec![OsString::from("electrs.toml")]; // cwd
+    let mut files = vec![OsString::from("metashrew.toml")]; // cwd
     if let Some(mut path) = home_dir() {
-        path.extend(&[".electrs", "config.toml"]);
+        path.extend(&[".metashrew", "config.toml"]);
         files.push(OsString::from(path)) // home directory
     }
-    files.push(OsString::from("/etc/electrs/config.toml")); // system-wide
+    files.push(OsString::from("/etc/metashrew/config.toml")); // system-wide
     files
 }
 
@@ -335,6 +336,7 @@ impl Config {
         let config = Config {
             network: config.network,
             db_path: config.db_dir,
+            indexer: config.indexer,
             db_log_dir: config.db_log_dir,
             daemon_dir: config.daemon_dir,
             daemon_auth,
@@ -357,7 +359,7 @@ impl Config {
             args: args.map(|a| a.into_string().unwrap()).collect(),
         };
         eprintln!(
-            "Starting electrs {} on {} {} with {:?}",
+            "Starting metashrew {} on {} {} with {:?}",
             ELECTRS_VERSION, ARCH, OS, config
         );
         let mut builder = env_logger::Builder::from_default_env();

@@ -66,7 +66,7 @@ pub(crate) struct Connection {
 impl Connection {
     /// Get new block headers (supporting reorgs).
     /// https://en.bitcoin.it/wiki/Protocol_documentation#getheaders
-    /// Defined as `&mut self` to prevent concurrent invocations (https://github.com/romanz/electrs/pull/526#issuecomment-934685515).
+    /// Defined as `&mut self` to prevent concurrent invocations (https://github.com/romanz/metashrew/pull/526#issuecomment-934685515).
     pub(crate) fn get_new_headers(&mut self, chain: &Chain) -> Result<Vec<NewHeader>> {
         self.req_send.send(Request::get_new_headers(chain))?;
         let headers = self
@@ -92,7 +92,7 @@ impl Connection {
 
     /// Request and process the specified blocks (in the specified order).
     /// See https://en.bitcoin.it/wiki/Protocol_documentation#getblocks for details.
-    /// Defined as `&mut self` to prevent concurrent invocations (https://github.com/romanz/electrs/pull/526#issuecomment-934685515).
+    /// Defined as `&mut self` to prevent concurrent invocations (https://github.com/romanz/metashrew/pull/526#issuecomment-934685515).
     pub(crate) fn for_blocks<B, F>(&mut self, blockhashes: B, mut func: F) -> Result<()>
     where
         B: IntoIterator<Item = BlockHash>,
@@ -130,7 +130,7 @@ impl Connection {
         })
     }
 
-    /// Note: only a single receiver will get the notification (https://github.com/romanz/electrs/pull/526#issuecomment-934687415).
+    /// Note: only a single receiver will get the notification (https://github.com/romanz/metashrew/pull/526#issuecomment-934687415).
     pub(crate) fn new_block_notification(&self) -> Receiver<()> {
         self.new_block_recv.clone()
     }
@@ -336,7 +336,7 @@ fn build_version_message() -> NetworkMessage {
         receiver: address::Address::new(&addr, services),
         sender: address::Address::new(&addr, services),
         nonce: secp256k1::rand::thread_rng().gen(),
-        user_agent: format!("/electrs:{}/", ELECTRS_VERSION),
+        user_agent: format!("/metashrew:{}/", ELECTRS_VERSION),
         start_height: 0,
         relay: false,
     })

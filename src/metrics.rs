@@ -56,7 +56,7 @@ mod metrics_impl {
             label: &str,
             buckets: Vec<f64>,
         ) -> Histogram {
-            let name = String::from("electrs_") + name;
+            let name = String::from("metashrew_") + name;
             let opts = HistogramOpts::new(name, desc).buckets(buckets);
             let hist = HistogramVec::new(opts, &[label]).unwrap();
             self.reg
@@ -66,7 +66,7 @@ mod metrics_impl {
         }
 
         pub fn gauge(&self, name: &str, desc: &str, label: &str) -> Gauge {
-            let name = String::from("electrs_") + name;
+            let name = String::from("metashrew_") + name;
             let opts = prometheus::Opts::new(name, desc);
             let gauge = prometheus::GaugeVec::new(opts, &[label]).unwrap();
             self.reg

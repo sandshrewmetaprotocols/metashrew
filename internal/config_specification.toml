@@ -24,6 +24,12 @@ doc = "Automatically reindex the database if it's inconsistent or in old format"
 default = true
 
 [[param]]
+name = "indexer"
+type = "std::path::PathBuf"
+doc = "WASM binary to execute containing indexer logic"
+default = "\"./indexer\".into()"
+
+[[param]]
 name = "db_dir"
 type = "std::path::PathBuf"
 doc = "Directory to store index database (default: ./db/)"
@@ -134,7 +140,7 @@ default = "0"
 name = "server_banner"
 type = "String"
 doc = "The banner to be shown in the Electrum console"
-default = "concat!(\"Welcome to electrs \", env!(\"CARGO_PKG_VERSION\"), \" (Electrum Rust Server)!\").to_owned()"
+default = "concat!(\"Welcome to metashrew \", env!(\"CARGO_PKG_VERSION\"), \" (Electrum Rust Server)!\").to_owned()"
 
 [[param]]
 name = "log_filters"

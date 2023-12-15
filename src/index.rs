@@ -6,6 +6,8 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime_wasi::sync::WasiCtxBuilder;
+use hex;
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -224,8 +226,9 @@ impl Index {
             let height = heights.next().expect("unexpected block");
             let engine = Arc::new(&self.engine);
             let module = Arc::new(&self.module);
+            let dbstore = Arc::new(&self.store);
             self.stats.observe_duration("block", || {
-                index_single_block(engine, module,  blockhash, block, height, &mut batch);
+                index_single_block(dbstore, engine, module,  blockhash, block, height, &mut batch);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -252,7 +255,10 @@ fn db_rows_size(rows: &[Row]) -> usize {
     rows.iter().map(|key| key.len()).sum()
 }
 
+let WASMINDEX: &str = "wasmindex";
+
 fn index_single_block(
+    db: 
     engine: Arc<&wasmtime::Engine>,
     module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
@@ -260,51 +266,19 @@ fn index_single_block(
     height: usize,
     batch: &mut WriteBatch,
 ) {
-    struct IndexBlockVisitor<'a> {
-        batch: &'a mut WriteBatch,
-        height: usize,
-    }
 
-    impl<'a> Visitor for IndexBlockVisitor<'a> {
-        fn visit_transaction(&mut self, tx: &bsl::Transaction) -> ControlFlow<()> {
-            let txid = bsl_txid(tx);
-            self.batch
-                .txid_rows
-                .push(TxidRow::row(txid, self.height).to_db_row());
-            ControlFlow::Continue(())
-        }
+    let args: Vec<String> = vec![hex::encode(block), height.to_string()];
 
-        fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut) -> ControlFlow<()> {
-            let script = bitcoin::Script::from_bytes(tx_out.script_pubkey());
-            // skip indexing unspendable outputs
-            if !script.is_provably_unspendable() {
-                let row = ScriptHashRow::row(ScriptHash::new(script), self.height);
-                self.batch.funding_rows.push(row.to_db_row());
-            }
-            ControlFlow::Continue(())
-        }
-
-        fn visit_tx_in(&mut self, _vin: usize, tx_in: &bsl::TxIn) -> ControlFlow<()> {
-            let prevout: OutPoint = tx_in.prevout().into();
-            // skip indexing coinbase transactions' input
-            if !prevout.is_null() {
-                let row = SpendingPrefixRow::row(prevout, self.height);
-                self.batch.spending_rows.push(row.to_db_row());
-            }
-            ControlFlow::Continue(())
-        }
-
-        fn visit_block_header(&mut self, header: &bsl::BlockHeader) -> ControlFlow<()> {
-            let header = bitcoin::block::Header::consensus_decode(&mut header.as_ref())
-                .expect("block header was already validated");
-            self.batch
-                .header_rows
-                .push(HeaderRow::new(header).to_db_row());
-            ControlFlow::Continue(())
-        }
-    }
-
-    let mut index_block = IndexBlockVisitor { batch, height };
-    bsl::Block::visit(&block, &mut index_block).expect("core returned invalid block");
+    let mut ctx = WasiCtxBuilder::new().args(&args).unwrap().build();
+    let mut store = Store::new(*engine, ctx);
+    let mut instance = Linker::new(*engine).func_new(*module, "_get", FuncType::new(vec![ValTypeinstantiate(&mut store, *module).unwrap();
+    let _get = Func::wrap(&mut store |caller: Caller<'_, u32>, key: String| {
+      return store.get_cf(WASMINDEX, hex::decode(key));
+    });
+    let _set = Func::wrap(&mut store |caller: Caller<'_, u32>, key: String, value: String| {
+      return store.set_cf(WASMINDEX, hex::decode(key), hex::decode(value));
+    });
+    instance.add_to_
+    instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap().call(&mut store, ());
     batch.tip_row = serialize(&block_hash).into_boxed_slice();
 }

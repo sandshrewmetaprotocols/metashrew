@@ -5,7 +5,7 @@ use bitcoin_slices::{bsl, Visit, Visitor};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use wasmtime::{Config, Engine, Linker, Module, Store};
+use wasmtime::{Instance, MemoryType, SharedMemory, Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::sync::WasiCtxBuilder;
 use hex;
 
@@ -227,8 +227,9 @@ impl Index {
             let engine = Arc::new(&self.engine);
             let module = Arc::new(&self.module);
             let dbstore = Arc::new(&self.store);
+            let blockarc = Arc::new(&block);
             self.stats.observe_duration("block", || {
-                index_single_block(dbstore, engine, module,  blockhash, block, height, &mut batch);
+                index_single_block(dbstore, engine, module,  blockhash, blockarc, height, &mut batch);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -255,22 +256,26 @@ fn db_rows_size(rows: &[Row]) -> usize {
     rows.iter().map(|key| key.len()).sum()
 }
 
-let WASMINDEX: &str = "wasmindex";
+static WASMINDEX: &str = "wasmindex";
 
 fn index_single_block(
-    db: 
+    db: Arc<&DBStore>,
     engine: Arc<&wasmtime::Engine>,
     module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
-    block: SerBlock,
+    block: Arc<&SerBlock>,
     height: usize,
     batch: &mut WriteBatch,
 ) {
 
-    let args: Vec<String> = vec![hex::encode(block), height.to_string()];
 
-    let mut ctx = WasiCtxBuilder::new().args(&args).unwrap().build();
+    let mut ctx = WasiCtxBuilder::new().build();
     let mut store = Store::new(*engine, ctx);
+    let shared_memory = SharedMemory::new(&engine, MemoryType::shared(64, 64)).unwrap();
+    unsafe {
+      std::ptr::copy((*block).as_ptr() as *const u8, shared_memory.data()[0].get(), block.len().into());
+    }
+    /*
     let mut instance = Linker::new(*engine).func_new(*module, "_get", FuncType::new(vec![ValTypeinstantiate(&mut store, *module).unwrap();
     let _get = Func::wrap(&mut store |caller: Caller<'_, u32>, key: String| {
       return store.get_cf(WASMINDEX, hex::decode(key));
@@ -279,6 +284,9 @@ fn index_single_block(
       return store.set_cf(WASMINDEX, hex::decode(key), hex::decode(value));
     });
     instance.add_to_
+    */
+    
+    let instance = Instance::new(&mut store, &module, &[shared_memory.into()]).unwrap();
     instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap().call(&mut store, ());
     batch.tip_row = serialize(&block_hash).into_boxed_slice();
 }

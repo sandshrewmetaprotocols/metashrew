@@ -278,7 +278,7 @@ fn index_single_block(
       let data = mem.data(&caller);
       let len = u32::from_le_bytes((data[((dataStart - 4) as usize)..(dataStart as usize)]).try_into().unwrap());
       let data = Vec::<u8>::from(&data[(dataStart as usize)..(((dataStart as u32) + len) as usize)]);
-      println!("{:?}", std::str::from_utf8(data.as_slice()).unwrap());
+      println!("{}", std::str::from_utf8(data.as_slice()).unwrap());
     });
     linker.func_wrap("env", "__set", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
@@ -302,6 +302,14 @@ fn index_single_block(
       let value_vec = (dbstore.db).get_cf((dbstore.db).cf_handle(WASMINDEX).unwrap(), &key_vec).unwrap();
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       mem.write(&mut caller, value.try_into().unwrap(), value_vec.unwrap().as_slice());
+    });
+    linker.func_wrap("env", "__get_len", move |mut caller: Caller<'_, ()>, key: i32| -> i32 {
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      let data = mem.data(&caller);
+      let len = u32::from_le_bytes((data[((key - 4) as usize)..(key as usize)]).try_into().unwrap());
+      let key_vec = Vec::<u8>::from(&data[(key as usize)..(((key as u32) + len) as usize)]);
+      let value_vec = (dbstore.db).get_cf((dbstore.db).cf_handle(WASMINDEX).unwrap(), &key_vec).unwrap();
+      return value_vec.unwrap().len().try_into().unwrap();
     });
     linker.func_wrap("env", "__load_block", move |mut caller: Caller<'_, ()>, dataStart: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();

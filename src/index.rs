@@ -86,7 +86,7 @@ impl Stats {
 
 /// Confirmed transactions' address index
 pub struct Index {
-    store: DBStore,
+    store: &'static DBStore,
     batch_size: usize,
     lookup_limit: Option<usize>,
     chain: Chain,
@@ -100,7 +100,7 @@ pub struct Index {
 impl Index {
     pub(crate) fn load(
         indexer: PathBuf,
-        store: DBStore,
+        store: &'static DBStore,
         mut chain: Chain,
         metrics: &Metrics,
         batch_size: usize,
@@ -119,7 +119,7 @@ impl Index {
         };
         let stats = Stats::new(metrics);
         stats.observe_chain(&chain);
-        stats.observe_db(&store);
+        stats.observe_db(store);
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
         Ok(Index {
@@ -222,7 +222,6 @@ impl Index {
         let mut heights = chunk.iter().map(|h| h.height());
 
         let mut batch = WriteBatch::default();
-        let db = &self.store.db;
 
         daemon.for_blocks(blockhashes, |blockhash, block| {
             let height = heights.next().expect("unexpected block");
@@ -230,7 +229,7 @@ impl Index {
             let module = Arc::new(&self.module);
             let blockarc = Arc::new(&block);
             self.stats.observe_duration("block", || {
-                index_single_block(db, engine, module,  blockhash, blockarc, height, &mut batch);
+                index_single_block(self.store, engine, module,  blockhash, blockarc, height, &mut batch);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -260,7 +259,7 @@ fn db_rows_size(rows: &[Row]) -> usize {
 static WASMINDEX: &str = "wasmindex";
 
 fn index_single_block(
-    db: &rocksdb::DB,
+    dbstore: &'static DBStore,
     engine: Arc<&wasmtime::Engine>,
     module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
@@ -292,15 +291,15 @@ fn index_single_block(
       let mut opts = rocksdb::WriteOptions::new();
       opts.set_sync(true);
       opts.disable_wal(false);
-      (db).put_cf(((db).cf_handle(WASMINDEX).unwrap()), &key_vec, &value_vec).unwrap();
-      (db).write_opt(batch, &opts).unwrap();
+      dbstore.db.put_cf(((dbstore.db).cf_handle(WASMINDEX).unwrap()), &key_vec, &value_vec).unwrap();
+      (dbstore.db).write_opt(batch, &opts).unwrap();
     });
     linker.func_wrap("env", "__get", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       let data = mem.data(&caller);
       let len = u32::from_le_bytes((data[((key - 4) as usize)..(key as usize)]).try_into().unwrap());
       let key_vec = Vec::<u8>::from(&data[(key as usize)..(((key as u32) + len) as usize)]);
-      let value_vec = (db).get_cf((db).cf_handle(WASMINDEX).unwrap(), &key_vec).unwrap();
+      let value_vec = (dbstore.db).get_cf((dbstore.db).cf_handle(WASMINDEX).unwrap(), &key_vec).unwrap();
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       mem.write(&mut caller, value.try_into().unwrap(), value_vec.unwrap().as_slice());
     });

@@ -33,11 +33,11 @@ pub(crate) enum Error {
 
 impl Tracker {
     pub fn new(config: &Config, metrics: Metrics) -> Result<Self> {
-        let store: DBStore = DBStore::open(
+    let store: &'static DBStore = Box::leak(Box::new(DBStore::open(
             &config.db_path,
             config.db_log_dir.as_deref(),
             config.auto_reindex,
-        ).unwrap();
+        ).unwrap()));
         let chain = Chain::new(config.network);
         Ok(Self {
             index: Index::load(

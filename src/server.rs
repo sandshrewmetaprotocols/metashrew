@@ -61,7 +61,7 @@ pub fn run() -> Result<()> {
 }
 
 fn serve() -> Result<()> {
-    let config = Config::from_args();
+    let config: Config = Config::from_args();
     let metrics = Metrics::new(config.monitoring_addr)?;
 
     let (server_tx, server_rx) = unbounded();

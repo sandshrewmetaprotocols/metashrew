@@ -112,7 +112,6 @@ fn default_opts() -> rocksdb::Options {
     opts.set_block_based_table_factory(&block_opts);
     opts
 }
-
 impl DBStore {
     fn create_cf_descriptors() -> Vec<rocksdb::ColumnFamilyDescriptor> {
         COLUMN_FAMILIES

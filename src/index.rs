@@ -5,9 +5,10 @@ use bitcoin_slices::{bsl, Visit, Visitor};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use wasmtime::{Instance, MemoryType, SharedMemory, Config, Engine, Linker, Module, Store};
+use wasmtime::{Caller, Instance, MemoryType, SharedMemory, Config, Engine, Linker, Module, Store, Mutability, GlobalType, Global, Val, ValType};
 use wasmtime_wasi::sync::WasiCtxBuilder;
 use hex;
+use electrs_rocksdb as rocksdb;
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -221,15 +222,15 @@ impl Index {
         let mut heights = chunk.iter().map(|h| h.height());
 
         let mut batch = WriteBatch::default();
+        let db = &self.store.db;
 
         daemon.for_blocks(blockhashes, |blockhash, block| {
             let height = heights.next().expect("unexpected block");
             let engine = Arc::new(&self.engine);
             let module = Arc::new(&self.module);
-            let dbstore = Arc::new(&self.store);
             let blockarc = Arc::new(&block);
             self.stats.observe_duration("block", || {
-                index_single_block(dbstore, engine, module,  blockhash, blockarc, height, &mut batch);
+                index_single_block(db, engine, module,  blockhash, blockarc, height, &mut batch);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -259,7 +260,7 @@ fn db_rows_size(rows: &[Row]) -> usize {
 static WASMINDEX: &str = "wasmindex";
 
 fn index_single_block(
-    db: Arc<&DBStore>,
+    db: &rocksdb::DB,
     engine: Arc<&wasmtime::Engine>,
     module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
@@ -268,25 +269,50 @@ fn index_single_block(
     batch: &mut WriteBatch,
 ) {
 
+    let mut store = Store::new(*engine, ());
+    let mut linker = Linker::new(*engine);
+    let block_clone = (*block).clone();
+    let mut __host_len = Global::new(&mut store, GlobalType::new(ValType::I32, Mutability::Var), Val::I32(block.len().try_into().unwrap())).unwrap();
+    linker.define(&store, "env", "__host_len", __host_len);
+    linker.func_wrap("env", "__log", |mut caller: Caller<'_, ()>, dataStart: i32| {
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      let data = mem.data(&caller);
+      let len = u32::from_le_bytes((data[((dataStart - 4) as usize)..(dataStart as usize)]).try_into().unwrap());
+      let data = Vec::<u8>::from(&data[(dataStart as usize)..(((dataStart as u32) + len) as usize)]);
+      println!("{:?}", std::str::from_utf8(data.as_slice()).unwrap());
+    });
+    linker.func_wrap("env", "__set", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      let data = mem.data(&caller);
+      let len = u32::from_le_bytes((data[((key - 4) as usize)..(key as usize)]).try_into().unwrap());
+      let key_vec = Vec::<u8>::from(&data[(key as usize)..(((key as u32) + len) as usize)]);
+      let value_len = u32::from_le_bytes((data[((value - 4) as usize)..(value as usize)]).try_into().unwrap());
+      let value_vec = Vec::<u8>::from(&data[(value as usize)..(((value as u32) + value_len) as usize)]);
+      let mut batch = rocksdb::WriteBatch::default();
+      let mut opts = rocksdb::WriteOptions::new();
+      opts.set_sync(true);
+      opts.disable_wal(false);
+      (db).put_cf(((db).cf_handle(WASMINDEX).unwrap()), &key_vec, &value_vec).unwrap();
+      (db).write_opt(batch, &opts).unwrap();
+    });
+    linker.func_wrap("env", "__get", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      let data = mem.data(&caller);
+      let len = u32::from_le_bytes((data[((key - 4) as usize)..(key as usize)]).try_into().unwrap());
+      let key_vec = Vec::<u8>::from(&data[(key as usize)..(((key as u32) + len) as usize)]);
+      let value_vec = (db).get_cf((db).cf_handle(WASMINDEX).unwrap(), &key_vec).unwrap();
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      mem.write(&mut caller, value.try_into().unwrap(), value_vec.unwrap().as_slice());
+    });
+    linker.func_wrap("env", "__load_block", move |mut caller: Caller<'_, ()>, dataStart: i32| {
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      mem.write(&mut caller, dataStart.try_into().unwrap(), block_clone.as_slice());
+    });
+    linker.func_wrap("env", "abort", |_: i32, _: i32, _: i32, _: i32| {
+      panic!("abort!");
+    });
+    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let start = instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap();
 
-    let mut ctx = WasiCtxBuilder::new().build();
-    let mut store = Store::new(*engine, ctx);
-    let shared_memory = SharedMemory::new(&engine, MemoryType::shared(64, 64)).unwrap();
-    unsafe {
-      std::ptr::copy((*block).as_ptr() as *const u8, shared_memory.data()[0].get(), block.len().into());
-    }
-    /*
-    let mut instance = Linker::new(*engine).func_new(*module, "_get", FuncType::new(vec![ValTypeinstantiate(&mut store, *module).unwrap();
-    let _get = Func::wrap(&mut store |caller: Caller<'_, u32>, key: String| {
-      return store.get_cf(WASMINDEX, hex::decode(key));
-    });
-    let _set = Func::wrap(&mut store |caller: Caller<'_, u32>, key: String, value: String| {
-      return store.set_cf(WASMINDEX, hex::decode(key), hex::decode(value));
-    });
-    instance.add_to_
-    */
-    
-    let instance = Instance::new(&mut store, &module, &[shared_memory.into()]).unwrap();
-    instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap().call(&mut store, ());
-    batch.tip_row = serialize(&block_hash).into_boxed_slice();
+    start.call(&mut store, ());
 }

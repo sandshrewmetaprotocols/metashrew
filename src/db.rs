@@ -26,8 +26,8 @@ impl WriteBatch {
 
 /// RocksDB wrapper for index storage
 pub struct DBStore {
-    db: rocksdb::DB,
-    bulk_import: AtomicBool,
+    pub db: rocksdb::DB,
+    pub bulk_import: AtomicBool,
 }
 
 const CONFIG_CF: &str = "config";

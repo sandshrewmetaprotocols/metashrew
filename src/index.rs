@@ -271,8 +271,11 @@ fn index_single_block(
     let mut store = Store::new(*engine, ());
     let mut linker = Linker::new(*engine);
     let block_clone = (*block).clone();
-    let mut __host_len = Global::new(&mut store, GlobalType::new(ValType::I32, Mutability::Var), Val::I32(block.len().try_into().unwrap())).unwrap();
-    linker.define(&store, "env", "__host_len", __host_len);
+//    let mut __host_len = Global::new(&mut store, GlobalType::new(ValType::I32, Mutability::Var), Val::I32(block.len().try_into().unwrap())).unwrap();
+    let __host_len = block_clone.len();
+    linker.func_wrap("env", "__host_len", move |mut caller: Caller<'_, ()>| -> i32 {
+      return __host_len.try_into().unwrap();
+    });
     linker.func_wrap("env", "__log", |mut caller: Caller<'_, ()>, dataStart: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       let data = mem.data(&caller);
@@ -319,6 +322,9 @@ fn index_single_block(
       panic!("abort!");
     });
     let instance = linker.instantiate(&mut store, &module).unwrap();
+    {
+      instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128);
+    }
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap();
 
     start.call(&mut store, ());

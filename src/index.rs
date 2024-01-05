@@ -6,7 +6,9 @@ use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{Caller, Instance, MemoryType, SharedMemory, Config, Engine, Linker, Module, Store, Mutability, GlobalType, Global, Val, ValType};
+use rlp::{Rlp};
 use wasmtime_wasi::sync::WasiCtxBuilder;
+use itertools::Itertools;
 use hex;
 use electrs_rocksdb as rocksdb;
 
@@ -283,19 +285,19 @@ fn index_single_block(
       let data = Vec::<u8>::from(&data[(dataStart as usize)..(((dataStart as u32) + len) as usize)]);
       println!("{}", std::str::from_utf8(data.as_slice()).unwrap());
     });
-    linker.func_wrap("env", "__set", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
+    linker.func_wrap("env", "__flush", move |mut caller: Caller<'_, ()>, encoded: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       let data = mem.data(&caller);
-      let len = u32::from_le_bytes((data[((key - 4) as usize)..(key as usize)]).try_into().unwrap());
-      let key_vec = Vec::<u8>::from(&data[(key as usize)..(((key as u32) + len) as usize)]);
-      let value_len = u32::from_le_bytes((data[((value - 4) as usize)..(value as usize)]).try_into().unwrap());
-      let value_vec = Vec::<u8>::from(&data[(value as usize)..(((value as u32) + value_len) as usize)]);
+      let len = u32::from_le_bytes((data[((encoded - 4) as usize)..(encoded as usize)]).try_into().unwrap());
+      let encoded_vec = Vec::<u8>::from(&data[(encoded as usize)..(((encoded as u32) + len) as usize)]);
       let mut batch = rocksdb::WriteBatch::default();
-      let mut opts = rocksdb::WriteOptions::new();
-      opts.set_sync(true);
-      opts.disable_wal(false);
-      dbstore.db.put_cf(((dbstore.db).cf_handle(WASMINDEX).unwrap()), &key_vec, &value_vec).unwrap();
-      (dbstore.db).write_opt(batch, &opts).unwrap();
+      Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().tuple_windows().inspect(|(k, v)| {
+        let mut val = u32::try_from(height).unwrap().to_le_bytes().to_vec();
+        let given_val = v.as_bytes().to_vec();
+        val.extend(&given_val);
+        batch.put(k.as_bytes().to_vec(), given_val);
+      });
+      (dbstore.db).write(batch).unwrap();
     });
     linker.func_wrap("env", "__get", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();

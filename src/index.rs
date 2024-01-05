@@ -295,7 +295,17 @@ fn index_single_block(
         let mut val = u32::try_from(height).unwrap().to_le_bytes().to_vec();
         let given_val = v.as_bytes().to_vec();
         val.extend(&given_val);
-        batch.put(k.as_bytes().to_vec(), given_val);
+        let mut key = k.as_bytes().to_vec();
+        let length_key = u32::MAX.to_le_bytes().to_vec();
+        key.extend(&length_key);
+        let length = (match dbstore.db.get(&key).unwrap() {
+          Some(v) => u32::from_le_bytes(v.as_slice().try_into().unwrap()),
+          None => 0
+        });
+        key = k.as_bytes().to_vec();
+        let index_key = length.to_le_bytes().to_vec();
+        key.extend(&index_key);
+        batch.put(key, given_val);
       });
       (dbstore.db).write(batch).unwrap();
     });

@@ -260,6 +260,43 @@ fn db_rows_size(rows: &[Row]) -> usize {
 
 static WASMINDEX: &str = "wasmindex";
 
+pub fn db_annotate_value(v: &Vec<u8>, block_height: u32) -> Vec<u8> {
+  let mut entry: Vec<u8> = v.clone();
+  let height: Vec<u8> = block_height.to_le_bytes().try_into().unwrap();
+  entry.extend(height);
+  return entry;
+}
+
+pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Vec<u8> {
+  let mut entry = v.clone();
+  let index_bits: Vec<u8> = index.to_le_bytes().try_into().unwrap();
+  entry.extend(index_bits);
+  return entry;
+}
+
+fn db_make_length_key(key: &Vec<u8>) -> Vec<u8> {
+  return db_make_list_key(key, u32::MAX);
+}
+
+pub fn db_append(dbstore: &'static DBStore, batch: &mut rocksdb::WriteBatch, key: &Vec<u8> , value: &Vec<u8>, block_height: u32) {
+  let mut length_key = db_make_length_key(key);
+  let length: u32 = db_length_at_key(dbstore, &length_key);
+  let entry = db_annotate_value(value, block_height);
+
+  let entry_key: Vec<u8> = db_make_list_key(key, length);
+  batch.put(&entry_key, &entry);
+  let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
+  batch.put(&length_key, &new_length_bits);
+}
+
+
+fn db_length_at_key(dbstore: &'static DBStore, length_key: &Vec<u8>) -> u32 {
+  return match dbstore.db.get(length_key).unwrap() {
+    Some(v) => u32::from_le_bytes(v.try_into().unwrap()),
+    None => 0
+  }
+}
+
 fn index_single_block(
     dbstore: &'static DBStore,
     engine: Arc<&wasmtime::Engine>,
@@ -273,7 +310,6 @@ fn index_single_block(
     let mut store = Store::new(*engine, ());
     let mut linker = Linker::new(*engine);
     let block_clone = (*block).clone();
-//    let mut __host_len = Global::new(&mut store, GlobalType::new(ValType::I32, Mutability::Var), Val::I32(block.len().try_into().unwrap())).unwrap();
     let __host_len = block_clone.len();
     linker.func_wrap("env", "__host_len", move |mut caller: Caller<'_, ()>| -> i32 {
       return __host_len.try_into().unwrap();
@@ -292,20 +328,9 @@ fn index_single_block(
       let encoded_vec = Vec::<u8>::from(&data[(encoded as usize)..(((encoded as u32) + len) as usize)]);
       let mut batch = rocksdb::WriteBatch::default();
       Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().tuple_windows().inspect(|(k, v)| {
-        let mut val = u32::try_from(height).unwrap().to_le_bytes().to_vec();
-        let given_val = v.as_bytes().to_vec();
-        val.extend(&given_val);
-        let mut key = k.as_bytes().to_vec();
-        let length_key = u32::MAX.to_le_bytes().to_vec();
-        key.extend(&length_key);
-        let length = (match dbstore.db.get(&key).unwrap() {
-          Some(v) => u32::from_le_bytes(v.as_slice().try_into().unwrap()),
-          None => 0
-        });
-        key = k.as_bytes().to_vec();
-        let index_key = length.to_le_bytes().to_vec();
-        key.extend(&index_key);
-        batch.put(key, given_val);
+        let k_owned = <String as Clone>::clone(k).into_bytes().try_into().unwrap();
+        let v_owned = <String as Clone>::clone(v).into_bytes().try_into().unwrap();
+        db_append(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
       });
       (dbstore.db).write(batch).unwrap();
     });
@@ -314,9 +339,13 @@ fn index_single_block(
       let data = mem.data(&caller);
       let len = u32::from_le_bytes((data[((key - 4) as usize)..(key as usize)]).try_into().unwrap());
       let key_vec = Vec::<u8>::from(&data[(key as usize)..(((key as u32) + len) as usize)]);
-      let value_vec = (dbstore.db).get_cf((dbstore.db).cf_handle(WASMINDEX).unwrap(), &key_vec).unwrap();
-      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
-      mem.write(&mut caller, value.try_into().unwrap(), value_vec.unwrap().as_slice());
+      let length = db_length_at_key(dbstore, &key_vec);
+      if length != 0 {
+        let indexed_key = db_make_list_key(&key_vec, length - 1);
+        let mut value_vec = (dbstore.db).get(&indexed_key).unwrap().unwrap();
+        value_vec.truncate(value_vec.len().saturating_sub(4));
+        mem.write(&mut caller, value.try_into().unwrap(), value_vec.as_slice());
+      }
     });
     linker.func_wrap("env", "__get_len", move |mut caller: Caller<'_, ()>, key: i32| -> i32 {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();

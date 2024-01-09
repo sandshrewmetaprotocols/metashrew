@@ -61,7 +61,7 @@ pub fn run() -> Result<()> {
 }
 
 fn serve() -> Result<()> {
-    let config: Config = Config::from_args();
+    let config: &'static Config = Box::leak(Box::new(Config::from_args()));
     let metrics = Metrics::new(config.monitoring_addr)?;
 
     let (server_tx, server_rx) = unbounded();
@@ -83,7 +83,7 @@ fn serve() -> Result<()> {
         "step",
         metrics::default_duration_buckets(),
     );
-    let mut rpc = Rpc::new(&config, metrics)?;
+    let mut rpc = Rpc::new(config, metrics)?;
 
     let new_block_rx = rpc.new_block_notification();
     let mut peers = HashMap::<usize, Peer>::new();

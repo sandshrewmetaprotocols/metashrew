@@ -21,7 +21,7 @@ use crate::{
 
 /// Electrum protocol subscriptions' tracker
 pub struct Tracker {
-    index: Index,
+    pub index: Index,
     mempool: Mempool,
     metrics: Metrics,
     ignore_mempool: bool,

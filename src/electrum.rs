@@ -14,6 +14,7 @@ use std::fmt;
 use std::iter::FromIterator;
 use std::str::FromStr;
 
+use wasmtime::{Caller, Instance, MemoryType, SharedMemory, Engine, Linker, Module, Store, Mutability, GlobalType, Global, Val, ValType};
 use crate::{
     cache::Cache,
     config::{Config, ELECTRS_VERSION},
@@ -21,6 +22,7 @@ use crate::{
     merkle::Proof,
     metrics::{self, Histogram, Metrics},
     signals::Signal,
+    index::{setup_linker, setup_linker_view},
     status::ScriptHashStatus,
     tracker::Tracker,
     types::ScriptHash,
@@ -120,6 +122,7 @@ impl RpcError {
 
 /// Electrum RPC handler
 pub struct Rpc {
+    config: &'static Config,
     tracker: Tracker,
     cache: Cache,
     rpc_duration: Histogram,
@@ -131,7 +134,7 @@ pub struct Rpc {
 
 impl Rpc {
     /// Perform initial index sync (may take a while on first run).
-    pub fn new(config: &Config, metrics: Metrics) -> Result<Self> {
+    pub fn new(config: &'static Config, metrics: Metrics) -> Result<Self> {
         let rpc_duration = metrics.histogram_vec(
             "rpc_duration",
             "RPC duration (in seconds)",
@@ -144,6 +147,7 @@ impl Rpc {
         let daemon = Daemon::connect(config, signal.exit_flag(), tracker.metrics())?;
         let cache = Cache::new(tracker.metrics());
         Ok(Self {
+            config,
             tracker,
             cache,
             rpc_duration,
@@ -217,6 +221,19 @@ impl Rpc {
             Some(header) => header,
         };
         Ok(json!(serialize_hex(header)))
+    }
+    fn view(&self, (symbol, input_rlp): &(String, String)) -> Result<Value> {
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string()).unwrap();
+        let mut store = Store::new(&engine, ());
+        let mut linker = Linker::new(&engine);
+        setup_linker(&mut linker, self.tracker.index.store);
+        setup_linker_view(&mut linker);
+        let instance = linker.instantiate(&mut store, &module).unwrap();
+        instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128).unwrap();
+        let fnc = instance.get_typed_func::<(), ()>(&mut store, symbol.as_str()).unwrap();
+        let _ = fnc.call(&mut store, ()).unwrap();
+        return Ok(json!({ "success": 1 }));
     }
 
     fn block_headers(&self, (start_height, count): (usize, usize)) -> Result<Value> {
@@ -561,6 +578,7 @@ impl Rpc {
                 Params::TransactionGetMerkle(args) => self.transaction_get_merkle(args),
                 Params::TransactionFromPosition(args) => self.transaction_from_pos(*args),
                 Params::Version(args) => self.version(args),
+                Params::View(args) => self.view(args)
             };
             call.response(result)
         })
@@ -590,6 +608,7 @@ enum Params {
     TransactionGetMerkle((Txid, usize)),
     TransactionFromPosition((usize, usize, bool)),
     Version((String, VersionRequest)),
+    View((String, String))
 }
 
 impl Params {
@@ -612,6 +631,7 @@ impl Params {
                 Params::TransactionFromPosition(convert(params)?)
             }
             "mempool.get_fee_histogram" => Params::MempoolFeeHistogram,
+            "metashrew.view" => Params::View(convert(params)?),
             "server.banner" => Params::Banner,
             "server.donation_address" => Params::Donation,
             "server.features" => Params::Features,

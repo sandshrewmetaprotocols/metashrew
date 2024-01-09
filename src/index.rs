@@ -341,7 +341,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
     linker.func_wrap("env", "__host_len", move |mut caller: Caller<'_, ()>| -> i32 {
       return __host_len.try_into().unwrap();
     }).unwrap();
-    linker.func_wrap("env", "__load_block", move |mut caller: Caller<'_, ()>, data_start: i32| {
+    linker.func_wrap("env", "__load_input", move |mut caller: Caller<'_, ()>, data_start: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       let _ = mem.write(&mut caller, data_start.try_into().unwrap(), block_clone.as_slice());
     }).unwrap();
@@ -363,7 +363,7 @@ pub fn setup_linker_view(linker: &mut Linker<()>) {
     linker.func_wrap("env", "__host_len", move |mut caller: Caller<'_, ()>| -> i32 {
       return 0;
     }).unwrap();
-    linker.func_wrap("env", "__load_block", move |mut caller: Caller<'_, ()>, data_start: i32| {}).unwrap();
+    linker.func_wrap("env", "__load_input", move |mut caller: Caller<'_, ()>, data_start: i32| {}).unwrap();
     linker.func_wrap("env", "__flush", move |mut caller: Caller<'_, ()>, encoded: i32| {}).unwrap();
 }
 

@@ -8,6 +8,8 @@ use crossbeam_channel::Receiver;
 use rayon::prelude::*;
 use serde_derive::Deserialize;
 use serde_json::{self, json, Value};
+use rlp::{Rlp};
+use hex;
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::fmt;
@@ -22,7 +24,7 @@ use crate::{
     merkle::Proof,
     metrics::{self, Histogram, Metrics},
     signals::Signal,
-    index::{setup_linker, setup_linker_view},
+    index::{read_arraybuffer_as_vec, setup_linker, setup_linker_view},
     status::ScriptHashStatus,
     tracker::Tracker,
     types::ScriptHash,
@@ -227,13 +229,18 @@ impl Rpc {
         let module = wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string()).unwrap();
         let mut store = Store::new(&engine, ());
         let mut linker = Linker::new(&engine);
-        setup_linker(&mut linker, self.tracker.index.store);
+        let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
+        setup_linker(&mut linker, self.tracker.index.store, &input);
         setup_linker_view(&mut linker);
         let instance = linker.instantiate(&mut store, &module).unwrap();
         instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128).unwrap();
-        let fnc = instance.get_typed_func::<(), ()>(&mut store, symbol.as_str()).unwrap();
-        let _ = fnc.call(&mut store, ()).unwrap();
-        return Ok(json!({ "success": 1 }));
+        let fnc = instance.get_typed_func::<(), (i32)>(&mut store, symbol.as_str()).unwrap();
+        let result = fnc.call(&mut store, ()).unwrap();
+        let mem = instance.get_memory(&mut store, "memory").unwrap();
+        let data = mem.data(&mut store);
+        let encoded_vec = read_arraybuffer_as_vec(data, result);
+        let decoded: Vec<String> = Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().map(| v | hex::encode(<Vec<u8> as TryFrom<&[u8]>>::try_from(v.as_str().as_bytes()).unwrap())).collect();
+        return Ok(json!({ "result": decoded }));
     }
 
     fn block_headers(&self, (start_height, count): (usize, usize)) -> Result<Value> {

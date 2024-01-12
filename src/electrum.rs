@@ -239,8 +239,7 @@ impl Rpc {
         let mem = instance.get_memory(&mut store, "memory").unwrap();
         let data = mem.data(&mut store);
         let encoded_vec = read_arraybuffer_as_vec(data, result);
-        let decoded: Vec<String> = Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().map(| v | hex::encode(<Vec<u8> as TryFrom<&[u8]>>::try_from(v.as_str().as_bytes()).unwrap())).collect();
-        return Ok(json!({ "result": decoded }));
+        return Ok(json!({ "result": hex::encode(encoded_vec)  }));
     }
 
     fn block_headers(&self, (start_height, count): (usize, usize)) -> Result<Value> {

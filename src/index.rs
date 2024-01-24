@@ -318,6 +318,24 @@ pub fn setup_linker(linker: &mut Linker<()>, dbstore: &'static DBStore, input: &
       let bytes = read_arraybuffer_as_vec(data, data_start);
       println!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
     }).unwrap();
+    linker.func_wrap("env", "abort", |_: i32, _: i32, _: i32, _: i32| {
+      panic!("abort!");
+    }).unwrap();
+    
+}
+pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, height: usize) {
+    linker.func_wrap("env", "__flush", move |mut caller: Caller<'_, ()>, encoded: i32| {
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      let data = mem.data(&caller);
+      let encoded_vec = read_arraybuffer_as_vec(data, encoded);
+      let mut batch = rocksdb::WriteBatch::default();
+      let _ = Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().tuple_windows().inspect(|(k, v)| {
+        let k_owned = <String as Clone>::clone(k).into_bytes().try_into().unwrap();
+        let v_owned = <String as Clone>::clone(v).into_bytes().try_into().unwrap();
+        db_append(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
+      });
+      (dbstore.db).write(batch).unwrap();
+    }).unwrap();
     linker.func_wrap("env", "__get", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       let data = mem.data(&caller);
@@ -343,27 +361,46 @@ pub fn setup_linker(linker: &mut Linker<()>, dbstore: &'static DBStore, input: &
         return 0;
       }
     }).unwrap();
-    linker.func_wrap("env", "abort", |_: i32, _: i32, _: i32, _: i32| {
-      panic!("abort!");
-    }).unwrap();
-    
 }
-pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, height: usize) {
-    linker.func_wrap("env", "__flush", move |mut caller: Caller<'_, ()>, encoded: i32| {
+
+pub fn db_value_at_block(dbstore: &'static DBStore, key: &Vec<u8>, height: i32) -> Vec<u8> {
+  let length: i32 = db_length_at_key(dbstore, &key).try_into().unwrap();
+  let mut index: i32 = length - 1;
+  while index >= 0 {
+    let value: Vec<u8> = match dbstore.db.get(db_make_list_key(key, index.try_into().unwrap())).unwrap() {
+      Some(v) => v,
+      None => db_make_list_key(&Vec::<u8>::new(), 0)
+    };
+
+    let value_height: u32 = u32::from_le_bytes(value.as_slice()[(value.len() - 4)..].try_into().unwrap());
+    /*
+      Ok(v) => u32::from_le_bytes(v).try_into().unwrap(),
+      Err(e) => 0
+    };
+    */
+    if height >= value_height.try_into().unwrap() {
+      value.clone().truncate(value.len().saturating_sub(4));
+    }
+  }
+  return vec![];
+}
+
+pub fn setup_linker_view(linker: &mut Linker<()>, dbstore: &'static DBStore, height: i32) {
+    linker.func_wrap("env", "__flush", move |mut caller: Caller<'_, ()>, encoded: i32| {}).unwrap();
+    linker.func_wrap("env", "__get", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       let data = mem.data(&caller);
-      let encoded_vec = read_arraybuffer_as_vec(data, encoded);
-      let mut batch = rocksdb::WriteBatch::default();
-      let _ = Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().tuple_windows().inspect(|(k, v)| {
-        let k_owned = <String as Clone>::clone(k).into_bytes().try_into().unwrap();
-        let v_owned = <String as Clone>::clone(v).into_bytes().try_into().unwrap();
-        db_append(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
-      });
-      (dbstore.db).write(batch).unwrap();
+      let key_vec = read_arraybuffer_as_vec(data, key);
+      let value = db_value_at_block(dbstore, &key_vec, height);
+      let _ = mem.write(&mut caller, value.len(), value.as_slice());
     }).unwrap();
-}
-pub fn setup_linker_view(linker: &mut Linker<()>) {
-    linker.func_wrap("env", "__flush", move |mut caller: Caller<'_, ()>, encoded: i32| {}).unwrap();
+    linker.func_wrap("env", "__get_len", move |mut caller: Caller<'_, ()>, key: i32| -> i32 {
+      let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+      let data = mem.data(&caller);
+      let key_vec = read_arraybuffer_as_vec(data, key);
+      let value = db_value_at_block(dbstore, &key_vec, height);
+      return value.len().try_into().unwrap();
+    }).unwrap();
 }
 
 fn index_single_block(

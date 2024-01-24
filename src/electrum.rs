@@ -224,14 +224,21 @@ impl Rpc {
         };
         Ok(json!(serialize_hex(header)))
     }
-    fn view(&self, (symbol, input_rlp): &(String, String)) -> Result<Value> {
+    fn view(&self, (symbol, input_rlp, block_tag): &(String, String, String)) -> Result<Value> {
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string()).unwrap();
         let mut store = Store::new(&engine, ());
         let mut linker = Linker::new(&engine);
+        let height: i32 = match block_tag.parse() {
+          Ok(v) => v,
+          Err(e) => if block_tag == "latest" { self.tracker.chain().height().try_into().unwrap() } else { -1 }
+        };
+        if height < 0 {
+          return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
+        }
         let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
         setup_linker(&mut linker, self.tracker.index.store, &input);
-        setup_linker_view(&mut linker);
+        setup_linker_view(&mut linker, self.tracker.index.store, height);
         let instance = linker.instantiate(&mut store, &module).unwrap();
         instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128).unwrap();
         let fnc = instance.get_typed_func::<(), (i32)>(&mut store, symbol.as_str()).unwrap();
@@ -614,7 +621,7 @@ enum Params {
     TransactionGetMerkle((Txid, usize)),
     TransactionFromPosition((usize, usize, bool)),
     Version((String, VersionRequest)),
-    View((String, String))
+    View((String, String, String))
 }
 
 impl Params {

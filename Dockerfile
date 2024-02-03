@@ -13,4 +13,4 @@ COPY . .
 ENV ROCKSDB_INCLUDE_DIR=/usr/include
 ENV ROCKSDB_LIB_DIR=/usr/lib
 RUN cargo build
-CMD /build/electrs/target/debug/metashrew
+CMD ["bash", "/build/electrs/docker-entrypoint.sh"]

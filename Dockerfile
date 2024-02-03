@@ -7,18 +7,10 @@ RUN apt-get update -qqy
 RUN apt-get install -qqy librocksdb-dev curl
 
 ### Electrum Rust Server ###
-FROM base as electrs-build
 RUN apt-get install -qqy cargo clang cmake
-
-# Install electrs
 WORKDIR /build/electrs
 COPY . .
 ENV ROCKSDB_INCLUDE_DIR=/usr/include
 ENV ROCKSDB_LIB_DIR=/usr/lib
-RUN cargo install --locked --path .
-
-FROM base as result
-# Copy the binaries
-COPY --from=electrs-build /root/.cargo/bin/electrs /usr/bin/electrs
-
-WORKDIR /
+RUN cargo build
+CMD /build/electrs/target/debug/metashrew

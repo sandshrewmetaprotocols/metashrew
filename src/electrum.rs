@@ -237,7 +237,7 @@ impl Rpc {
           return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
         }
         let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
-        setup_linker(&mut linker, self.tracker.index.store, &input);
+        setup_linker(&mut linker, self.tracker.index.store, &input, height as u32);
         setup_linker_view(&mut linker, self.tracker.index.store, height);
         let instance = linker.instantiate(&mut store, &module).unwrap();
         instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128).unwrap();

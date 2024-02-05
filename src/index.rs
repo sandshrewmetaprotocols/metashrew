@@ -302,8 +302,9 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
 
   
 
-pub fn setup_linker(linker: &mut Linker<()>, dbstore: &'static DBStore, input: &Vec<u8>) {
-    let input_clone = input.clone();
+pub fn setup_linker(linker: &mut Linker<()>, dbstore: &'static DBStore, input: &Vec<u8>, height: u32) {
+    let mut input_clone: Vec<u8> = <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
+    input_clone.extend(input.clone());
     let __host_len = input_clone.len();
     linker.func_wrap("env", "__host_len", move |mut caller: Caller<'_, ()>| -> i32 {
       return __host_len.try_into().unwrap();
@@ -415,7 +416,7 @@ fn index_single_block(
 
     let mut store = Store::new(*engine, ());
     let mut linker = Linker::new(*engine);
-    setup_linker(&mut linker, dbstore, *block);
+    setup_linker(&mut linker, dbstore, *block, height as u32);
     setup_linker_indexer(&mut linker, dbstore, height);
     let instance = linker.instantiate(&mut store, &module).unwrap();
     {

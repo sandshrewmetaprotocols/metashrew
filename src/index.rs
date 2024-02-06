@@ -276,13 +276,11 @@ pub fn db_make_length_key(key: &Vec<u8>) -> Vec<u8> {
   return db_make_list_key(key, u32::MAX);
 }
 
-pub fn db_append(dbstore: &'static DBStore, batch: &mut rocksdb::WriteBatch, key: &Vec<u8> , value: &Vec<u8>, block_height: u32) {
+pub fn db_append(dbstore: &'static DBStore, batch: &mut rocksdb::WriteBatch, key: &Vec<u8> , value: &Vec<u8>) {
   let mut length_key = db_make_length_key(key);
   let length: u32 = db_length_at_key(dbstore, &length_key);
-  let entry = db_annotate_value(value, block_height);
-
   let entry_key: Vec<u8> = db_make_list_key(key, length);
-  batch.put(&entry_key, &entry);
+  batch.put(&entry_key, &value);
   let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
   batch.put(&length_key, &new_length_bits);
 }
@@ -324,16 +322,37 @@ pub fn setup_linker(linker: &mut Linker<()>, dbstore: &'static DBStore, input: &
     }).unwrap();
     
 }
+
+pub fn db_append_annotated(dbstore: &'static DBStore, batch: &mut rocksdb::WriteBatch, key: &Vec<u8> , value: &Vec<u8>, block_height: u32) {
+  let mut length_key = db_make_length_key(key);
+  let length: u32 = db_length_at_key(dbstore, &length_key);
+  let entry = db_annotate_value(value, block_height);
+
+  let entry_key: Vec<u8> = db_make_list_key(key, length);
+  batch.put(&entry_key, &entry);
+  let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
+  batch.put(&length_key, &new_length_bits);
+}
+
+pub fn db_create_empty_update_list(batch: &mut rocksdb::WriteBatch, height: u32){
+    let height_vec: Vec<u8> = height.to_le_bytes().try_into().unwrap();
+    let key: Vec<u8> = db_make_length_key(&db_make_updated_key(&height_vec));
+    let value_vec: Vec<u8> = (0 as u32).to_le_bytes().try_into().unwrap();
+    batch.put(&key, &value_vec);
+}
 pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, height: usize) {
     linker.func_wrap("env", "__flush", move |mut caller: Caller<'_, ()>, encoded: i32| {
       let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
       let data = mem.data(&caller);
       let encoded_vec = read_arraybuffer_as_vec(data, encoded);
       let mut batch = rocksdb::WriteBatch::default();
+      let _ = db_create_empty_update_list(&mut batch, height as u32);
       let _ = Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().tuple_windows().inspect(|(k, v)| {
         let k_owned = <String as Clone>::clone(k).into_bytes().try_into().unwrap();
         let v_owned = <String as Clone>::clone(v).into_bytes().try_into().unwrap();
-        db_append(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
+        db_append_annotated(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
+        let update_key: Vec<u8> = <Vec<u8> as TryFrom<[u8; 4]>>::try_from((height as u32).to_le_bytes()).unwrap();
+        db_append(dbstore, &mut batch, &update_key, &k_owned);
       });
       (dbstore.db).write(batch).unwrap();
     }).unwrap();
@@ -402,6 +421,27 @@ pub fn setup_linker_view(linker: &mut Linker<()>, dbstore: &'static DBStore, hei
       let value = db_value_at_block(dbstore, &key_vec, height);
       return value.len().try_into().unwrap();
     }).unwrap();
+}
+
+pub fn u32_to_vec(v: u32) -> Vec<u8> {
+  return v.to_le_bytes().try_into().unwrap();
+}
+
+pub fn check_latest_block_for_reorg(dbstore: &'static DBStore, height: u32) -> u32 {
+    match dbstore.db.get(db_make_length_key(&db_make_updated_key(&u32_to_vec(height as u32)))).unwrap() {
+        Some(v) => check_latest_block_for_reorg(dbstore, height + 1),
+        None => return height
+    }
+}
+pub fn db_make_updated_key(key: &Vec<u8>)-> Vec<u8>{
+    return key.clone();
+}
+
+pub fn reorg(dbstore: &'static DBStore, from: u32) {
+    let latest = check_latest_block_for_reorg(dbstore, from);
+    loop {
+        
+    }
 }
 
 fn index_single_block(

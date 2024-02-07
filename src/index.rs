@@ -11,6 +11,7 @@ use wasmtime_wasi::sync::WasiCtxBuilder;
 use itertools::Itertools;
 use hex;
 use electrs_rocksdb as rocksdb;
+use std::collections::HashSet;
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -393,6 +394,29 @@ pub fn db_set_length(dbstore: &'static DBStore, key: &Vec<u8>, length: u32) {
   dbstore.db.put(&length_key, &new_length_bits).unwrap();
 }
 
+pub fn db_updated_keys_for_block(dbstore: &'static DBStore, height: u32) -> HashSet<Vec<u8>> {
+  let key: Vec<u8> = db_make_length_key(&db_make_updated_key(&u32_to_vec(height)));
+  let length: i32 = (db_length_at_key(dbstore, &key) as i32);
+  let mut i: i32 = 0;
+  let mut set: HashSet<Vec<u8>> = HashSet::<Vec<u8>>::new();
+  while i < length {
+    set.insert(dbstore.db.get(&db_make_list_key(&key, i as u32)).unwrap().unwrap());
+    i = i + 1;
+  }
+  return set;
+}
+
+pub fn db_updated_keys_for_block_range(dbstore: &'static DBStore, from: u32, to: u32) -> HashSet<Vec<u8>> {
+  let mut i = from;
+  let mut result: HashSet<Vec<u8>> = HashSet::<Vec<u8>>::new();
+  while to >= i {
+    result.extend(db_updated_keys_for_block(dbstore, i));
+    i = i + 1;
+  }
+  return result;
+}
+
+
 pub fn db_rollback_key(dbstore: &'static DBStore, key: &Vec<u8>, to_block: u32) {
   let length: i32 = db_length_at_key(dbstore, &key).try_into().unwrap();
   let mut index: i32 = length - 1;
@@ -402,7 +426,7 @@ pub fn db_rollback_key(dbstore: &'static DBStore, key: &Vec<u8>, to_block: u32) 
     let _ = match dbstore.db.get(&list_key).unwrap() {
       Some(value) => {
         let value_height: u32 = u32::from_le_bytes(value.as_slice()[(value.len() - 4)..].try_into().unwrap());
-        if to_block < value_height.try_into().unwrap() {
+        if to_block <= value_height.try_into().unwrap() {
           dbstore.db.delete(&list_key).unwrap();
           end_length = end_length - 1;
         } else {
@@ -471,10 +495,11 @@ pub fn db_make_updated_key(key: &Vec<u8>)-> Vec<u8>{
     return key.clone();
 }
 
-pub fn reorg(dbstore: &'static DBStore, from: u32) {
-    let latest = check_latest_block_for_reorg(dbstore, from);
-    loop {
-        
+pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
+    let latest: u32 = check_latest_block_for_reorg(dbstore, from);
+    let set: HashSet<Vec<u8>> = db_updated_keys_for_block_range(dbstore, from, latest);
+    for key in set.iter() {
+      db_rollback_key(dbstore, &key, from);
     }
 }
 
@@ -493,10 +518,8 @@ fn index_single_block(
     setup_linker(&mut linker, dbstore, *block, height as u32);
     setup_linker_indexer(&mut linker, dbstore, height);
     let instance = linker.instantiate(&mut store, &module).unwrap();
-    {
-      instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128).unwrap();
-    }
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap();
+    handle_reorg(dbstore, height as u32);
 
     start.call(&mut store, ()).unwrap();
 }

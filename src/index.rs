@@ -383,6 +383,40 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
     }).unwrap();
 }
 
+pub fn db_set_length(dbstore: &'static DBStore, key: &Vec<u8>, length: u32) {
+  let mut length_key = db_make_length_key(key);
+  if length == 0 {
+    dbstore.db.delete(&length_key).unwrap();
+    return;
+  }
+  let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
+  dbstore.db.put(&length_key, &new_length_bits).unwrap();
+}
+
+pub fn db_rollback_key(dbstore: &'static DBStore, key: &Vec<u8>, to_block: u32) {
+  let length: i32 = db_length_at_key(dbstore, &key).try_into().unwrap();
+  let mut index: i32 = length - 1;
+  let mut end_length: i32 = length;
+  while index >= 0 {
+    let list_key = db_make_list_key(key, index.try_into().unwrap());
+    let _ = match dbstore.db.get(&list_key).unwrap() {
+      Some(value) => {
+        let value_height: u32 = u32::from_le_bytes(value.as_slice()[(value.len() - 4)..].try_into().unwrap());
+        if to_block < value_height.try_into().unwrap() {
+          dbstore.db.delete(&list_key).unwrap();
+          end_length = end_length - 1;
+        } else {
+          break;
+        }
+      },
+      None => { break; }
+    };
+  }
+  if end_length != length {
+    db_set_length(dbstore, key, end_length as u32);
+  }
+}
+
 pub fn db_value_at_block(dbstore: &'static DBStore, key: &Vec<u8>, height: i32) -> Vec<u8> {
   let length: i32 = db_length_at_key(dbstore, &key).try_into().unwrap();
   let mut index: i32 = length - 1;

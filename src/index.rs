@@ -5,7 +5,7 @@ use bitcoin_slices::{bsl, Visit, Visitor};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use wasmtime::{Caller, Instance, MemoryType, SharedMemory, Config, Engine, Linker, Module, Store, Mutability, GlobalType, Global, Val, ValType};
+use wasmtime::{Extern, Caller, Instance, Memory, MemoryType, SharedMemory, Config, Engine, Linker, Module, Store, Mutability, GlobalType, Global, Val, ValType};
 use rlp::{Rlp};
 use rlp;
 use wasmtime_wasi::sync::WasiCtxBuilder;
@@ -302,7 +302,7 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
 
   
 
-pub fn setup_linker(linker: &mut Linker<()>, dbstore: &'static DBStore, input: &Vec<u8>, height: u32) {
+pub fn setup_linker(linker: &mut Linker<()>, store: &mut Store<()>, dbstore: &'static DBStore, input: &Vec<u8>, height: u32) {
     let mut input_clone: Vec<u8> = <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
     input_clone.extend(input.clone());
     let __host_len = input_clone.len();
@@ -322,8 +322,8 @@ pub fn setup_linker(linker: &mut Linker<()>, dbstore: &'static DBStore, input: &
     linker.func_wrap("env", "abort", |_: i32, _: i32, _: i32, _: i32| {
       panic!("abort!");
     }).unwrap();
-    
 }
+
 
 pub fn db_append_annotated(dbstore: &'static DBStore, batch: &mut rocksdb::WriteBatch, key: &Vec<u8> , value: &Vec<u8>, block_height: u32) {
   let mut length_key = db_make_length_key(key);
@@ -517,12 +517,12 @@ fn index_single_block(
 
     let mut store = Store::new(*engine, ());
     let mut linker = Linker::new(*engine);
-    setup_linker(&mut linker, dbstore, *block, height as u32);
+    setup_linker(&mut linker, &mut store, dbstore, *block, height as u32);
     setup_linker_indexer(&mut linker, dbstore, height);
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap();
     handle_reorg(dbstore, height as u32);
-    instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  255).unwrap();
+    instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  16383).unwrap();
 
     start.call(&mut store, ()).unwrap();
 }

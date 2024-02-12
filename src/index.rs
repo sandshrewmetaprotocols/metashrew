@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{Caller, Instance, MemoryType, SharedMemory, Config, Engine, Linker, Module, Store, Mutability, GlobalType, Global, Val, ValType};
 use rlp::{Rlp};
+use rlp;
 use wasmtime_wasi::sync::WasiCtxBuilder;
 use itertools::Itertools;
 use hex;
@@ -348,9 +349,10 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
       let encoded_vec = read_arraybuffer_as_vec(data, encoded);
       let mut batch = rocksdb::WriteBatch::default();
       let _ = db_create_empty_update_list(&mut batch, height as u32);
-      let _ = Rlp::new(&encoded_vec).iter().map(| v | v.as_val().unwrap()).collect::<Vec<String>>().iter().tuple_windows().inspect(|(k, v)| {
-        let k_owned = <String as Clone>::clone(k).into_bytes().try_into().unwrap();
-        let v_owned = <String as Clone>::clone(v).into_bytes().try_into().unwrap();
+      let decoded: Vec<Vec<u8>> = rlp::decode_list(&encoded_vec);
+      decoded.iter().tuple_windows().inspect(|(k, v)| {
+        let k_owned = <Vec<u8> as Clone>::clone(k);
+        let v_owned = <Vec<u8> as Clone>::clone(v);
         db_append_annotated(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
         let update_key: Vec<u8> = <Vec<u8> as TryFrom<[u8; 4]>>::try_from((height as u32).to_le_bytes()).unwrap();
         db_append(dbstore, &mut batch, &update_key, &k_owned);
@@ -520,6 +522,7 @@ fn index_single_block(
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap();
     handle_reorg(dbstore, height as u32);
+    instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  255).unwrap();
 
     start.call(&mut store, ()).unwrap();
 }

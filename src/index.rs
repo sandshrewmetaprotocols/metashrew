@@ -522,7 +522,7 @@ fn index_single_block(
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let start = instance.get_typed_func::<(), ()>(&mut store, "_start").unwrap();
     handle_reorg(dbstore, height as u32);
-    instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  16383).unwrap();
+    instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  32767).unwrap();
 
     start.call(&mut store, ()).unwrap();
 }

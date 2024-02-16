@@ -525,4 +525,5 @@ fn index_single_block(
     instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  32767).unwrap();
 
     start.call(&mut store, ()).unwrap();
+    batch.tip_row = serialize(&block_hash).into_boxed_slice();
 }

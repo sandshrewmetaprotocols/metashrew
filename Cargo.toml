@@ -42,7 +42,7 @@ serde_json = "1.0"
 signal-hook = "0.3"
 tiny_http = { version = "0.12", optional = true }
 wasmtime = "15.0.1"
-wasmtime-wasi = "15.0.1"
+wasmtime-wasi = "17.0.1"
 
 [dependencies.electrs-rocksdb]
 version = "0.19.0-e3"

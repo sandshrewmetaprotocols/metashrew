@@ -2,6 +2,8 @@
 
 An Electrum Server fork with Bitcoin indexing logic swapped out with a minimalistic WASM runtime, with host bindings to get and set rocksdb key-value pairs, as well as convenient data structures.
 
+Metashrew was architected to reduce the problem of building a metaprotocol, or even a lower-level indexer, to architecting an executable that handles solely the logic of processing a single block. The executables follow a portable calling convention and are compatible with AssemblyScript, but can also, themselves, be written in C or Rust, or anything that builds to a WASM target.
+
 ## Install
 
 ```sh
@@ -74,3 +76,41 @@ function get(k: ArrayBuffer): ArrayBuffer {
   return result;
 }
 ```
+
+#### AssemblyScript compatibility
+
+For running an AssemblyScript program within a custom runtime, the AssemblyScript runtime can be included in your build but it will be necessary to implement a trivial
+
+`abort(): void`
+
+As a host function. In the Rust implementation of metashrew, it simply calls `panic!("abort");`
+
+If this host function is not included, a runtime will not run the AssemblyScript WASM, which expects it.
+
+## Database
+
+The rocksdb database built by a metashrew process is designed to be append-only, but this detail is abstracted for developers designing a program for metashrew. Under the hood, instead of overwriting a key-value pair, when the same key is written to by a host call from the WASM instance to the `__set` function, a list structure is appended to in the underlying database where the key is annotated by the position in the list maintained for that key, and the value is annotated with the block height at which the value was updated. In this way, it is trivial to rollback updates to the key-value store, by maintaining a list of touched keys for each new block, then in the event of a reorg, those keys can be procedurally rolled back to the block prior to the divergence in the chain, and index updates can be applied for the blocks which are now accepted as valid.
+
+Additionally, this append-only structure makes it possible to write view functions for the index that can run archived state, to check the state of the index at the desired block height.
+
+For specific implementation details, refer to `src/index.rs`
+
+## View Functions
+
+metashrew extends the electrs JSON-RPC (available over a TCP socket) with `metashrew.view`
+
+View functions can be included in the WASM program and exported under any name. It is expected that a view function implementation will use the same convention to read the host input as the `_start` function is expected to when it reads the block height and serialized block.
+
+View functions have the exact same runtime, except the `__flush` function MUST be a no-op, to ensure that the WASM program can be run in read-only mode without side-effects on the database.
+
+The parameters to the RPC call to invoke view functions follow the format:
+
+```js
+[functionName, inputAsHex, blockTag]
+```
+
+`blockTag` must be either the string `latest` or a block number, represented as hex.
+
+## Author
+
+

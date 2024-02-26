@@ -357,6 +357,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
         let update_key: Vec<u8> = <Vec<u8> as TryFrom<[u8; 4]>>::try_from((height as u32).to_le_bytes()).unwrap();
         db_append(dbstore, &mut batch, &update_key, &k_owned);
       });
+      debug!("saving {:?} k/v pairs for block {:?}", decoded.len() / 2, height);
       (dbstore.db).write(batch).unwrap();
     }).unwrap();
     linker.func_wrap("env", "__get", move |mut caller: Caller<'_, ()>, key: i32, value: i32| {

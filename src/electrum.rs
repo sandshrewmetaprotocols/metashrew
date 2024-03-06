@@ -242,6 +242,9 @@ impl Rpc {
         let instance = linker.instantiate(&mut store, &module).unwrap();
         instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128).unwrap();
         let fnc = instance.get_typed_func::<(), (i32)>(&mut store, symbol.as_str()).unwrap();
+        if self.config.view {
+          self.tracker.index.store.db.try_catch_up_with_primary().unwrap();
+        }
         let result = fnc.call(&mut store, ()).unwrap();
         let mem = instance.get_memory(&mut store, "memory").unwrap();
         let data = mem.data(&mut store);

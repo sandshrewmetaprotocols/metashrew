@@ -19,6 +19,12 @@ name = "timestamp"
 doc = "Prepend log lines with a timestamp"
 
 [[switch]]
+name = "view"
+abbr = "r"
+doc = "Open in view-only mode"
+default = false
+
+[[switch]]
 name = "auto_reindex"
 doc = "Automatically reindex the database if it's inconsistent or in old format"
 default = true

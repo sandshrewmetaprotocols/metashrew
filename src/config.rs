@@ -24,6 +24,12 @@ mod internal {
     include!(concat!(env!("OUT_DIR"), "/configure_me_config.rs"));
 }
 
+#[derive(Clone, Copy)]
+pub enum DogecoinNetwork {
+  Dogecoin,
+  Testnet,
+}
+
 /// A simple error type representing invalid UTF-8 input.
 pub struct InvalidUtf8(OsString);
 
@@ -91,32 +97,47 @@ impl ResolvAddr {
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum BitcoinCompatibleNetwork {
+  Bitcoin(Network),
+  Dogecoin(DogecoinNetwork),
+}
+
 /// This newtype implements `ParseArg` for `Network`.
-#[derive(Deserialize)]
-pub struct BitcoinNetwork(Network);
+    pub struct MetashrewNetwork(BitcoinCompatibleNetwork);
 
-impl Default for BitcoinNetwork {
-    fn default() -> Self {
-        BitcoinNetwork(Network::Bitcoin)
+    impl Default for MetashrewNetwork {
+        fn default() -> Self {
+            MetashrewNetwork(BitcoinCompatibleNetwork::Bitcoin(Network::Bitcoin))
+        }
     }
-}
 
-impl FromStr for BitcoinNetwork {
-    type Err = <Network as FromStr>::Err;
+    impl FromStr for MetashrewNetwork {
+        type Err = <Network as FromStr>::Err;
 
-    fn from_str(string: &str) -> std::result::Result<Self, Self::Err> {
-        Network::from_str(string).map(BitcoinNetwork)
+        fn from_str(string: &str) -> std::result::Result<Self, Self::Err> {
+            let result = Network::from_str(string);
+            return match result {
+              Ok(v) => Ok(MetashrewNetwork(BitcoinCompatibleNetwork::Bitcoin(v))),
+              Err(e) => match string {
+                  "dogecoin" => Ok(MetashrewNetwork(BitcoinCompatibleNetwork::Dogecoin(DogecoinNetwork::Dogecoin))),
+                  "dogecoin-testnet" => Ok(MetashrewNetwork(BitcoinCompatibleNetwork::Dogecoin(DogecoinNetwork::Testnet))),
+                  _ => Err(e)
+              }
+            }
+        }
     }
-}
 
-impl ::configure_me::parse_arg::ParseArgFromStr for BitcoinNetwork {
-    fn describe_type<W: fmt::Write>(mut writer: W) -> fmt::Result {
-        write!(writer, "either 'bitcoin', 'testnet', 'regtest' or 'signet'")
+
+
+    impl ::configure_me::parse_arg::ParseArgFromStr for MetashrewNetwork {
+        fn describe_type<W: fmt::Write>(mut writer: W) -> fmt::Result {
+            write!(writer, "either 'bitcoin', 'testnet', 'regtest', 'signet', 'dogecoin', 'dogecoin-testnet'")
+        }
     }
-}
 
-impl From<BitcoinNetwork> for Network {
-    fn from(network: BitcoinNetwork) -> Network {
+    impl From<MetashrewNetwork> for BitcoinCompatibleNetwork {
+        fn from(network: MetashrewNetwork) -> BitcoinCompatibleNetwork {
         network.0
     }
 }
@@ -125,7 +146,7 @@ impl From<BitcoinNetwork> for Network {
 #[derive(Debug)]
 pub struct Config {
     // See below for the documentation of each field:
-    pub network: Network,
+    pub network: BitcoinCompatibleNetwork,
     pub db_path: PathBuf,
     pub indexer: PathBuf,
     pub view: bool,
@@ -192,6 +213,31 @@ fn default_config_files() -> Vec<OsString> {
     files
 }
 
+impl fmt::Display for BitcoinCompatibleNetwork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+      return write!(f, "{}", match self {
+        BitcoinCompatibleNetwork::Bitcoin(v) => match v {
+          Network::Bitcoin => "bitcoin",
+          Network::Testnet => "testnet",
+          Network::Regtest => "regtest",
+          Network::Signet => "signet",
+          _ => "bitcoin"
+        },
+        BitcoinCompatibleNetwork::Dogecoin(v) => match v {
+          DogecoinNetwork::Dogecoin => "dogecoin",
+          DogecoinNetwork::Testnet => "dogecoin-testnet",
+          _ => "dogecoin"
+        }
+      });
+    }
+}
+impl fmt::Debug for BitcoinCompatibleNetwork {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    return <BitcoinCompatibleNetwork as fmt::Display>::fmt(self, f);
+  }
+}
+        
+
 impl Config {
     /// Parses args, env vars, config files and post-processes them
     pub fn from_args() -> Config {
@@ -201,60 +247,93 @@ impl Config {
             internal::Config::including_optional_config_files(default_config_files())
                 .unwrap_or_exit();
 
-        fn unsupported_network(network: Network) -> ! {
+        fn unsupported_network(network: BitcoinCompatibleNetwork) -> ! {
             eprintln!("Error: unsupported network: {}", network);
             std::process::exit(1);
         }
+        let network = MetashrewNetwork::from_str(config.network.unwrap().as_str()).unwrap().0;
 
-        let db_subdir = match config.network {
-            Network::Bitcoin => "bitcoin",
-            Network::Testnet => "testnet",
-            Network::Regtest => "regtest",
-            Network::Signet => "signet",
-            unsupported => unsupported_network(unsupported),
-        };
+        let db_subdir = network.to_string();
 
         config.db_dir.push(db_subdir);
 
-        let default_daemon_rpc_port = match config.network {
-            Network::Bitcoin => 8332,
-            Network::Testnet => 18332,
-            Network::Regtest => 18443,
-            Network::Signet => 38332,
+        let default_daemon_rpc_port = match network {
+            BitcoinCompatibleNetwork::Bitcoin(v) => match v {
+              Network::Bitcoin => 8332,
+              Network::Testnet => 18332,
+              Network::Regtest => 18443,
+              Network::Signet => 38332,
+              _ => 8332,
+            },
+            BitcoinCompatibleNetwork::Dogecoin(v) => match v {
+              DogecoinNetwork::Dogecoin => 22555,
+              DogecoinNetwork::Testnet => 44555,
+              _ => 22555,
+            },
             unsupported => unsupported_network(unsupported),
         };
-        let default_daemon_p2p_port = match config.network {
-            Network::Bitcoin => 8333,
-            Network::Testnet => 18333,
-            Network::Regtest => 18444,
-            Network::Signet => 38333,
+        let default_daemon_p2p_port = match network {
+            BitcoinCompatibleNetwork::Bitcoin(v) => match v {
+              Network::Bitcoin => 8333,
+              Network::Testnet => 18333,
+              Network::Regtest => 18444,
+              Network::Signet => 38333,
+              _ => 8333,
+            },
+            BitcoinCompatibleNetwork::Dogecoin(v) => match v {
+              DogecoinNetwork::Dogecoin => 22556,
+              DogecoinNetwork::Testnet => 44556,
+              _ => 22556,
+            },
             unsupported => unsupported_network(unsupported),
         };
-        let default_electrum_port = match config.network {
-            Network::Bitcoin => 50001,
-            Network::Testnet => 60001,
-            Network::Regtest => 60401,
-            Network::Signet => 60601,
+        let default_electrum_port = match network {
+            BitcoinCompatibleNetwork::Bitcoin(v) => match v {
+              Network::Bitcoin => 50001,
+              Network::Testnet => 60001,
+              Network::Regtest => 60401,
+              Network::Signet => 60601,
+              _ => 50001,
+            },
+            BitcoinCompatibleNetwork::Dogecoin(v) => match v {
+              DogecoinNetwork::Dogecoin => 60801,
+              DogecoinNetwork::Testnet => 61001,
+              _ => 60801,
+            },
             unsupported => unsupported_network(unsupported),
         };
-        let default_monitoring_port = match config.network {
-            Network::Bitcoin => 4224,
-            Network::Testnet => 14224,
-            Network::Regtest => 24224,
-            Network::Signet => 34224,
+        let default_monitoring_port = match network {
+            BitcoinCompatibleNetwork::Bitcoin(v) => match v {
+              Network::Bitcoin => 4224,
+              Network::Testnet => 14224,
+              Network::Regtest => 24224,
+              Network::Signet => 34224,
+              _ => 4224,
+            },
+            BitcoinCompatibleNetwork::Dogecoin(v) => match v {
+              DogecoinNetwork::Dogecoin => 44224,
+              DogecoinNetwork::Testnet => 46224,
+              _ => 44224,
+            },
             unsupported => unsupported_network(unsupported),
         };
 
-        let magic = match (config.network, config.signet_magic) {
-            (Network::Signet, Some(magic)) => magic.parse().unwrap_or_else(|error| {
-                eprintln!(
-                    "Error: signet magic '{}' is not a valid hex string: {}",
-                    magic, error
-                );
-                std::process::exit(1);
-            }),
-            (network, None) => network.magic(),
-            (_, Some(_)) => {
+        let magic = match (network) {
+            BitcoinCompatibleNetwork::Bitcoin(v) => match (v, config.signet_magic) {
+                (Network::Signet, Some(magic)) => magic.parse().unwrap_or_else(|error| {
+                    eprintln!(
+                        "Error: signet magic '{}' is not a valid hex string: {}",
+                        magic, error
+                    );
+                    std::process::exit(1);
+                }),
+                (network, None) => network.magic(),
+                (_, Some(_)) => {
+                    eprintln!("Error: signet magic only available on signet");
+                    std::process::exit(1);
+                 }
+            },
+            BitcoinCompatibleNetwork::Dogecoin(v) => {
                 eprintln!("Error: signet magic only available on signet");
                 std::process::exit(1);
             }
@@ -284,12 +363,20 @@ impl Config {
             ResolvAddr::resolve_or_exit,
         );
 
-        match config.network {
-            Network::Bitcoin => (),
-            Network::Testnet => config.daemon_dir.push("testnet3"),
-            Network::Regtest => config.daemon_dir.push("regtest"),
-            Network::Signet => config.daemon_dir.push("signet"),
-            unsupported => unsupported_network(unsupported),
+        match network {
+            BitcoinCompatibleNetwork::Bitcoin(v) => match v {
+              Network::Bitcoin => (),
+              Network::Testnet => config.daemon_dir.push("testnet3"),
+              Network::Regtest => config.daemon_dir.push("regtest"),
+              Network::Signet => config.daemon_dir.push("signet"),
+              _ => ()
+            },
+            BitcoinCompatibleNetwork::Dogecoin(v) => match v {
+              DogecoinNetwork::Dogecoin => (),
+              DogecoinNetwork::Testnet => config.daemon_dir.push("testnet"),
+              _ => ()
+            },
+            unsupported => unsupported_network(unsupported)
         }
 
         let daemon_dir = &config.daemon_dir;
@@ -335,7 +422,7 @@ impl Config {
         }
 
         let config = Config {
-            network: config.network,
+            network: network,
             db_path: config.db_dir,
             indexer: config.indexer,
             view: config.view,

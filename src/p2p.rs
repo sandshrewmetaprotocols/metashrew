@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::types::SerBlock;
 use crate::{
     chain::{Chain, NewHeader},
-    config::ELECTRS_VERSION,
+    config::{ELECTRS_VERSION, BitcoinCompatibleNetwork},
     metrics::{default_duration_buckets, default_size_buckets, Histogram, Metrics},
 };
 
@@ -136,7 +136,7 @@ impl Connection {
     }
 
     pub(crate) fn connect(
-        network: Network,
+        network: BitcoinCompatibleNetwork,
         address: SocketAddr,
         metrics: &Metrics,
         magic: Magic,

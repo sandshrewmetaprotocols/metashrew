@@ -68,10 +68,8 @@ doc = "JSONRPC authentication cookie file (default: ~/.bitcoin/.cookie)"
 
 [[param]]
 name = "network"
-type = "crate::config::BitcoinNetwork"
-convert_into = "::bitcoin::Network"
-doc = "Select Bitcoin network type ('bitcoin', 'testnet', 'regtest' or 'signet')"
-default = "Default::default()"
+type = "String"
+doc = "Select Bitcoin network type ('bitcoin', 'testnet', 'regtest', 'signet', 'dogecoin', 'dogecoin-testnet')"
 
 [[param]]
 name = "electrum_rpc_addr"

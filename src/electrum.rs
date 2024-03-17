@@ -5,29 +5,32 @@ use bitcoin::{
     BlockHash, Txid,
 };
 use crossbeam_channel::Receiver;
+use hex;
 use rayon::prelude::*;
+use rlp::Rlp;
 use serde_derive::Deserialize;
 use serde_json::{self, json, Value};
-use rlp::{Rlp};
-use hex;
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::fmt;
 use std::iter::FromIterator;
 use std::str::FromStr;
 
-use wasmtime::{Caller, Instance, MemoryType, SharedMemory, Engine, Linker, Module, Store, Mutability, GlobalType, Global, Val, ValType};
 use crate::{
     cache::Cache,
     config::{Config, ELECTRS_VERSION},
     daemon::{self, extract_bitcoind_error, Daemon},
+    index::{read_arraybuffer_as_vec, setup_linker, setup_linker_view},
     merkle::Proof,
     metrics::{self, Histogram, Metrics},
     signals::Signal,
-    index::{read_arraybuffer_as_vec, setup_linker, setup_linker_view},
     status::ScriptHashStatus,
     tracker::Tracker,
     types::ScriptHash,
+};
+use wasmtime::{
+    Caller, Engine, Global, GlobalType, Instance, Linker, MemoryType, Module, Mutability,
+    SharedMemory, Store, Val, ValType,
 };
 
 const PROTOCOL_VERSION: &str = "1.4";
@@ -226,24 +229,49 @@ impl Rpc {
     }
     fn view(&self, (symbol, input_rlp, block_tag): &(String, String, String)) -> Result<Value> {
         let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string()).unwrap();
+        let module =
+            wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string())
+                .unwrap();
         let mut store = Store::new(&engine, ());
         let mut linker = Linker::new(&engine);
         let height: i32 = match block_tag.parse() {
-          Ok(v) => v,
-          Err(e) => if block_tag == "latest" { self.tracker.chain().height().try_into().unwrap() } else { -1 }
+            Ok(v) => v,
+            Err(e) => {
+                if block_tag == "latest" {
+                    self.tracker.chain().height().try_into().unwrap()
+                } else {
+                    -1
+                }
+            }
         };
         if height < 0 {
-          return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
+            return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
         }
         let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
-        setup_linker(&mut linker, &mut store, self.tracker.index.store, &input, height as u32);
+        setup_linker(
+            &mut linker,
+            &mut store,
+            self.tracker.index.store,
+            &input,
+            height as u32,
+        );
         setup_linker_view(&mut linker, self.tracker.index.store, height);
         let instance = linker.instantiate(&mut store, &module).unwrap();
-        instance.get_memory(&mut store, "memory").unwrap().grow(&mut store,  128).unwrap();
-        let fnc = instance.get_typed_func::<(), (i32)>(&mut store, symbol.as_str()).unwrap();
+        instance
+            .get_memory(&mut store, "memory")
+            .unwrap()
+            .grow(&mut store, 128)
+            .unwrap();
+        let fnc = instance
+            .get_typed_func::<(), (i32)>(&mut store, symbol.as_str())
+            .unwrap();
         if self.config.view {
-          self.tracker.index.store.db.try_catch_up_with_primary().unwrap();
+            self.tracker
+                .index
+                .store
+                .db
+                .try_catch_up_with_primary()
+                .unwrap();
         }
         let result = fnc.call(&mut store, ()).unwrap();
         let mem = instance.get_memory(&mut store, "memory").unwrap();
@@ -594,7 +622,7 @@ impl Rpc {
                 Params::TransactionGetMerkle(args) => self.transaction_get_merkle(args),
                 Params::TransactionFromPosition(args) => self.transaction_from_pos(*args),
                 Params::Version(args) => self.version(args),
-                Params::View(args) => self.view(args)
+                Params::View(args) => self.view(args),
             };
             call.response(result)
         })
@@ -624,7 +652,7 @@ enum Params {
     TransactionGetMerkle((Txid, usize)),
     TransactionFromPosition((usize, usize, bool)),
     Version((String, VersionRequest)),
-    View((String, String, String))
+    View((String, String, String)),
 }
 
 impl Params {

@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use electrs_rocksdb as rocksdb;
 
+use rand::random;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use uuid::Uuid;
-use rand::{random};
 use tempdir::TempDir;
+use uuid::Uuid;
 
 pub(crate) type Row = Box<[u8]>;
 
@@ -131,8 +131,23 @@ impl DBStore {
             db_opts.set_db_log_dir(d);
         }
 
-        let db = if view { rocksdb::DB::open_as_secondary(&db_opts, path, TempDir::new(Uuid::from_u128(random::<u128>()).hyphenated().to_string().as_str()).unwrap().path())? } else { rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors())
-            .with_context(|| format!("failed to open DB: {}", path.display()))? };
+        let db = if view {
+            rocksdb::DB::open_as_secondary(
+                &db_opts,
+                path,
+                TempDir::new(
+                    Uuid::from_u128(random::<u128>())
+                        .hyphenated()
+                        .to_string()
+                        .as_str(),
+                )
+                .unwrap()
+                .path(),
+            )?
+        } else {
+            rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors())
+                .with_context(|| format!("failed to open DB: {}", path.display()))?
+        };
         let live_files = db.live_files()?;
         info!(
             "{:?}: {} SST files, {} GB, {} Grows",
@@ -157,7 +172,12 @@ impl DBStore {
     }
 
     /// Opens a new RocksDB at the specified location.
-    pub fn open(path: &Path, log_dir: Option<&Path>, auto_reindex: bool, view: bool) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        log_dir: Option<&Path>,
+        auto_reindex: bool,
+        view: bool,
+    ) -> Result<Self> {
         let mut store = Self::open_internal(path, log_dir, view)?;
         let config = store.get_config();
         debug!("DB {:?}", config);

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::types::SerBlock;
 use crate::{
     chain::{Chain, NewHeader},
-    config::{ELECTRS_VERSION, BitcoinCompatibleNetwork},
+    config::{BitcoinCompatibleNetwork, ELECTRS_VERSION},
     metrics::{default_duration_buckets, default_size_buckets, Histogram, Metrics},
 };
 

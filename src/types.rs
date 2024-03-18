@@ -154,12 +154,14 @@ impl TxidRow {
         Box::new(txid_prefix(&txid))
     }
 
+    /*
     pub(crate) fn row(txid: Txid, height: usize) -> HashPrefixRow {
         HashPrefixRow {
             prefix: txid_prefix(&txid),
             height: Height::try_from(height).expect("invalid height"),
         }
     }
+    */
 }
 
 // ***************************************************************************

@@ -1,21 +1,15 @@
 use anyhow::{Context, Result};
-use bitcoin::consensus::{deserialize, serialize, Decodable};
+use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::{BlockHash, OutPoint, Txid};
-use bitcoin_slices::{bsl, Visit, Visitor};
 use electrs_rocksdb as rocksdb;
-use hex;
 use itertools::Itertools;
 use rlp;
-use rlp::Rlp;
 use std::collections::HashSet;
-use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{
-    Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
-    Module, Mutability, SharedMemory, Store, Val, ValType,
+    Caller, Linker, Store
 };
-use wasmtime_wasi::sync::WasiCtxBuilder;
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -24,7 +18,7 @@ use crate::{
     metrics::{self, Gauge, Histogram, Metrics},
     signals::ExitFlag,
     types::{
-        bsl_txid, HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow,
+        HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow,
         TxidRow,
     },
 };
@@ -289,7 +283,7 @@ pub fn db_append(
     key: &Vec<u8>,
     value: &Vec<u8>,
 ) {
-    let mut length_key = db_make_length_key(key);
+    let length_key = db_make_length_key(key);
     let length: u32 = db_length_at_key(dbstore, &length_key);
     let entry_key: Vec<u8> = db_make_list_key(key, length);
     batch.put(&entry_key, &value);
@@ -315,8 +309,6 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
 
 pub fn setup_linker(
     linker: &mut Linker<()>,
-    store: &mut Store<()>,
-    dbstore: &'static DBStore,
     input: &Vec<u8>,
     height: u32,
 ) {
@@ -328,7 +320,7 @@ pub fn setup_linker(
         .func_wrap(
             "env",
             "__host_len",
-            move |mut caller: Caller<'_, ()>| -> i32 {
+            move |mut _caller: Caller<'_, ()>| -> i32 {
                 return __host_len.try_into().unwrap();
             },
         )
@@ -373,7 +365,7 @@ pub fn db_append_annotated(
     value: &Vec<u8>,
     block_height: u32,
 ) {
-    let mut length_key = db_make_length_key(key);
+    let length_key = db_make_length_key(key);
     let length: u32 = db_length_at_key(dbstore, &length_key);
     let entry = db_annotate_value(value, block_height);
 
@@ -401,7 +393,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
                 let mut batch = rocksdb::WriteBatch::default();
                 let _ = db_create_empty_update_list(&mut batch, height as u32);
                 let decoded: Vec<Vec<u8>> = rlp::decode_list(&encoded_vec);
-                decoded.iter().tuple_windows().inspect(|(k, v)| {
+                let _ = decoded.iter().tuple_windows().inspect(|(k, v)| {
                     let k_owned = <Vec<u8> as Clone>::clone(k);
                     let v_owned = <Vec<u8> as Clone>::clone(v);
                     db_append_annotated(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
@@ -459,7 +451,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
 }
 
 pub fn db_set_length(dbstore: &'static DBStore, key: &Vec<u8>, length: u32) {
-    let mut length_key = db_make_length_key(key);
+    let length_key = db_make_length_key(key);
     if length == 0 {
         dbstore.db.delete(&length_key).unwrap();
         return;
@@ -470,7 +462,7 @@ pub fn db_set_length(dbstore: &'static DBStore, key: &Vec<u8>, length: u32) {
 
 pub fn db_updated_keys_for_block(dbstore: &'static DBStore, height: u32) -> HashSet<Vec<u8>> {
     let key: Vec<u8> = db_make_length_key(&db_make_updated_key(&u32_to_vec(height)));
-    let length: i32 = (db_length_at_key(dbstore, &key) as i32);
+    let length: i32 = db_length_at_key(dbstore, &key) as i32;
     let mut i: i32 = 0;
     let mut set: HashSet<Vec<u8>> = HashSet::<Vec<u8>>::new();
     while i < length {
@@ -521,6 +513,7 @@ pub fn db_rollback_key(dbstore: &'static DBStore, key: &Vec<u8>, to_block: u32) 
                 break;
             }
         };
+        index -= 1;
     }
     if end_length != length {
         db_set_length(dbstore, key, end_length as u32);
@@ -542,14 +535,10 @@ pub fn db_value_at_block(dbstore: &'static DBStore, key: &Vec<u8>, height: i32) 
 
         let value_height: u32 =
             u32::from_le_bytes(value.as_slice()[(value.len() - 4)..].try_into().unwrap());
-        /*
-          Ok(v) => u32::from_le_bytes(v).try_into().unwrap(),
-          Err(e) => 0
-        };
-        */
         if height >= value_height.try_into().unwrap() {
             value.clone().truncate(value.len().saturating_sub(4));
         }
+        index -= 1;
     }
     return vec![];
 }
@@ -559,7 +548,7 @@ pub fn setup_linker_view(linker: &mut Linker<()>, dbstore: &'static DBStore, hei
         .func_wrap(
             "env",
             "__flush",
-            move |mut caller: Caller<'_, ()>, encoded: i32| {},
+            move |mut _caller: Caller<'_, ()>, _encoded: i32| {},
         )
         .unwrap();
     linker
@@ -570,8 +559,8 @@ pub fn setup_linker_view(linker: &mut Linker<()>, dbstore: &'static DBStore, hei
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let key_vec = read_arraybuffer_as_vec(data, key);
-                let value = db_value_at_block(dbstore, &key_vec, height);
-                let _ = mem.write(&mut caller, value.len(), value.as_slice());
+                let value_at_block = db_value_at_block(dbstore, &key_vec, height);
+                let _ = mem.write(&mut caller, value as usize, value_at_block.as_slice());
             },
         )
         .unwrap();
@@ -602,7 +591,7 @@ pub fn check_latest_block_for_reorg(dbstore: &'static DBStore, height: u32) -> u
         ))))
         .unwrap()
     {
-        Some(v) => check_latest_block_for_reorg(dbstore, height + 1),
+        Some(_v) => check_latest_block_for_reorg(dbstore, height + 1),
         None => return height,
     }
 }
@@ -629,7 +618,7 @@ fn index_single_block(
 ) {
     let mut store = Store::new(*engine, ());
     let mut linker = Linker::new(*engine);
-    setup_linker(&mut linker, &mut store, dbstore, *block, height as u32);
+    setup_linker(&mut linker, *block, height as u32);
     setup_linker_indexer(&mut linker, dbstore, height);
     let instance = linker.instantiate(&mut store, &module).unwrap();
     let start = instance

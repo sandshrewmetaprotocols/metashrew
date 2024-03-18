@@ -7,7 +7,6 @@ use bitcoin::{
 use crossbeam_channel::Receiver;
 use hex;
 use rayon::prelude::*;
-use rlp::Rlp;
 use serde_derive::Deserialize;
 use serde_json::{self, json, Value};
 
@@ -29,8 +28,7 @@ use crate::{
     types::ScriptHash,
 };
 use wasmtime::{
-    Caller, Engine, Global, GlobalType, Instance, Linker, MemoryType, Module, Mutability,
-    SharedMemory, Store, Val, ValType,
+    Linker, Store
 };
 
 const PROTOCOL_VERSION: &str = "1.4";
@@ -236,7 +234,7 @@ impl Rpc {
         let mut linker = Linker::new(&engine);
         let height: i32 = match block_tag.parse() {
             Ok(v) => v,
-            Err(e) => {
+            Err(_e) => {
                 if block_tag == "latest" {
                     self.tracker.chain().height().try_into().unwrap()
                 } else {
@@ -250,8 +248,6 @@ impl Rpc {
         let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
         setup_linker(
             &mut linker,
-            &mut store,
-            self.tracker.index.store,
             &input,
             height as u32,
         );
@@ -263,7 +259,7 @@ impl Rpc {
             .grow(&mut store, 128)
             .unwrap();
         let fnc = instance
-            .get_typed_func::<(), (i32)>(&mut store, symbol.as_str())
+            .get_typed_func::<(), i32>(&mut store, symbol.as_str())
             .unwrap();
         if self.config.view {
             self.tracker

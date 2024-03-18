@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use crate::config::BitcoinCompatibleNetwork;
+use crate::config::{BitcoinCompatibleNetwork, DogecoinNetwork};
 use bitcoin::blockdata::block::{Header as BlockHeader, Version};
-use bitcoin::hashes::{sha256d, Hash};
-use bitcoin::{pow::CompactTarget, Block, BlockHash, Network, TxMerkleNode};
+use bitcoin::hashes::{Hash};
+use bitcoin::{pow::CompactTarget, BlockHash, TxMerkleNode};
 use hex;
 
 /// A new header found, to be added to the chain at specific height
@@ -55,14 +55,14 @@ impl Chain {
                         let genesis_header = BlockHeader {
                           version: Version::ONE,
                           prev_blockhash: Hash::all_zeros(),
-                          merkle_root: TxMerkleNode::from_slice(hex::decode("5f7e779f7600f54e528686e91d5891f3ae226ee907f461692519e549105f521c").unwrap().as_slice()).unwrap().try_into().unwrap(),
-                          time: 1386474927,
+                          merkle_root: TxMerkleNode::from_slice(hex::decode("5b2a3f53f605d62c53e62932dac6925e3d74afa5a4b459745c36d42d0ed26a69").unwrap().as_slice()).unwrap().try_into().unwrap(),
+                          time: 1386325540,
                           bits: CompactTarget::from_consensus(0x1e0ffff0),
-                          nonce: 1417875456
+                          nonce: 99943
                         };
                         let genesis_hash = BlockHash::from_slice(
                             hex::decode(
-                                "82bc68038f6034c0596b6e313729793a887fded6e92a31fbdf70863f89d9bea2",
+                                "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691"
                             )
                             .unwrap()
                             .as_slice(),
@@ -78,13 +78,13 @@ impl Chain {
                             version: Version::ONE,
                             prev_blockhash: BlockHash::all_zeros(),
                             merkle_root: TxMerkleNode::from_slice(hex::decode("5b2a3f53f605d62c53e62932dac6925e3d74afa5a4b459745c36d42d0ed26a69").unwrap().as_slice()).unwrap().try_into().unwrap(),
-                            time: 1396428089,
+                            time: 1391503289,
                             bits: CompactTarget::from_consensus(0x1e0ffff0),
-                            nonce: 1417875456
+                            nonce: 997879
                         };
                         let genesis_hash = BlockHash::from_slice(
                             hex::decode(
-                                "82bc68038f6034c0596b6e313729793a887fded6e92a31fbdf70863f89d9bea2",
+                                "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e"
                             )
                             .unwrap()
                             .as_slice(),

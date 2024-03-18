@@ -14,7 +14,7 @@ use bitcoin::{
         message_network, Magic,
     },
     secp256k1::{self, rand::Rng},
-    Block, BlockHash, Network,
+    Block, BlockHash
 };
 use bitcoin_slices::{bsl, Parse};
 use crossbeam_channel::{bounded, select, Receiver, Sender};

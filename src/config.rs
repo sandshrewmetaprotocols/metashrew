@@ -233,8 +233,7 @@ impl fmt::Display for BitcoinCompatibleNetwork {
                 },
                 BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                     DogecoinNetwork::Dogecoin => "dogecoin",
-                    DogecoinNetwork::Testnet => "dogecoin-testnet",
-                    _ => "dogecoin",
+                    DogecoinNetwork::Testnet => "dogecoin-testnet"
                 },
             }
         );
@@ -255,10 +254,6 @@ impl Config {
             internal::Config::including_optional_config_files(default_config_files())
                 .unwrap_or_exit();
 
-        fn unsupported_network(network: BitcoinCompatibleNetwork) -> ! {
-            eprintln!("Error: unsupported network: {}", network);
-            std::process::exit(1);
-        }
         let network = MetashrewNetwork::from_str(config.network.unwrap().as_str())
             .unwrap()
             .0;
@@ -278,9 +273,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => 22555,
                 DogecoinNetwork::Testnet => 44555,
-                _ => 22555,
-            },
-            unsupported => unsupported_network(unsupported),
+            }
         };
         let default_daemon_p2p_port = match network {
             BitcoinCompatibleNetwork::Bitcoin(v) => match v {
@@ -293,9 +286,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => 22556,
                 DogecoinNetwork::Testnet => 44556,
-                _ => 22556,
-            },
-            unsupported => unsupported_network(unsupported),
+            }
         };
         let default_electrum_port = match network {
             BitcoinCompatibleNetwork::Bitcoin(v) => match v {
@@ -308,9 +299,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => 60801,
                 DogecoinNetwork::Testnet => 61001,
-                _ => 60801,
-            },
-            unsupported => unsupported_network(unsupported),
+            }
         };
         let default_monitoring_port = match network {
             BitcoinCompatibleNetwork::Bitcoin(v) => match v {
@@ -323,12 +312,10 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => 44224,
                 DogecoinNetwork::Testnet => 46224,
-                _ => 44224,
             },
-            unsupported => unsupported_network(unsupported),
         };
 
-        let magic = match (network) {
+        let magic = match network {
             BitcoinCompatibleNetwork::Bitcoin(v) => match (v, config.signet_magic) {
                 (Network::Signet, Some(magic)) => magic.parse().unwrap_or_else(|error| {
                     eprintln!(
@@ -343,7 +330,7 @@ impl Config {
                     std::process::exit(1);
                 }
             },
-            BitcoinCompatibleNetwork::Dogecoin(v) => {
+            BitcoinCompatibleNetwork::Dogecoin(_v) => {
                 eprintln!("Error: signet magic only available on signet");
                 std::process::exit(1);
             }
@@ -384,9 +371,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => (),
                 DogecoinNetwork::Testnet => config.daemon_dir.push("testnet"),
-                _ => (),
-            },
-            unsupported => unsupported_network(unsupported),
+            }
         }
 
         let daemon_dir = &config.daemon_dir;

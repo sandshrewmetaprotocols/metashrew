@@ -330,9 +330,11 @@ impl Config {
                     std::process::exit(1);
                 }
             },
-            BitcoinCompatibleNetwork::Dogecoin(_v) => {
-                eprintln!("Error: signet magic only available on signet");
-                std::process::exit(1);
+            BitcoinCompatibleNetwork::Dogecoin(v) => {
+                match v {
+                  DogecoinNetwork::Dogecoin => Magic::from_bytes([0xc0, 0xc0, 0xc0, 0xc0]),
+                  DogecoinNetwork::Testnet => Magic::from_bytes([0xfc, 0xc1, 0xb7, 0xdc]),
+                }
             }
         };
 

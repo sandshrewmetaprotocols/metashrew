@@ -1,7 +1,0 @@
-[workspace]
-
-members = [
-    "json",
-    "client",
-    "integration_test",
-]

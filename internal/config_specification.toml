@@ -57,8 +57,6 @@ name = "auth"
 type = "String"
 doc = "JSONRPC authentication ('USER:PASSWORD', default: use cookie file)"
 # Force the user to use config file in order to avoid password leaks
-argument = false
-env_var = false
 
 [[param]]
 name = "cookie_file"

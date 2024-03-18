@@ -71,7 +71,6 @@ fn rpc_poll(client: &mut Client, skip_block_download_wait: bool) -> PollResult {
     return match client.call("getblockchaininfo", &[]) {
         Ok(result) => {
             let info: GetBlockchainInfoResultPermissive = serde_json::from_value::<GetBlockchainInfoResultPermissive>(result).unwrap();
-            debug!("{}", "Got INFO");
             if skip_block_download_wait {
                 // bitcoind RPC is available, don't wait for block download to finish
                 return PollResult::Done(Ok(()));
@@ -171,7 +170,6 @@ impl Daemon {
             }
         }
 
-        /*
         let network_info = rpc.get_network_info()?;
         println!("version: {:?}", network_info);
         if network_info.version < 21_00_00 {
@@ -180,8 +178,8 @@ impl Daemon {
         if !network_info.network_active {
             bail!("metashrew requires active bitcoind p2p network");
         }
-        */
-/*        let info = rpc.get_blockchain_info()?;
+        /*
+        let info = rpc.get_blockchain_info()?;
         if info.pruned {
             bail!("metashrew requires non-pruned bitcoind node");
         }
@@ -206,14 +204,11 @@ impl Daemon {
 
     pub(crate) fn get_relay_fee(&self) -> Result<Amount> {
 
-        return Ok(Amount::from_btc(0.0001).unwrap());
-        /*
         Ok(self
             .rpc
             .get_network_info()
             .context("failed to get relay fee")?
             .relay_fee)
-            */
     }
 
     pub(crate) fn broadcast(&self, tx: &Transaction) -> Result<Txid> {

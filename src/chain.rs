@@ -1,10 +1,16 @@
-use std::collections::HashMap;
-use hex_lit::hex;
 use hex::decode;
+use hex_lit::hex;
+use std::collections::HashMap;
 
 use crate::config::{BitcoinCompatibleNetwork, DogecoinNetwork};
-use bitcoin::{blockdata::{transaction::{Transaction},block::{Block, Header as BlockHeader, Version}},consensus::{Decodable}};
-use bitcoin::hashes::{Hash};
+use bitcoin::hashes::Hash;
+use bitcoin::{
+    blockdata::{
+        block::{Block, Header as BlockHeader, Version},
+        transaction::Transaction,
+    },
+    consensus::Decodable,
+};
 use bitcoin::{pow::CompactTarget, BlockHash, TxMerkleNode};
 
 /// A new header found, to be added to the chain at specific height
@@ -53,24 +59,6 @@ impl Chain {
             BitcoinCompatibleNetwork::Dogecoin(v) => {
                 match v {
                     DogecoinNetwork::Dogecoin => {
-                        /*
-                        let genesis_header = BlockHeader {
-                          version: Version::ONE,
-                          prev_blockhash: Hash::all_zeros(),
-                          merkle_root: TxMerkleNode::from_slice(hex::decode("5b2a3f53f605d62c53e62932dac6925e3d74afa5a4b459745c36d42d0ed26a69").unwrap().as_slice()).unwrap().try_into().unwrap(),
-                          time: 1386325540,
-                          bits: CompactTarget::from_consensus(0x1e0ffff0),
-                          nonce: 99943
-                        };
-                        let genesis_hash = BlockHash::from_slice(
-                            hex::decode(
-                                "1a91e3dace36e2be3bf030a65679fe821aa1d6ef92e7c9902eb318182c355691"
-                            )
-                            .unwrap()
-                            .as_slice(),
-                        )
-                        .unwrap();
-                        */
                         let genesis_block = Block {
                           header: BlockHeader {
                           version: Version::ONE,
@@ -83,7 +71,6 @@ impl Chain {
                           txdata: vec![<Transaction as Decodable>::consensus_decode(&mut decode("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff1004ffff001d0104084e696e746f6e646fffffffff010058850c020000004341040184710fa689ad5023690c80f3a49c8f13f8d45b8c857fbcbc8bc4a8e4d3eb4b10f4d4604fa08dce601aaf0f470216fe1b51850b4acf21b179c45070ac7b03a9ac00000000").unwrap().as_slice()).unwrap()]
                         };
                         let genesis_hash = genesis_block.block_hash();
-                        debug!("genesis header {:?}", genesis_block.header);
                         Self {
                             headers: vec![(genesis_hash, genesis_block.header)],
                             heights: std::iter::once((genesis_hash, 0)).collect(),
@@ -100,7 +87,7 @@ impl Chain {
                         };
                         let genesis_hash = BlockHash::from_slice(
                             hex::decode(
-                                "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e"
+                                "bb0a78264637406b6360aad926284d544d7049f45189db5664f3c4d07350559e",
                             )
                             .unwrap()
                             .as_slice(),

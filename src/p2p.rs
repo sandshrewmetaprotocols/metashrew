@@ -341,7 +341,6 @@ fn build_version_message() -> NetworkMessage {
         start_height: 0,
         relay: false,
     });
-    debug!("{:?}", version);
     return version;
 }
 

@@ -381,6 +381,7 @@ impl Config {
             (None, None) => Auth::CookieFile(daemon_dir.join(".cookie")),
             (None, Some(cookie_file)) => Auth::CookieFile(cookie_file),
             (Some(auth), None) => {
+                println!("auth");
                 let parts: Vec<&str> = auth.splitn(2, ':').collect();
                 if parts.len() != 2 {
                     eprintln!("Error: auth cookie doesn't contain colon");

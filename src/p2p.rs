@@ -75,6 +75,7 @@ impl Connection {
             .context("failed to get new headers")?;
 
         debug!("got {} new headers", headers.len());
+        debug!("first {:?}", headers.first().unwrap());
         let prev_blockhash = match headers.first() {
             None => return Ok(vec![]),
             Some(first) => first.prev_blockhash,
@@ -329,8 +330,8 @@ fn build_version_message() -> NetworkMessage {
 
     let services = p2p::ServiceFlags::NONE;
 
-    NetworkMessage::Version(message_network::VersionMessage {
-        version: p2p::PROTOCOL_VERSION,
+    let version = NetworkMessage::Version(message_network::VersionMessage {
+        version: 70003,
         services,
         timestamp,
         receiver: address::Address::new(&addr, services),
@@ -339,7 +340,9 @@ fn build_version_message() -> NetworkMessage {
         user_agent: format!("/metashrew:{}/", ELECTRS_VERSION),
         start_height: 0,
         relay: false,
-    })
+    });
+    debug!("{:?}", version);
+    return version;
 }
 
 struct RawNetworkMessage {

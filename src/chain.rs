@@ -1,10 +1,11 @@
 use std::collections::HashMap;
+use hex_lit::hex;
+use hex::decode;
 
 use crate::config::{BitcoinCompatibleNetwork, DogecoinNetwork};
-use bitcoin::blockdata::block::{Header as BlockHeader, Version};
+use bitcoin::{blockdata::{transaction::{Transaction},block::{Block, Header as BlockHeader, Version}},consensus::{Decodable}};
 use bitcoin::hashes::{Hash};
 use bitcoin::{pow::CompactTarget, BlockHash, TxMerkleNode};
-use hex;
 
 /// A new header found, to be added to the chain at specific height
 pub(crate) struct NewHeader {
@@ -52,6 +53,7 @@ impl Chain {
             BitcoinCompatibleNetwork::Dogecoin(v) => {
                 match v {
                     DogecoinNetwork::Dogecoin => {
+                        /*
                         let genesis_header = BlockHeader {
                           version: Version::ONE,
                           prev_blockhash: Hash::all_zeros(),
@@ -68,8 +70,22 @@ impl Chain {
                             .as_slice(),
                         )
                         .unwrap();
+                        */
+                        let genesis_block = Block {
+                          header: BlockHeader {
+                          version: Version::ONE,
+                          prev_blockhash: Hash::all_zeros(),
+                          merkle_root: TxMerkleNode::from_slice(&hex!("696ad20e2dd4365c7459b4a4a5af743d5e92c6da3229e6532cd605f6533f2a5b")).unwrap().try_into().unwrap(),
+                          time: 1386325540,
+                          bits: CompactTarget::from_consensus(0x1e0ffff0),
+                          nonce: 99943,
+                          },
+                          txdata: vec![<Transaction as Decodable>::consensus_decode(&mut decode("01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff1004ffff001d0104084e696e746f6e646fffffffff010058850c020000004341040184710fa689ad5023690c80f3a49c8f13f8d45b8c857fbcbc8bc4a8e4d3eb4b10f4d4604fa08dce601aaf0f470216fe1b51850b4acf21b179c45070ac7b03a9ac00000000").unwrap().as_slice()).unwrap()]
+                        };
+                        let genesis_hash = genesis_block.block_hash();
+                        debug!("genesis header {:?}", genesis_block.header);
                         Self {
-                            headers: vec![(genesis_hash, genesis_header)],
+                            headers: vec![(genesis_hash, genesis_block.header)],
                             heights: std::iter::once((genesis_hash, 0)).collect(),
                         }
                     }

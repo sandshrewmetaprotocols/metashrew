@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 
-use bitcoin::{Amount, BlockHash, Transaction, Txid};
+use bitcoin::{Network, Amount, BlockHash, Transaction, Txid};
 use bitcoincore_rpc::{json, jsonrpc, Auth, Client, RpcApi};
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use std::fs::File;
 use std::io::Read;
@@ -24,9 +25,53 @@ enum PollResult {
     Retry,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct GetBlockchainInfoResultPermissive {
+    /// The current number of blocks processed in the server
+    pub blocks: u64,
+    /// The current number of headers we have validated
+    pub headers: u64,
+    /// The hash of the currently best block
+    #[serde(rename = "bestblockhash")]
+    pub best_block_hash: bitcoin::BlockHash,
+    /// The current difficulty
+    pub difficulty: f64,
+    /// Median time for the current best block
+    #[serde(rename = "mediantime")]
+    pub median_time: u64,
+    /// Estimate of verification progress [0..1]
+    #[serde(rename = "verificationprogress")]
+    pub verification_progress: f64,
+    /// Estimate of whether this node is in Initial Block Download mode
+    #[serde(rename = "initialblockdownload")]
+    pub initial_block_download: bool,
+    /// Total amount of work in active chain, in hexadecimal
+    #[serde(rename = "chainwork", with = "bitcoincore_rpc::json::serde_hex")]
+    pub chain_work: Vec<u8>,
+    /// The estimated size of the block and undo files on disk
+    pub size_on_disk: u64,
+    /// If the blocks are subject to pruning
+    pub pruned: bool,
+    /// Lowest-height complete block stored (only present if pruning is enabled)
+    #[serde(rename = "pruneheight")]
+    pub prune_height: Option<u64>,
+    /// Whether automatic pruning is enabled (only present if pruning is enabled)
+    pub automatic_pruning: Option<bool>,
+    /// The target size used by pruning (only present if automatic pruning is enabled)
+    pub prune_target_size: Option<u64>,
+    /// Status of softforks in progress
+    #[serde(default)]
+    pub softforks: serde_json::Value,
+    /// Any network and blockchain warnings.
+    pub warnings: String,
+}
+
 fn rpc_poll(client: &mut Client, skip_block_download_wait: bool) -> PollResult {
-    match client.get_blockchain_info() {
-        Ok(info) => {
+    debug!("{}", "JSON-RPC Poll");
+    return match client.call("getblockchaininfo", &[]) {
+        Ok(result) => {
+            let info: GetBlockchainInfoResultPermissive = serde_json::from_value::<GetBlockchainInfoResultPermissive>(result).unwrap();
+            debug!("{}", "Got INFO");
             if skip_block_download_wait {
                 // bitcoind RPC is available, don't wait for block download to finish
                 return PollResult::Done(Ok(()));
@@ -91,6 +136,7 @@ fn rpc_connect(config: &Config) -> Result<Client> {
             builder.auth(user, Some(pass))
         }
     };
+    debug!("{}", "building JSON-RPC client");
     Ok(Client::from_jsonrpc(jsonrpc::Client::with_transport(
         builder.build(),
     )))
@@ -108,6 +154,7 @@ impl Daemon {
         metrics: &Metrics,
     ) -> Result<Self> {
         let mut rpc = rpc_connect(config)?;
+        debug!("{}", "JSON-RPC connected");
 
         loop {
             exit_flag
@@ -124,17 +171,21 @@ impl Daemon {
             }
         }
 
+        /*
         let network_info = rpc.get_network_info()?;
+        println!("version: {:?}", network_info);
         if network_info.version < 21_00_00 {
             bail!("metashrew requires bitcoind 0.21+");
         }
         if !network_info.network_active {
             bail!("metashrew requires active bitcoind p2p network");
         }
-        let info = rpc.get_blockchain_info()?;
+        */
+/*        let info = rpc.get_blockchain_info()?;
         if info.pruned {
             bail!("metashrew requires non-pruned bitcoind node");
         }
+        */
 
         let p2p = Mutex::new(Connection::connect(
             config.network,
@@ -154,11 +205,15 @@ impl Daemon {
     }
 
     pub(crate) fn get_relay_fee(&self) -> Result<Amount> {
+
+        return Ok(Amount::from_btc(0.0001).unwrap());
+        /*
         Ok(self
             .rpc
             .get_network_info()
             .context("failed to get relay fee")?
             .relay_fee)
+            */
     }
 
     pub(crate) fn broadcast(&self, tx: &Transaction) -> Result<Txid> {

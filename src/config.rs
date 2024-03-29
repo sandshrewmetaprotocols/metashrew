@@ -233,7 +233,7 @@ impl fmt::Display for BitcoinCompatibleNetwork {
                 },
                 BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                     DogecoinNetwork::Dogecoin => "dogecoin",
-                    DogecoinNetwork::Testnet => "dogecoin-testnet"
+                    DogecoinNetwork::Testnet => "dogecoin-testnet",
                 },
             }
         );
@@ -273,7 +273,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => 22555,
                 DogecoinNetwork::Testnet => 44555,
-            }
+            },
         };
         let default_daemon_p2p_port = match network {
             BitcoinCompatibleNetwork::Bitcoin(v) => match v {
@@ -286,7 +286,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => 22556,
                 DogecoinNetwork::Testnet => 44556,
-            }
+            },
         };
         let default_electrum_port = match network {
             BitcoinCompatibleNetwork::Bitcoin(v) => match v {
@@ -299,7 +299,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => 60801,
                 DogecoinNetwork::Testnet => 61001,
-            }
+            },
         };
         let default_monitoring_port = match network {
             BitcoinCompatibleNetwork::Bitcoin(v) => match v {
@@ -330,12 +330,10 @@ impl Config {
                     std::process::exit(1);
                 }
             },
-            BitcoinCompatibleNetwork::Dogecoin(v) => {
-                match v {
-                  DogecoinNetwork::Dogecoin => Magic::from_bytes([0xc0, 0xc0, 0xc0, 0xc0]),
-                  DogecoinNetwork::Testnet => Magic::from_bytes([0xfc, 0xc1, 0xb7, 0xdc]),
-                }
-            }
+            BitcoinCompatibleNetwork::Dogecoin(v) => match v {
+                DogecoinNetwork::Dogecoin => Magic::from_bytes([0xc0, 0xc0, 0xc0, 0xc0]),
+                DogecoinNetwork::Testnet => Magic::from_bytes([0xfc, 0xc1, 0xb7, 0xdc]),
+            },
         };
 
         let daemon_rpc_addr: SocketAddr = config.daemon_rpc_addr.map_or(
@@ -373,7 +371,7 @@ impl Config {
             BitcoinCompatibleNetwork::Dogecoin(v) => match v {
                 DogecoinNetwork::Dogecoin => (),
                 DogecoinNetwork::Testnet => config.daemon_dir.push("testnet"),
-            }
+            },
         }
 
         let daemon_dir = &config.daemon_dir;

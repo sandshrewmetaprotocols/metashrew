@@ -7,9 +7,7 @@ use rlp;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use wasmtime::{
-    Caller, Linker, Store
-};
+use wasmtime::{Caller, Linker, Store};
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -18,8 +16,7 @@ use crate::{
     metrics::{self, Gauge, Histogram, Metrics},
     signals::ExitFlag,
     types::{
-        HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow,
-        TxidRow,
+        HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow, TxidRow,
     },
 };
 
@@ -307,11 +304,7 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     return Vec::<u8>::from(&data[(data_start as usize)..(((data_start as u32) + len) as usize)]);
 }
 
-pub fn setup_linker(
-    linker: &mut Linker<()>,
-    input: &Vec<u8>,
-    height: u32,
-) {
+pub fn setup_linker(linker: &mut Linker<()>, input: &Vec<u8>, height: u32) {
     let mut input_clone: Vec<u8> =
         <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
     input_clone.extend(input.clone());
@@ -393,7 +386,8 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
                 let mut batch = rocksdb::WriteBatch::default();
                 let _ = db_create_empty_update_list(&mut batch, height as u32);
                 let decoded: Vec<Vec<u8>> = rlp::decode_list(&encoded_vec);
-                let _ = decoded.iter().tuple_windows().inspect(|(k, v)| {
+
+                for (k, v) in decoded.iter().tuples() {
                     let k_owned = <Vec<u8> as Clone>::clone(k);
                     let v_owned = <Vec<u8> as Clone>::clone(v);
                     db_append_annotated(dbstore, &mut batch, &k_owned, &v_owned, height as u32);
@@ -401,7 +395,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
                         <Vec<u8> as TryFrom<[u8; 4]>>::try_from((height as u32).to_le_bytes())
                             .unwrap();
                     db_append(dbstore, &mut batch, &update_key, &k_owned);
-                });
+                }
                 debug!(
                     "saving {:?} k/v pairs for block {:?}",
                     decoded.len() / 2,
@@ -419,7 +413,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let key_vec = read_arraybuffer_as_vec(data, key);
-                let length = db_length_at_key(dbstore, &key_vec);
+                let length = db_length_at_key(dbstore, &db_make_length_key(&key_vec));
                 if length != 0 {
                     let indexed_key = db_make_list_key(&key_vec, length - 1);
                     let mut value_vec = (dbstore.db).get(&indexed_key).unwrap().unwrap();
@@ -437,7 +431,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let key_vec = read_arraybuffer_as_vec(data, key);
-                let length = db_length_at_key(dbstore, &key_vec);
+                let length = db_length_at_key(dbstore, &db_make_length_key(&key_vec));
                 if length != 0 {
                     let indexed_key = db_make_list_key(&key_vec, length - 1);
                     let value_vec = (dbstore.db).get(&indexed_key).unwrap().unwrap();

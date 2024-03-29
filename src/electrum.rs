@@ -27,9 +27,7 @@ use crate::{
     tracker::Tracker,
     types::ScriptHash,
 };
-use wasmtime::{
-    Linker, Store
-};
+use wasmtime::{Linker, Store};
 
 const PROTOCOL_VERSION: &str = "1.4";
 const UNKNOWN_FEE: isize = -1; // (allowed by Electrum protocol)
@@ -246,11 +244,7 @@ impl Rpc {
             return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
         }
         let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
-        setup_linker(
-            &mut linker,
-            &input,
-            height as u32,
-        );
+        setup_linker(&mut linker, &input, height as u32);
         setup_linker_view(&mut linker, self.tracker.index.store, height);
         let instance = linker.instantiate(&mut store, &module).unwrap();
         instance

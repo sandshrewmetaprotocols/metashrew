@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 
-use bitcoin::{Network, Amount, BlockHash, Transaction, Txid};
+use bitcoin::{Amount, BlockHash, Network, Transaction, Txid};
 use bitcoincore_rpc::{json, jsonrpc, Auth, Client, RpcApi};
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
@@ -70,7 +70,8 @@ fn rpc_poll(client: &mut Client, skip_block_download_wait: bool) -> PollResult {
     debug!("{}", "JSON-RPC Poll");
     return match client.call("getblockchaininfo", &[]) {
         Ok(result) => {
-            let info: GetBlockchainInfoResultPermissive = serde_json::from_value::<GetBlockchainInfoResultPermissive>(result).unwrap();
+            let info: GetBlockchainInfoResultPermissive =
+                serde_json::from_value::<GetBlockchainInfoResultPermissive>(result).unwrap();
             if skip_block_download_wait {
                 // bitcoind RPC is available, don't wait for block download to finish
                 return PollResult::Done(Ok(()));
@@ -99,7 +100,7 @@ fn rpc_poll(client: &mut Client, skip_block_download_wait: bool) -> PollResult {
             }
             PollResult::Done(Err(err).context("daemon not available"))
         }
-    }
+    };
 }
 
 fn read_cookie(path: &Path) -> Result<(String, String)> {
@@ -203,7 +204,6 @@ impl Daemon {
     }
 
     pub(crate) fn get_relay_fee(&self) -> Result<Amount> {
-
         Ok(self
             .rpc
             .get_network_info()

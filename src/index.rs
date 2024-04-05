@@ -103,7 +103,7 @@ pub struct Index {
 impl State {
   pub fn new() -> Self {
     State {
-      limits: StoreLimitsBuilder::new().memories(usize::MAX).instances(usize::MAX).build()
+      limits: StoreLimitsBuilder::new().memories(usize::MAX).tables(usize::MAX).instances(usize::MAX).build()
     }
   }
 }

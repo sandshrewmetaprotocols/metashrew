@@ -7,7 +7,7 @@ use rlp;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use wasmtime::{Caller, Linker, Store};
+use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -82,6 +82,9 @@ impl Stats {
     }
 }
 
+pub struct State {
+  limits: StoreLimits
+}
 /// Confirmed transactions' address index
 pub struct Index {
     pub store: &'static DBStore,
@@ -93,7 +96,16 @@ pub struct Index {
     flush_needed: bool,
     engine: wasmtime::Engine,
     module: wasmtime::Module,
-    wasmstore: Arc<Mutex<wasmtime::Store<()>>>,
+    wasmstore: Arc<Mutex<wasmtime::Store<State>>>, 
+}
+
+
+impl State {
+  pub fn new() -> Self {
+    State {
+      limits: StoreLimitsBuilder::new().memories(usize::MAX).instances(usize::MAX).build()
+    }
+  }
 }
 
 impl Index {
@@ -121,7 +133,10 @@ impl Index {
         stats.observe_db(store);
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
-        let wasmstore = Arc::new(Mutex::new(Store::<()>::new(&engine, ())));
+        let wasmstore = Arc::new(Mutex::new(Store::<State>::new(&engine, State::new())));
+        {
+          (*wasmstore.lock().unwrap()).limiter(|state| &mut state.limits)
+        }
         Ok(Index {
             store,
             batch_size,
@@ -307,7 +322,7 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     return Vec::<u8>::from(&data[(data_start as usize)..(((data_start as u32) + len) as usize)]);
 }
 
-pub fn setup_linker(linker: &mut Linker<()>, input: &Vec<u8>, height: u32) {
+pub fn setup_linker(linker: &mut Linker<State>, input: &Vec<u8>, height: u32) {
     let mut input_clone: Vec<u8> =
         <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
     input_clone.extend(input.clone());
@@ -316,7 +331,7 @@ pub fn setup_linker(linker: &mut Linker<()>, input: &Vec<u8>, height: u32) {
         .func_wrap(
             "env",
             "__host_len",
-            move |mut _caller: Caller<'_, ()>| -> i32 {
+            move |mut _caller: Caller<'_, State>| -> i32 {
                 return __host_len.try_into().unwrap();
             },
         )
@@ -325,7 +340,7 @@ pub fn setup_linker(linker: &mut Linker<()>, input: &Vec<u8>, height: u32) {
         .func_wrap(
             "env",
             "__load_input",
-            move |mut caller: Caller<'_, ()>, data_start: i32| {
+            move |mut caller: Caller<'_, State>, data_start: i32| {
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let _ = mem.write(
                     &mut caller,
@@ -339,7 +354,7 @@ pub fn setup_linker(linker: &mut Linker<()>, input: &Vec<u8>, height: u32) {
         .func_wrap(
             "env",
             "__log",
-            |mut caller: Caller<'_, ()>, data_start: i32| {
+            |mut caller: Caller<'_, State>, data_start: i32| {
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let bytes = read_arraybuffer_as_vec(data, data_start);
@@ -377,12 +392,12 @@ pub fn db_create_empty_update_list(batch: &mut rocksdb::WriteBatch, height: u32)
     let value_vec: Vec<u8> = (0 as u32).to_le_bytes().try_into().unwrap();
     batch.put(&key, &value_vec);
 }
-pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, height: usize) {
+pub fn setup_linker_indexer(linker: &mut Linker<State>, dbstore: &'static DBStore, height: usize) {
     linker
         .func_wrap(
             "env",
             "__flush",
-            move |mut caller: Caller<'_, ()>, encoded: i32| {
+            move |mut caller: Caller<'_, State>, encoded: i32| {
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let encoded_vec = read_arraybuffer_as_vec(data, encoded);
@@ -412,7 +427,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
         .func_wrap(
             "env",
             "__get",
-            move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
+            move |mut caller: Caller<'_, State>, key: i32, value: i32| {
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let key_vec = read_arraybuffer_as_vec(data, key);
@@ -430,7 +445,7 @@ pub fn setup_linker_indexer(linker: &mut Linker<()>, dbstore: &'static DBStore, 
         .func_wrap(
             "env",
             "__get_len",
-            move |mut caller: Caller<'_, ()>, key: i32| -> i32 {
+            move |mut caller: Caller<'_, State>, key: i32| -> i32 {
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let key_vec = read_arraybuffer_as_vec(data, key);
@@ -540,19 +555,19 @@ pub fn db_value_at_block(dbstore: &'static DBStore, key: &Vec<u8>, height: i32) 
     return vec![];
 }
 
-pub fn setup_linker_view(linker: &mut Linker<()>, dbstore: &'static DBStore, height: i32) {
+pub fn setup_linker_view(linker: &mut Linker<State>, dbstore: &'static DBStore, height: i32) {
     linker
         .func_wrap(
             "env",
             "__flush",
-            move |mut _caller: Caller<'_, ()>, _encoded: i32| {},
+            move |mut _caller: Caller<'_, State>, _encoded: i32| {},
         )
         .unwrap();
     linker
         .func_wrap(
             "env",
             "__get",
-            move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
+            move |mut caller: Caller<'_, State>, key: i32, value: i32| {
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let key_vec = read_arraybuffer_as_vec(data, key);
@@ -565,7 +580,7 @@ pub fn setup_linker_view(linker: &mut Linker<()>, dbstore: &'static DBStore, hei
         .func_wrap(
             "env",
             "__get_len",
-            move |mut caller: Caller<'_, ()>, key: i32| -> i32 {
+            move |mut caller: Caller<'_, State>, key: i32| -> i32 {
                 let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                 let data = mem.data(&caller);
                 let key_vec = read_arraybuffer_as_vec(data, key);
@@ -608,14 +623,14 @@ fn index_single_block(
     dbstore: &'static DBStore,
     engine: Arc<&wasmtime::Engine>,
     module: Arc<&wasmtime::Module>,
-    _store: Arc<Mutex<wasmtime::Store<()>>>,
+    _store: Arc<Mutex<wasmtime::Store<State>>>,
     block_hash: BlockHash,
     block: Arc<&SerBlock>,
     height: usize,
     batch: &mut WriteBatch,
 ) {
     let mut store = _store.lock().unwrap();
-    let mut linker = Linker::new(*engine);
+    let mut linker = Linker::<State>::new(*engine);
     setup_linker(&mut linker, *block, height as u32);
     setup_linker_indexer(&mut linker, dbstore, height);
     let instance = linker.instantiate(&mut *store, &module).unwrap();

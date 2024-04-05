@@ -19,7 +19,7 @@ use crate::{
     cache::Cache,
     config::{Config, ELECTRS_VERSION},
     daemon::{self, extract_bitcoind_error, Daemon},
-    index::{read_arraybuffer_as_vec, setup_linker, setup_linker_view},
+    index::{read_arraybuffer_as_vec, setup_linker, setup_linker_view, State},
     merkle::Proof,
     metrics::{self, Histogram, Metrics},
     signals::Signal,
@@ -228,8 +228,8 @@ impl Rpc {
         let module =
             wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string())
                 .unwrap();
-        let mut store = Store::new(&engine, ());
-        let mut linker = Linker::new(&engine);
+        let mut store = Store::new(&engine, State::new());
+        let mut linker = Linker::<State>::new(&engine);
         let height: i32 = match block_tag.parse() {
             Ok(v) => v,
             Err(_e) => {

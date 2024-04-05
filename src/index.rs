@@ -6,7 +6,7 @@ use itertools::Itertools;
 use rlp;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store};
 
 use crate::{
@@ -93,6 +93,7 @@ pub struct Index {
     flush_needed: bool,
     engine: wasmtime::Engine,
     module: wasmtime::Module,
+    wasmstore: Arc<Mutex<wasmtime::Store<()>>>,
 }
 
 impl Index {
@@ -120,6 +121,7 @@ impl Index {
         stats.observe_db(store);
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
+        let wasmstore = Arc::new(Mutex::new(Store::<()>::new(&engine, ())));
         Ok(Index {
             store,
             batch_size,
@@ -130,6 +132,7 @@ impl Index {
             flush_needed: false,
             engine,
             module,
+            wasmstore
         })
     }
 
@@ -228,7 +231,7 @@ impl Index {
             let blockarc = Arc::new(&block);
             self.stats.observe_duration("block", || {
                 index_single_block(
-                    self.store, engine, module, blockhash, blockarc, height, &mut batch,
+                    self.store, engine, module, self.wasmstore.clone(), blockhash, blockarc, height, &mut batch,
                 );
             });
             self.stats.height.set("tip", height as f64);
@@ -605,26 +608,29 @@ fn index_single_block(
     dbstore: &'static DBStore,
     engine: Arc<&wasmtime::Engine>,
     module: Arc<&wasmtime::Module>,
+    _store: Arc<Mutex<wasmtime::Store<()>>>,
     block_hash: BlockHash,
     block: Arc<&SerBlock>,
     height: usize,
     batch: &mut WriteBatch,
 ) {
-    let mut store = Store::new(*engine, ());
+    let mut store = _store.lock().unwrap();
     let mut linker = Linker::new(*engine);
     setup_linker(&mut linker, *block, height as u32);
     setup_linker_indexer(&mut linker, dbstore, height);
-    let instance = linker.instantiate(&mut store, &module).unwrap();
+    let instance = linker.instantiate(&mut *store, &module).unwrap();
     let start = instance
-        .get_typed_func::<(), ()>(&mut store, "_start")
+        .get_typed_func::<(), ()>(&mut *store, "_start")
         .unwrap();
     handle_reorg(dbstore, height as u32);
+/*
     instance
         .get_memory(&mut store, "memory")
         .unwrap()
         .grow(&mut store, 32767)
         .unwrap();
+*/
 
-    start.call(&mut store, ()).unwrap();
+    start.call(&mut *store, ()).unwrap();
     batch.tip_row = serialize(&block_hash).into_boxed_slice();
 }

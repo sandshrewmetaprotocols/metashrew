@@ -3,10 +3,11 @@ use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use electrs_rocksdb as rocksdb;
 use itertools::Itertools;
+use metashrew_runtime::runtime::{KeyValueStoreLike, MetashrewRuntime};
 use rlp;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store};
 
 use crate::{
@@ -82,6 +83,18 @@ impl Stats {
     }
 }
 
+// impl KeyValueStoreLike for DBStore {
+//     type Error = rocksdb::Error;
+//     type Batch = rocksdb::WriteBatchWithTransaction<false>;
+//     fn write(&self, batch: Self::Batch) -> Result<(), Self::Error> {
+//         self.db.write(batch)
+//     }
+
+//     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+//         self.db.get(key)
+//     }
+// }
+
 /// Confirmed transactions' address index
 pub struct Index {
     pub store: &'static DBStore,
@@ -91,8 +104,7 @@ pub struct Index {
     stats: Stats,
     is_ready: bool,
     flush_needed: bool,
-    engine: wasmtime::Engine,
-    module: wasmtime::Module,
+    runtime: Arc<Mutex<MetashrewRuntime<metashrew_runtime::runtime::DBStore>>>,
 }
 
 impl Index {
@@ -118,8 +130,12 @@ impl Index {
         let stats = Stats::new(metrics);
         stats.observe_chain(&chain);
         stats.observe_db(store);
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
+
+        let db_store = metashrew_runtime::runtime::DBStore::new(store.db);
+        let runtime = Arc::new(Mutex::new(
+            MetashrewRuntime::load(indexer, &db_store).unwrap(),
+        ));
+
         Ok(Index {
             store,
             batch_size,
@@ -128,8 +144,7 @@ impl Index {
             stats,
             is_ready: false,
             flush_needed: false,
-            engine,
-            module,
+            runtime: runtime,
         })
     }
 
@@ -223,13 +238,13 @@ impl Index {
 
         daemon.for_blocks(blockhashes, |blockhash, block| {
             let height = heights.next().expect("unexpected block");
-            let engine = Arc::new(&self.engine);
-            let module = Arc::new(&self.module);
+            // let engine = Arc::new(&self.engine);
+            // let module = Arc::new(&self.module);
             let blockarc = Arc::new(&block);
             self.stats.observe_duration("block", || {
-                index_single_block(
-                    self.store, engine, module, blockhash, blockarc, height, &mut batch,
-                );
+                // index_single_block(
+                //     self.store, engine, module, blockhash, blockarc, height, &mut batch,
+                // );
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -603,28 +618,26 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
 
 fn index_single_block(
     dbstore: &'static DBStore,
-    engine: Arc<&wasmtime::Engine>,
-    module: Arc<&wasmtime::Module>,
+    runtime: Arc<Mutex<MetashrewRuntime<metashrew_runtime::runtime::DBStore>>>,
+    // engine: Arc<&wasmtime::Engine>,
+    // module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
     block: Arc<&SerBlock>,
     height: usize,
     batch: &mut WriteBatch,
 ) {
-    let mut store = Store::new(*engine, ());
-    let mut linker = Linker::new(*engine);
-    setup_linker(&mut linker, *block, height as u32);
-    setup_linker_indexer(&mut linker, dbstore, height);
-    let instance = linker.instantiate(&mut store, &module).unwrap();
-    let start = instance
-        .get_typed_func::<(), ()>(&mut store, "_start")
-        .unwrap();
+    // let instance = runtime.lock().unwrap().instantiate();
+    // instance.start().call().unwrap();
+    // let start = instance
+    //     .get_typed_func::<(), ()>(&mut store, "_start")
+    //     .unwrap();
     handle_reorg(dbstore, height as u32);
-    instance
-        .get_memory(&mut store, "memory")
-        .unwrap()
-        .grow(&mut store, 32767)
-        .unwrap();
+    // instance
+    //     .get_memory(&mut store, "memory")
+    //     .unwrap()
+    //     .grow(&mut store, 32767)
+    //     .unwrap();
 
-    start.call(&mut store, ()).unwrap();
+    // start.call(&mut store, ()).unwrap();
     batch.tip_row = serialize(&block_hash).into_boxed_slice();
 }

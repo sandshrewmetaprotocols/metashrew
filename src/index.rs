@@ -3,7 +3,7 @@ use bitcoin::consensus::{deserialize, serialize};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use electrs_rocksdb as rocksdb;
 use itertools::Itertools;
-use metashrew_runtime::runtime::{KeyValueStoreLike, MetashrewRuntime};
+use metashrew_runtime::runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use rlp;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -83,58 +83,54 @@ impl Stats {
     }
 }
 
-// impl KeyValueStoreLike for DBStore {
-//     type Error = rocksdb::Error;
-//     type Batch = rocksdb::WriteBatchWithTransaction<false>;
-//     fn write(&self, batch: Self::Batch) -> Result<(), Self::Error> {
-//         self.db.write(batch)
-//     }
+impl KeyValueStoreLike for DBStore {
+    type Error = rocksdb::Error;
+    type Batch = rocksdb::WriteBatchWithTransaction<false>;
+    fn write(&self, batch: Self::Batch) -> Result<(), Self::Error> {
+        self.db.write(batch)
+    }
 
-//     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-//         self.db.get(key)
-//     }
-// }
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.db.get(key)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
+        self.db.delete(key)
+    }
+
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
+        self.db.put(key, value)
+    }
+}
 
 /// Confirmed transactions' address index
 pub struct Index {
-    pub store: &'static DBStore,
+    pub store: DBStore,
     batch_size: usize,
     lookup_limit: Option<usize>,
     chain: Chain,
     stats: Stats,
     is_ready: bool,
     flush_needed: bool,
-    runtime: Arc<Mutex<MetashrewRuntime<metashrew_runtime::runtime::DBStore>>>,
+    runtime: Arc<Mutex<MetashrewRuntime<DBStore>>>,
 }
 
 impl Index {
     pub(crate) fn load(
         indexer: PathBuf,
-        store: &'static DBStore,
+        store: DBStore,
         mut chain: Chain,
         metrics: &Metrics,
         batch_size: usize,
         lookup_limit: Option<usize>,
         reindex_last_blocks: usize,
     ) -> Result<Self> {
-        if let Some(row) = store.get_tip() {
-            let tip = deserialize(&row).expect("invalid tip");
-            let headers = store
-                .read_headers()
-                .into_iter()
-                .map(|row| HeaderRow::from_db_row(&row).header)
-                .collect();
-            chain.load(headers, tip);
-            chain.drop_last_headers(reindex_last_blocks);
-        };
         let stats = Stats::new(metrics);
         stats.observe_chain(&chain);
-        stats.observe_db(store);
+        stats.observe_db(&store);
 
-        let db_store = metashrew_runtime::runtime::DBStore::new(store.db);
-        let runtime = Arc::new(Mutex::new(
-            MetashrewRuntime::load(indexer, &db_store).unwrap(),
-        ));
+        let _store = Arc::new(store);
+        let runtime = Arc::new(Mutex::new(MetashrewRuntime::load(indexer, _store).unwrap()));
 
         Ok(Index {
             store,
@@ -144,7 +140,7 @@ impl Index {
             stats,
             is_ready: false,
             flush_needed: false,
-            runtime: runtime,
+            runtime,
         })
     }
 
@@ -618,7 +614,7 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
 
 fn index_single_block(
     dbstore: &'static DBStore,
-    runtime: Arc<Mutex<MetashrewRuntime<metashrew_runtime::runtime::DBStore>>>,
+    runtime: Arc<Mutex<MetashrewRuntime<DBStore>>>,
     // engine: Arc<&wasmtime::Engine>,
     // module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,

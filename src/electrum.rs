@@ -14,6 +14,7 @@ use std::collections::{hash_map::Entry, HashMap};
 use std::fmt;
 use std::iter::FromIterator;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use crate::{
     cache::Cache,
@@ -244,8 +245,10 @@ impl Rpc {
             return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
         }
         let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
+
+        let _store = Arc::new(self.tracker.index.store);
         setup_linker(&mut linker, &input, height as u32);
-        setup_linker_view(&mut linker, self.tracker.index.store, height);
+        setup_linker_view(&mut linker, _store, height);
         let instance = linker.instantiate(&mut store, &module).unwrap();
         instance
             .get_memory(&mut store, "memory")

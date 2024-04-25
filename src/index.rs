@@ -105,7 +105,7 @@ impl KeyValueStoreLike for DBStore {
 
 /// Confirmed transactions' address index
 pub struct Index {
-    pub store: DBStore,
+    pub store: Arc<Mutex<DBStore>>,
     batch_size: usize,
     lookup_limit: Option<usize>,
     chain: Chain,
@@ -129,11 +129,18 @@ impl Index {
         stats.observe_chain(&chain);
         stats.observe_db(&store);
 
-        let _store = Arc::new(store);
-        let runtime = Arc::new(Mutex::new(MetashrewRuntime::load(indexer, _store).unwrap()));
+        /*
+            goal is to use let store = Arc::new(Mutex::new(store))
+            and pass that same counted ref throught the application
+        */
+        let db_store = Arc::new(Mutex::new(store));
+        // let _store = Arc::new(store);
+        let runtime = Arc::new(Mutex::new(
+            MetashrewRuntime::load(indexer, Arc::clone(db_store)).unwrap(),
+        ));
 
         Ok(Index {
-            store,
+            store: db_store,
             batch_size,
             lookup_limit,
             chain,
@@ -260,6 +267,50 @@ impl Index {
 
     pub(crate) fn is_ready(&self) -> bool {
         self.is_ready
+    }
+
+    pub fn setup_linker_view(
+        &'static self,
+        linker: &mut Linker<()>,
+        dbstore: &'static DBStore,
+        height: i32,
+    ) {
+        // TODO: fix height
+        let height = *self.runtime.height.lock().unwrap();
+        let store = *self.store.lock().unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "__flush",
+                move |mut _caller: Caller<'_, ()>, _encoded: i32| {},
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "__get",
+                move |mut caller: Caller<'_, ()>, key: i32, value: i32| {
+                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let data = mem.data(&caller);
+                    let key_vec = read_arraybuffer_as_vec(data, key);
+                    let value_at_block = db_value_at_block(dbstore, &key_vec, height);
+                    let _ = mem.write(&mut caller, value as usize, value_at_block.as_slice());
+                },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "__get_len",
+                move |mut caller: Caller<'_, ()>, key: i32| -> i32 {
+                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let data = mem.data(&caller);
+                    let key_vec = read_arraybuffer_as_vec(data, key);
+                    let value = db_value_at_block(dbstore, &key_vec, height);
+                    return value.len().try_into().unwrap();
+                },
+            )
+            .unwrap();
     }
 }
 
@@ -612,28 +663,28 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
     }
 }
 
-fn index_single_block(
-    dbstore: &'static DBStore,
-    runtime: Arc<Mutex<MetashrewRuntime<DBStore>>>,
-    // engine: Arc<&wasmtime::Engine>,
-    // module: Arc<&wasmtime::Module>,
-    block_hash: BlockHash,
-    block: Arc<&SerBlock>,
-    height: usize,
-    batch: &mut WriteBatch,
-) {
-    // let instance = runtime.lock().unwrap().instantiate();
-    // instance.start().call().unwrap();
-    // let start = instance
-    //     .get_typed_func::<(), ()>(&mut store, "_start")
-    //     .unwrap();
-    handle_reorg(dbstore, height as u32);
-    // instance
-    //     .get_memory(&mut store, "memory")
-    //     .unwrap()
-    //     .grow(&mut store, 32767)
-    //     .unwrap();
+// fn index_single_block(
+//     dbstore: &'static DBStore,
+//     runtime: Arc<Mutex<MetashrewRuntime<DBStore>>>,
+//     // engine: Arc<&wasmtime::Engine>,
+//     // module: Arc<&wasmtime::Module>,
+//     block_hash: BlockHash,
+//     block: Arc<&SerBlock>,
+//     height: usize,
+//     batch: &mut WriteBatch,
+// ) {
+//     // let instance = runtime.lock().unwrap().instantiate();
+//     // instance.start().call().unwrap();
+//     // let start = instance
+//     //     .get_typed_func::<(), ()>(&mut store, "_start")
+//     //     .unwrap();
+//     handle_reorg(dbstore, height as u32);
+//     // instance
+//     //     .get_memory(&mut store, "memory")
+//     //     .unwrap()
+//     //     .grow(&mut store, 32767)
+//     //     .unwrap();
 
-    // start.call(&mut store, ()).unwrap();
-    batch.tip_row = serialize(&block_hash).into_boxed_slice();
-}
+//     // start.call(&mut store, ()).unwrap();
+//     batch.tip_row = serialize(&block_hash).into_boxed_slice();
+// }

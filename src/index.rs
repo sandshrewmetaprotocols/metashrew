@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{Caller, Linker, Store};
 
+use metashrew_runtime::{RocksDBBatch, KeyValueStoreLike, MetashrewRuntime, BatchLike};
+
 use crate::{
     chain::{Chain, NewHeader},
     daemon::Daemon,
@@ -82,6 +84,25 @@ impl Stats {
     }
 }
 
+pub RocksDBRuntimeAdapter(&'static DBStore);
+
+impl KeyValueStoreLike for RocksDBRuntimeAdapter {
+  type Batch = RocksDBBatch;
+  type Error: std::fmt::Debug;
+  fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
+    self.0.write(batch.0)
+  }
+  fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+    self.0.get(key)
+  }
+  fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
+    self.0.delete(key);
+  }
+  fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error> where K: AsRef<[u8]>, V: AsRef<[u8]> {
+    self.0.put(key, value)
+  } 
+}
+
 /// Confirmed transactions' address index
 pub struct Index {
     pub store: &'static DBStore,
@@ -89,6 +110,7 @@ pub struct Index {
     lookup_limit: Option<usize>,
     chain: Chain,
     stats: Stats,
+    runtime: &'static metashrew_runtime::MetashrewRuntime,
     is_ready: bool,
     flush_needed: bool,
     engine: wasmtime::Engine,
@@ -603,7 +625,7 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
 
 fn index_single_block(
     dbstore: &'static DBStore,
-    engine: Arc<&wasmtime::Engine>,
+    engine: Arc<metashrew_runtime::
     module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
     block: Arc<&SerBlock>,

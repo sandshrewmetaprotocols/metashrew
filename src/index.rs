@@ -88,7 +88,7 @@ pub struct RocksDBRuntimeAdapter(&'static DBStore);
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
-    type Error: std::fmt::Debug;
+    type Error = rocksdb::Error;
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
         self.0.write(batch.0);
         Ok(())
@@ -116,7 +116,7 @@ pub struct Index {
     lookup_limit: Option<usize>,
     chain: Chain,
     stats: Stats,
-    runtime: &'static metashrew_runtime::MetashrewRuntime,
+    runtime: &'static metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
     is_ready: bool,
     flush_needed: bool,
     engine: wasmtime::Engine,

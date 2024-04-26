@@ -698,6 +698,7 @@ dependencies = [
  "glob",
  "libc",
  "libz-sys",
+ "lz4-sys",
  "zstd-sys",
 ]
 
@@ -1211,6 +1212,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
 
 [[package]]
+name = "lz4-sys"
+version = "1.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57d27b317e207b10f69f5e75494119e391a96f48861ae870d1da6edac98ca900"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
 name = "mach"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1268,6 +1279,7 @@ dependencies = [
  "hex_lit",
  "itertools 0.12.0",
  "log",
+ "metashrew-runtime",
  "parking_lot",
  "prometheus",
  "rand 0.8.5",
@@ -1283,6 +1295,28 @@ dependencies = [
  "uuid",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "metashrew-runtime"
+version = "0.1.0"
+source = "git+https://github.com/sandshrewmetaprotocols/metashrew-runtime#dfcc551de5e5bde30a12c6eae0bc20ee273279a1"
+dependencies = [
+ "anyhow",
+ "bitcoin",
+ "bitcoin_slices",
+ "bitcoincore-rpc",
+ "crossbeam-channel",
+ "electrs-rocksdb",
+ "itertools 0.12.0",
+ "log",
+ "rayon",
+ "rlp",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "tempdir",
+ "wasmtime",
 ]
 
 [[package]]

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use wasmtime::{Caller, Linker, Store};
 
-use metashrew_runtime::{RocksDBBatch, KeyValueStoreLike, MetashrewRuntime, BatchLike};
+use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime, RocksDBBatch};
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -84,23 +84,29 @@ impl Stats {
     }
 }
 
-pub RocksDBRuntimeAdapter(&'static DBStore);
+pub struct RocksDBRuntimeAdapter(&'static DBStore);
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
-  type Batch = RocksDBBatch;
-  type Error: std::fmt::Debug;
-  fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-    self.0.write(batch.0)
-  }
-  fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-    self.0.get(key)
-  }
-  fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
-    self.0.delete(key);
-  }
-  fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error> where K: AsRef<[u8]>, V: AsRef<[u8]> {
-    self.0.put(key, value)
-  } 
+    type Batch = RocksDBBatch;
+    type Error: std::fmt::Debug;
+    fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
+        self.0.write(batch.0);
+        Ok(())
+    }
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+        self.0.get(key)
+    }
+    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
+        self.0.delete(key);
+        Ok(())
+    }
+    fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.0.put(key, value)
+    }
 }
 
 /// Confirmed transactions' address index
@@ -142,12 +148,14 @@ impl Index {
         stats.observe_db(store);
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
+        let runtime = &metashrew_runtime::MetashrewRuntime::load(indexer, store).unwrap();
         Ok(Index {
             store,
             batch_size,
             lookup_limit,
             chain,
             stats,
+            runtime,
             is_ready: false,
             flush_needed: false,
             engine,
@@ -625,7 +633,7 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
 
 fn index_single_block(
     dbstore: &'static DBStore,
-    engine: Arc<metashrew_runtime::
+    engine: Arc<metashrew_runtime::MetashrewRuntime>,
     module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
     block: Arc<&SerBlock>,

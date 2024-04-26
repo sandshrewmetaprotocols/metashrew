@@ -258,11 +258,9 @@ impl Index {
             let height = heights.next().expect("unexpected block");
             let engine = Arc::new(&self.engine);
             let module = Arc::new(&self.module);
-            let blockarc = Arc::new(&block);
+            let blockarc = Arc::new(block);
             self.stats.observe_duration("block", || {
-                index_single_block(
-                    self.store, engine, module, blockhash, blockarc, height, &mut batch,
-                );
+                index_single_block(&mut self.runtime, blockarc, height);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -635,29 +633,33 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
 }
 
 fn index_single_block(
-    dbstore: &'static DBStore,
-    engine: Arc<metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>>,
-    module: Arc<&wasmtime::Module>,
-    block_hash: BlockHash,
-    block: Arc<&SerBlock>,
+    // dbstore: &'static DBStore,
+    runtime: &mut metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
+    // module: Arc<&wasmtime::Module>,
+    // block_hash: BlockHash,
+    block: Arc<SerBlock>,
     height: usize,
-    batch: &mut WriteBatch,
+    // batch: &mut WriteBatch,
 ) {
-    let mut store = Store::new(*engine, ());
-    let mut linker = Linker::new(*engine);
-    setup_linker(&mut linker, *block, height as u32);
-    setup_linker_indexer(&mut linker, dbstore, height);
-    let instance = linker.instantiate(&mut store, &module).unwrap();
-    let start = instance
-        .get_typed_func::<(), ()>(&mut store, "_start")
-        .unwrap();
-    handle_reorg(dbstore, height as u32);
-    instance
-        .get_memory(&mut store, "memory")
-        .unwrap()
-        .grow(&mut store, 32767)
-        .unwrap();
+    let _runtime = *runtime.context.lock().unwrap();
+    _runtime.height = height as u32;
+    _runtime.block = block.clone();
+    runtime.run();
+    // let mut store = Store::new(*engine, ());
+    // let mut linker = Linker::new(*engine);
+    // setup_linker(&mut linker, *block, height as u32);
+    // setup_linker_indexer(&mut linker, dbstore, height);
+    // let instance = linker.instantiate(&mut store, &module).unwrap();
+    // let start = instance
+    //     .get_typed_func::<(), ()>(&mut store, "_start")
+    //     .unwrap();
+    // handle_reorg(dbstore, height as u32);
+    // instance
+    //     .get_memory(&mut store, "memory")
+    //     .unwrap()
+    //     .grow(&mut store, 32767)
+    //     .unwrap();
 
-    start.call(&mut store, ()).unwrap();
-    batch.tip_row = serialize(&block_hash).into_boxed_slice();
+    // start.call(&mut store, ()).unwrap();
+    // batch.tip_row = serialize(&block_hash).into_boxed_slice();
 }

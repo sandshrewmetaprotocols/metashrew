@@ -643,7 +643,7 @@ fn index_single_block(
 ) {
     // let mut _runtime = runtime.context.lock().unwrap();
     runtime.context.lock().unwrap().height = height as u32;
-    runtime.context.lock().unwrap().block = block;
+    runtime.context.lock().unwrap().block = block.as_ref().clone();
     runtime.run();
     // let mut store = Store::new(*engine, ());
     // let mut linker = Linker::new(*engine);

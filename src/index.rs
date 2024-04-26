@@ -641,9 +641,9 @@ fn index_single_block(
     height: usize,
     // batch: &mut WriteBatch,
 ) {
-    let _runtime = *runtime.context.lock().unwrap();
-    _runtime.height = height as u32;
-    _runtime.block = block.clone();
+    // let mut _runtime = runtime.context.lock().unwrap();
+    runtime.context.lock().unwrap().height = height as u32;
+    runtime.context.lock().unwrap().block = block;
     runtime.run();
     // let mut store = Store::new(*engine, ());
     // let mut linker = Linker::new(*engine);

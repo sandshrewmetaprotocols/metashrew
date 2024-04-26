@@ -4,6 +4,7 @@ use bitcoin::{BlockHash, OutPoint, Txid};
 use electrs_rocksdb as rocksdb;
 use itertools::Itertools;
 use rlp;
+use rocksdb::{WriteBatchWithTransaction, DB};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,7 +85,7 @@ impl Stats {
     }
 }
 
-pub struct RocksDBRuntimeAdapter(&'static DBStore);
+pub struct RocksDBRuntimeAdapter(&'static DB);
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
@@ -116,7 +117,7 @@ pub struct Index {
     lookup_limit: Option<usize>,
     chain: Chain,
     stats: Stats,
-    runtime: &'static metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
+    runtime: metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
     is_ready: bool,
     flush_needed: bool,
     engine: wasmtime::Engine,
@@ -147,8 +148,10 @@ impl Index {
         stats.observe_chain(&chain);
         stats.observe_db(store);
         let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
-        let runtime = &metashrew_runtime::MetashrewRuntime::load(indexer, store).unwrap();
+        let module =
+            wasmtime::Module::from_file(&engine, indexer.clone().into_os_string()).unwrap();
+        let internal_db = RocksDBRuntimeAdapter(&store.db);
+        let runtime = metashrew_runtime::MetashrewRuntime::load(indexer, internal_db).unwrap();
         Ok(Index {
             store,
             batch_size,
@@ -633,7 +636,7 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
 
 fn index_single_block(
     dbstore: &'static DBStore,
-    engine: Arc<metashrew_runtime::MetashrewRuntime>,
+    engine: Arc<metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>>,
     module: Arc<&wasmtime::Module>,
     block_hash: BlockHash,
     block: Arc<&SerBlock>,

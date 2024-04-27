@@ -633,33 +633,16 @@ pub fn handle_reorg(dbstore: &'static DBStore, from: u32) {
 }
 
 fn index_single_block(
-    // dbstore: &'static DBStore,
     runtime: &mut metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
-    // module: Arc<&wasmtime::Module>,
-    // block_hash: BlockHash,
     block: Arc<SerBlock>,
     height: usize,
-    // batch: &mut WriteBatch,
 ) {
-    // let mut _runtime = runtime.context.lock().unwrap();
     runtime.context.lock().unwrap().height = height as u32;
     runtime.context.lock().unwrap().block = block.as_ref().clone();
-    runtime.run();
-    // let mut store = Store::new(*engine, ());
-    // let mut linker = Linker::new(*engine);
-    // setup_linker(&mut linker, *block, height as u32);
-    // setup_linker_indexer(&mut linker, dbstore, height);
-    // let instance = linker.instantiate(&mut store, &module).unwrap();
-    // let start = instance
-    //     .get_typed_func::<(), ()>(&mut store, "_start")
-    //     .unwrap();
-    // handle_reorg(dbstore, height as u32);
-    // instance
-    //     .get_memory(&mut store, "memory")
-    //     .unwrap()
-    //     .grow(&mut store, 32767)
-    //     .unwrap();
-
-    // start.call(&mut store, ()).unwrap();
-    // batch.tip_row = serialize(&block_hash).into_boxed_slice();
+    if let Err(e) = runtime.run() {
+        warn!("Runtime run failed, retrying once: {}", e);
+        if let Err(e) = runtime.run() {
+            panic!("Runtime run failed after retry: {}", e);
+        }
+    }
 }

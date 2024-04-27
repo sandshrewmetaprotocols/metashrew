@@ -19,7 +19,6 @@ use crate::{
     cache::Cache,
     config::{Config, ELECTRS_VERSION},
     daemon::{self, extract_bitcoind_error, Daemon},
-    index::{read_arraybuffer_as_vec, setup_linker, setup_linker_view},
     merkle::Proof,
     metrics::{self, Histogram, Metrics},
     signals::Signal,
@@ -224,6 +223,7 @@ impl Rpc {
         Ok(json!(serialize_hex(header)))
     }
     fn view(&self, (symbol, input_rlp, block_tag): &(String, String, String)) -> Result<Value> {
+        /*
         let engine = wasmtime::Engine::default();
         let module =
             wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string())
@@ -267,7 +267,8 @@ impl Rpc {
         let mem = instance.get_memory(&mut store, "memory").unwrap();
         let data = mem.data(&mut store);
         let encoded_vec = read_arraybuffer_as_vec(data, result);
-        return Ok(json!({ "result": hex::encode(encoded_vec)  }));
+        */
+        return Ok(json!({ "result": hex::encode(Vec::<u8>::new())  }));
     }
 
     fn block_headers(&self, (start_height, count): (usize, usize)) -> Result<Value> {

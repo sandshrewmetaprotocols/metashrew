@@ -641,12 +641,13 @@ fn index_single_block(
     runtime.context.lock().unwrap().block = block.as_ref().clone();
     // create new instance with fresh memory and run again
     if let Err(_) = runtime.run() {
-        let memory_ty = wasmtime::MemoryType::new(1, None);
-        let memory = wasmtime::Memory::new(&mut runtime.wasmstore, memory_ty).unwrap();
-        // set new instance with fresh memory
-        runtime.instance =
-            wasmtime::Instance::new(&mut runtime.wasmstore, &runtime.module, &[memory.into()])
-                .unwrap();
+        runtime.refresh_memory();
+        // let memory_ty = wasmtime::MemoryType::new(1, None);
+        // let memory = wasmtime::Memory::new(&mut runtime.wasmstore, memory_ty).unwrap();
+        // // set new instance with fresh memory
+        // runtime.instance =
+        //     wasmtime::Instance::new(&mut runtime.wasmstore, &runtime.module, &[memory.into()])
+        //         .unwrap();
         if let Err(e) = runtime.run() {
             panic!("Runtime run failed after retry: {}", e);
         }

@@ -707,7 +707,6 @@ dependencies = [
  "glob",
  "libc",
  "libz-sys",
- "lz4-sys",
  "zstd-sys",
 ]
 
@@ -767,9 +766,9 @@ checksum = "2acce4a10f12dc2fb14a218589d4f1f62ef011b2d0cc4b3cb1bba8e94da14649"
 
 [[package]]
 name = "fastrand"
-version = "2.0.2"
+version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "658bd65b1cf4c852a3cc96f18a8ce7b5640f6b703f905c7d74532294c2a63984"
+checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
 
 [[package]]
 name = "fd-lock"
@@ -1252,16 +1251,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90ed8c1e510134f979dbc4f070f87d4313098b704861a105fe34231c70a3901c"
 
 [[package]]
-name = "lz4-sys"
-version = "1.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57d27b317e207b10f69f5e75494119e391a96f48861ae870d1da6edac98ca900"
-dependencies = [
- "cc",
- "libc",
-]
-
-[[package]]
 name = "mach"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1340,14 +1329,13 @@ dependencies = [
 [[package]]
 name = "metashrew-runtime"
 version = "0.1.0"
-source = "git+https://github.com/sandshrewmetaprotocols/metashrew-runtime#41db943d8d394a422d8f524546a1e3f7bad9e498"
+source = "git+https://github.com/sandshrewmetaprotocols/metashrew-runtime#138d08951a903f222a69e26a73e45bfc8cfb09e9"
 dependencies = [
  "anyhow",
  "bitcoin",
  "bitcoin_slices",
  "bitcoincore-rpc",
  "crossbeam-channel",
- "electrs-rocksdb",
  "itertools 0.12.1",
  "log",
  "rayon",

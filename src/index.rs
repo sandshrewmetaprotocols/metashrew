@@ -8,9 +8,10 @@ use rocksdb::{WriteBatchWithTransaction, DB};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::convert::AsRef;
 use wasmtime::{Caller, Linker, Store};
 
-use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime, RocksDBBatch};
+use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -86,6 +87,16 @@ impl Stats {
 }
 
 pub struct RocksDBRuntimeAdapter(&'static DB);
+pub struct RocksDBBatch(pub rocksdb::WriteBatch);
+
+impl BatchLike for RocksDBBatch {
+  fn default() -> RocksDBBatch {
+    RocksDBBatch(rocksdb::WriteBatch::default())
+  }
+  fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
+    return self.0.put(k, v);
+  }
+}
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;

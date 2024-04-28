@@ -1329,7 +1329,7 @@ dependencies = [
 [[package]]
 name = "metashrew-runtime"
 version = "0.1.0"
-source = "git+https://github.com/sandshrewmetaprotocols/metashrew-runtime#138d08951a903f222a69e26a73e45bfc8cfb09e9"
+source = "git+https://github.com/sandshrewmetaprotocols/metashrew-runtime#af6000a52e48ffd03e493ecbc37741917d2fa90d"
 dependencies = [
  "anyhow",
  "bitcoin",

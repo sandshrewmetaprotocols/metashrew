@@ -89,6 +89,12 @@ impl Stats {
 pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub rocksdb::WriteBatch);
 
+impl Clone for RocksDBRuntimeAdapter {
+  fn clone(&self) -> Self {
+    return Self(self.0);
+  }
+}
+
 impl BatchLike for RocksDBBatch {
   fn default() -> RocksDBBatch {
     RocksDBBatch(rocksdb::WriteBatch::default())

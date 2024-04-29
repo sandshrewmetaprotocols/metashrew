@@ -6,9 +6,9 @@ use itertools::Itertools;
 use rlp;
 use rocksdb::{WriteBatchWithTransaction, DB};
 use std::collections::HashSet;
+use std::convert::AsRef;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::convert::AsRef;
 use wasmtime::{Caller, Linker, Store};
 
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
@@ -90,18 +90,18 @@ pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub rocksdb::WriteBatch);
 
 impl Clone for RocksDBRuntimeAdapter {
-  fn clone(&self) -> Self {
-    return Self(self.0);
-  }
+    fn clone(&self) -> Self {
+        return Self(self.0);
+    }
 }
 
 impl BatchLike for RocksDBBatch {
-  fn default() -> RocksDBBatch {
-    RocksDBBatch(rocksdb::WriteBatch::default())
-  }
-  fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-    return self.0.put(k, v);
-  }
+    fn default() -> RocksDBBatch {
+        RocksDBBatch(rocksdb::WriteBatch::default())
+    }
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
+        return self.0.put(k, v);
+    }
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
@@ -276,8 +276,9 @@ impl Index {
             let engine = Arc::new(&self.engine);
             let module = Arc::new(&self.module);
             let blockarc = Arc::new(block);
+            let blockhasharc = Arc::new(blockhash);
             self.stats.observe_duration("block", || {
-                index_single_block(&mut self.runtime, blockarc, height);
+                index_single_block(&mut self.runtime, blockarc, height, blockhasharc);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -304,11 +305,11 @@ fn db_rows_size(rows: &[Row]) -> usize {
     rows.iter().map(|key| key.len()).sum()
 }
 
-
 fn index_single_block(
     runtime: &mut metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
     block: Arc<SerBlock>,
     height: usize,
+    blockhash: Arc<BlockHash>,
 ) {
     runtime.context.lock().unwrap().height = height as u32;
     runtime.context.lock().unwrap().block = block.as_ref().clone();
@@ -320,4 +321,29 @@ fn index_single_block(
             panic!("Runtime run failed after retry: {}", e);
         }
     }
+
+    // save block hash to the headers_cf
+
+    let header_cf = runtime
+        .context
+        .lock()
+        .unwrap()
+        .db
+        .0
+        .cf_handle("headers")
+        .unwrap();
+    let mut db_batch = rocksdb::WriteBatch::default();
+    db_batch.put_cf(header_cf, blockhash.as_ref(), b"");
+
+    let mut opts = rocksdb::WriteOptions::new();
+    opts.set_sync(false);
+    opts.disable_wal(false);
+    runtime
+        .context
+        .lock()
+        .unwrap()
+        .db
+        .0
+        .write_opt(db_batch, &opts)
+        .unwrap();
 }

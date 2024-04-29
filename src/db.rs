@@ -42,7 +42,7 @@ const SPENDING_CF: &str = "spending";
 const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF];
 
 const CONFIG_KEY: &str = "C";
-const TIP_KEY: &[u8] = b"T";
+pub(crate) const TIP_KEY: &[u8] = b"T";
 
 // Taken from https://github.com/facebook/rocksdb/blob/master/include/rocksdb/db.h#L654-L689
 const DB_PROPERIES: &[&str] = &[

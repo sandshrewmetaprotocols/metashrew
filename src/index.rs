@@ -334,6 +334,7 @@ fn index_single_block(
         .unwrap();
     let mut db_batch = rocksdb::WriteBatch::default();
     db_batch.put_cf(header_cf, blockhash.as_ref(), b"");
+    db_batch.put_cf(header_cf, crate::db::TIP_KEY, blockhash.as_ref());
 
     let mut opts = rocksdb::WriteOptions::new();
     opts.set_sync(false);

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use bitcoin::consensus::{deserialize, serialize};
+use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use electrs_rocksdb as rocksdb;
 use itertools::Itertools;
@@ -9,7 +9,9 @@ use std::collections::HashSet;
 use std::convert::AsRef;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::ops::ControlFlow;
 use wasmtime::{Caller, Linker, Store};
+use bitcoin_slices::{bsl, Visitor, Visit};
 
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 
@@ -278,7 +280,7 @@ impl Index {
             let blockarc = Arc::new(block);
             let blockhasharc = Arc::new(blockhash);
             self.stats.observe_duration("block", || {
-                index_single_block(&mut self.runtime, blockarc, height, blockhasharc);
+                index_single_block(&mut batch, &mut self.runtime, blockarc, height, blockhasharc);
             });
             self.stats.height.set("tip", height as f64);
         })?;
@@ -306,6 +308,7 @@ fn db_rows_size(rows: &[Row]) -> usize {
 }
 
 fn index_single_block(
+    batch: &mut WriteBatch,
     runtime: &mut metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
     block: Arc<SerBlock>,
     height: usize,
@@ -321,30 +324,38 @@ fn index_single_block(
             panic!("Runtime run failed after retry: {}", e);
         }
     }
+    struct IndexBlockVisitor<'a> {
+        batch: &'a mut WriteBatch,
+        height: usize,
+    }
+
+    impl<'a> Visitor for IndexBlockVisitor<'a> {
+        fn visit_transaction(&mut self, tx: &bsl::Transaction) -> ControlFlow<()> {
+            ControlFlow::Continue(())
+        }
+
+        fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut) -> ControlFlow<()> {
+            ControlFlow::Continue(())
+        }
+
+        fn visit_tx_in(&mut self, _vin: usize, tx_in: &bsl::TxIn) -> ControlFlow<()> {
+            ControlFlow::Continue(())
+        }
+
+        fn visit_block_header(&mut self, header: &bsl::BlockHeader) -> ControlFlow<()> {
+            let header = bitcoin::block::Header::consensus_decode(&mut header.as_ref())
+                .expect("block header was already validated");
+            self.batch
+                .header_rows
+                .push(HeaderRow::new(header).to_db_row());
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut index_block = IndexBlockVisitor { batch, height };
+    bsl::Block::visit(&block, &mut index_block).expect("core returned invalid block");
+    batch.tip_row = serialize(blockhash.as_ref()).into_boxed_slice();
 
     // save block hash to the headers_cf
 
-    let header_cf = runtime
-        .context
-        .lock()
-        .unwrap()
-        .db
-        .0
-        .cf_handle("headers")
-        .unwrap();
-    let mut db_batch = rocksdb::WriteBatch::default();
-    db_batch.put_cf(header_cf, blockhash.as_ref(), b"");
-    db_batch.put_cf(header_cf, crate::db::TIP_KEY, blockhash.as_ref());
-
-    let mut opts = rocksdb::WriteOptions::new();
-    opts.set_sync(false);
-    opts.disable_wal(false);
-    runtime
-        .context
-        .lock()
-        .unwrap()
-        .db
-        .0
-        .write_opt(db_batch, &opts)
-        .unwrap();
 }

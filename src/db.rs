@@ -193,6 +193,7 @@ impl DBStore {
         } else {
             None
         };
+        /*
         if let Some(cause) = reindex_cause {
             if !auto_reindex {
                 bail!("re-index required due to {}", cause);
@@ -213,6 +214,7 @@ impl DBStore {
             store = Self::open_internal(path, log_dir, view)?;
             config = Config::default(); // re-init config after dropping DB
         }
+        */
         if config.compacted {
             store.start_compactions();
         }

@@ -46,7 +46,7 @@ tempdir = "0.3.7"
 tiny_http = { version = "0.12", optional = true }
 uuid = "1.7.0"
 wasmtime = "15.0.1"
-wasmtime-wasi = "15.0.1"
+wasmtime-wasi = "20.0.0"
 metashrew-runtime = { git = "https://github.com/sandshrewmetaprotocols/metashrew-runtime" }
 
 [dependencies.electrs-rocksdb]

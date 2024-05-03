@@ -6,9 +6,9 @@ RUN apt-get update && apt-get install -y \
     libclang-dev
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 RUN echo 'source $HOME/.cargo/env' >> $HOME/.bashrc
-WORKDIR /electrs
+WORKDIR /opt/metashrew
 COPY . .
-RUN bash -c 'source ~/.bashrc; cargo build'
+RUN bash -c 'source ~/.bashrc; cargo build --release'
 RUN bash -c 'ulimit -n $(ulimit -n -H)'
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 CMD ["bash", "/docker-entrypoint.sh"]

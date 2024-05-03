@@ -1,0 +1,15 @@
+version: '3.3'
+services:
+  metashrew:
+    network_mode: 'host'
+    image: sandshrewmetaprotocols/metashrew
+    build:
+      context: ./
+      dockerfile: Dockerfile
+    environment:
+      - DAEMON_RPC_ADDR=127.0.0.1:48332
+      - DAEMON_P2P_ADDR=127.0.0.1:48333
+      - NETWORK=bitcoin
+    volumes:
+      - ${METASHREW_DATA}:/metashrew
+      - ${BITCOIN_DATA}:/bitcoin

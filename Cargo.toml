@@ -13,9 +13,9 @@ edition = "2021"
 build = "build.rs"
 
 [features]
-default = []
-#metrics = ["prometheus", "tiny_http"]
-#metrics_process = ["prometheus/process"]
+default = ["metrics"]
+metrics = ["prometheus", "tiny_http"]
+metrics_process = ["prometheus/process"]
 
 [package.metadata.configure_me]
 spec = "internal/config_specification.toml"

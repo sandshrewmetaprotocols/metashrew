@@ -7,8 +7,8 @@ services:
       context: ./
       dockerfile: Dockerfile
     environment:
-      - DAEMON_RPC_ADDR=127.0.0.1:48332
-      - DAEMON_P2P_ADDR=127.0.0.1:48333
+      - DAEMON_RPC_ADDR=127.0.0.1:8332
+      - DAEMON_P2P_ADDR=127.0.0.1:8333
       - NETWORK=bitcoin
     volumes:
       - ${METASHREW_DATA}:/metashrew

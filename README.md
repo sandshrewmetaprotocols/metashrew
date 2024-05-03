@@ -30,6 +30,26 @@ Invoke metashrew with a command such as:
 
 metashrew will begin syncing chaindata over the p2p socket (very quickly) and the WASM program will be instantiated and executed with the blockdata copied to its memory export. In this way, the WASM program receives a callback for each block metashrew processes, from which you can parse the block height from the first four bytes (little-endian) then parse the full serialized block which follows.
 
+## Docker
+
+Create an .env file in the root of the project with the variables
+
+```
+METASHREW_DATA=<directory where metashrew data should live>
+BITCOIN_DATA=<directory where bitcoind writes to>
+```
+
+metashrew will wait for the presernce of a `<metashrew directory/indexer.wasm` file before it will initialize, so it is acceptable to define your directories via the .env and then copy the WASM file from a project such as [https://github.com/sandshrewmetaprotocols/metashrew-ord](https://github.com/sandshrewmetaprotocols/metashrew-ord) into that directory, then check the logs to look at progress.
+
+A suitable command to check logs is;
+
+```sh
+cd metashrew
+docker-compose logs -f --tail 100
+```
+
+You will see sync updates here.
+
 ## Runtime
 
 Host functions are made available to the WASM program via the `env` module.

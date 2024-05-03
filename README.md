@@ -46,6 +46,7 @@ A suitable command to check logs is;
 ```sh
 cd metashrew
 docker-compose logs -f --tail 100
+
 ```
 
 You will see sync updates here.

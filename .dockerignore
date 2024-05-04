@@ -1,9 +1,7 @@
 .*
 _*
-contrib
 db*
 dist
-doc
 Dockerfile
 examples
 scripts

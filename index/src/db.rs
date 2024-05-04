@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use electrs_rocksdb as rocksdb;
+use rocksdb;
 
 use rand::random;
 use std::path::Path;

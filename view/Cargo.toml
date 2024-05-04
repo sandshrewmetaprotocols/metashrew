@@ -1,0 +1,18 @@
+[package]
+name = "metashrew-view-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix-web = "4.5.1"
+hex = "0.4.3"
+itertools = "0.12.1"
+rlp = "0.5.2"
+serde = { version = "1.0.197", features = ["derive"] }
+substring = "1.4.5"
+tiny-keccak = {version = "2.0.2", features = ["sha3"]}
+wasmtime = "18.0.3"
+metashrew-runtime = { path = "../runtime" }
+rocksdb = { version = "0.22.0", features = ["zstd", "snappy"] }

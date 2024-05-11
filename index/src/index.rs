@@ -18,7 +18,7 @@ use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use crate::{
     chain::{Chain, NewHeader},
     daemon::Daemon,
-    db::{DBStore, Row, WriteBatch},
+    db::{index_cf, DBStore, Row, WriteBatch},
     metrics::{self, Gauge, Histogram, Metrics},
     signals::ExitFlag,
     types::{
@@ -102,8 +102,22 @@ impl BatchLike for RocksDBBatch {
         RocksDBBatch(rocksdb::WriteBatch::default())
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-        return self.0.put(k, v);
+        return self.0.put_cf(index_cf(get_db()), k, v);
     }
+}
+
+static mut _db: Option<&'static DBStore> = None;
+
+pub fn set_db(store: &'static DBStore) {
+  unsafe {
+    _db = Some(store);
+  }
+}
+
+pub fn get_db() -> &'static rocksdb::DB {
+  unsafe {
+    &(_db.unwrap()).db
+  }
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
@@ -125,7 +139,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.0.put(key, value)
+        self.0.put_cf(index_cf(get_db()), key, value)
     }
 }
 
@@ -153,13 +167,17 @@ impl Index {
         lookup_limit: Option<usize>,
         reindex_last_blocks: usize,
     ) -> Result<Self> {
+        debug!("LOAD INDEX");
+        set_db(store);
         if let Some(row) = store.get_tip() {
+            debug!("GOT TIP");
             let tip = deserialize(&row).expect("invalid tip");
             let headers = store
                 .read_headers()
                 .into_iter()
                 .map(|row| HeaderRow::from_db_row(&row).header)
                 .collect();
+            panic!("exit");
             chain.load(headers, tip);
             chain.drop_last_headers(reindex_last_blocks);
         };

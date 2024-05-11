@@ -38,8 +38,9 @@ const HEADERS_CF: &str = "headers";
 const TXID_CF: &str = "txid";
 const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
+const INDEX_CF: &str = "index";
 
-const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF];
+const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF];
 
 const CONFIG_KEY: &str = "C";
 pub(crate) const TIP_KEY: &[u8] = b"T";
@@ -98,6 +99,10 @@ impl Default for Config {
     }
 }
 
+pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
+}
+
 fn default_opts() -> rocksdb::Options {
     let mut block_opts = rocksdb::BlockBasedOptions::default();
     block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);
@@ -132,6 +137,7 @@ impl DBStore {
         }
 
         let db = if view {
+            panic!("should not open as secondary");
             rocksdb::DB::open_as_secondary(
                 &db_opts,
                 path,
@@ -240,6 +246,9 @@ impl DBStore {
 
     fn headers_cf(&self) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
+    }
+    fn index_cf(&self) -> &rocksdb::ColumnFamily {
+        self.db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
     }
 
     pub(crate) fn iter_funding(&self, prefix: Row) -> impl Iterator<Item = Row> + '_ {

@@ -1,0 +1,35 @@
+version: '3.3'
+services:
+  metashrew:
+    network_mode: 'host'
+    image: sandshrewmetaprotocols/metashrew
+    build:
+      context: ./
+      dockerfile: docker/Dockerfile.indexer
+    environment:
+      - DAEMON_RPC_ADDR=${DAEMON_RPC_ADDR:-127.0.0.1:8332}
+      - DAEMON_P2P_ADDR=${DAEMON_P2P_ADDR:-127.0.0.1:8333}
+      - NETWORK=${NETWORK:-bitcoin}
+    volumes:
+      - ${METASHREW_DATA}:/metashrew
+      - ${BITCOIN_DATA}:/bitcoin
+    restart: unless-stopped
+  metashrew-view:
+    network_mode: 'host'
+    image: sandshrewmetaprotocols/metashrew-view
+    build:
+      context: ./
+      dockerfile: docker/Dockerfile.view
+    environment:
+      - PROGRAM_PATH=/metashrew/indexer.wasm
+      - DB_LOCATION=/metashrew/rocksdb
+    volumes:
+      - ${METASHREW_DATA}:/metashrew
+    restart: unless-stopped
+volumes:
+  metashrew:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${METASHREW_DATA}

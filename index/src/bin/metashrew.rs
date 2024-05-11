@@ -1,5 +1,5 @@
 use anyhow::Result;
 
 fn main() -> Result<()> {
-    metashrew::run()
+    metashrew_indexer::run()
 }

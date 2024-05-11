@@ -1,5 +1,5 @@
 [package]
-name = "metashrew-view-rs"
+name = "metashrew-view"
 version = "0.1.0"
 edition = "2021"
 

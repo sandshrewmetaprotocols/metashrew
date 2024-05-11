@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
-use electrs_rocksdb as rocksdb;
+use rocksdb;
 use itertools::Itertools;
 use rlp;
 use rocksdb::{WriteBatchWithTransaction, DB};

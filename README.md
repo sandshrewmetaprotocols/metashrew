@@ -51,6 +51,8 @@ docker-compose logs -f --tail 100
 
 You will see sync updates here.
 
+Additional variables can be supplied from an .env file. For the complete set refer to the docker-compose.yaml file.
+
 ## Runtime
 
 Host functions are made available to the WASM program via the `env` module.

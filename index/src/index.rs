@@ -177,7 +177,6 @@ impl Index {
                 .into_iter()
                 .map(|row| HeaderRow::from_db_row(&row).header)
                 .collect();
-            panic!("exit");
             chain.load(headers, tip);
             chain.drop_last_headers(reindex_last_blocks);
         };
@@ -313,6 +312,7 @@ impl Index {
         self.stats
             .observe_duration("write", || self.store.write(&batch));
         self.stats.observe_db(&self.store);
+        self.store.flush();
         Ok(())
     }
 

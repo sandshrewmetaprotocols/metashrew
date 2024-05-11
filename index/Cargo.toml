@@ -13,9 +13,9 @@ edition = "2021"
 build = "build.rs"
 
 [features]
-default = []
-#metrics = ["prometheus", "tiny_http"]
-#metrics_process = ["prometheus/process"]
+default = ["metrics"]
+metrics = ["prometheus", "tiny_http"]
+metrics_process = ["prometheus/process"]
 
 [package.metadata.configure_me]
 spec = "internal/config_specification.toml"
@@ -48,7 +48,7 @@ uuid = "1.7.0"
 wasmtime = "15.0.1"
 wasmtime-wasi = "15.0.1"
 metashrew-runtime = { path = "../runtime" }
-rocksdb = { version = "0.22.0", features = ["zstd", "snappy"] }
+rocksdb = "0.22.0"
 
 [build-dependencies]
 configure_me_codegen = { version = "0.4.4", default-features = false }

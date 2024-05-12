@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime_environ::__core::{unreachable};
 
 type SerBlock = Vec<u8>;
 pub trait BatchLike {
@@ -106,6 +107,7 @@ pub fn try_read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Result<Vec<u
     return Ok(Vec::<u8>::from(&data[(data_start as usize)..(((data_start as u32) + len) as usize)]));
 }
 
+
 pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     match try_read_arraybuffer_as_vec(data, data_start) {
       Ok(v) => v,
@@ -118,6 +120,30 @@ pub fn db_annotate_value(v: &Vec<u8>, block_height: u32) -> Vec<u8> {
     let height: Vec<u8> = block_height.to_le_bytes().try_into().unwrap();
     entry.extend(height);
     return entry;
+}
+
+pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v: T) -> i32 {
+  return match <T as TryInto<i32>>::try_into(v) {
+    Ok(v) => v,
+    Err(_) => {
+      trap_abort(caller);
+      unreachable!();
+    }
+  }
+}
+
+pub fn trap_abort<'a>(caller: &mut Caller<'_, State>) {
+  let _ = caller.get_export("trap").unwrap().into_func().unwrap().call(caller, &mut [], &mut []);
+}
+
+pub fn to_usize_or_trap<'a, T: TryInto<usize>>(caller: &mut Caller<'_, State>, v: T) -> usize {
+  return match <T as TryInto<usize>>::try_into(v) {
+    Ok(v) => v,
+    Err(_) => {
+      trap_abort(caller);
+      unreachable!();
+    }
+  }
 }
 
 impl<T: KeyValueStoreLike> MetashrewRuntime<T>
@@ -202,7 +228,7 @@ where
             .instance
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .unwrap();
-//        Self::handle_reorg(self.context.clone());
+        Self::handle_reorg(self.context.clone());
         start.call(&mut self.wasmstore, ())
     }
 
@@ -404,21 +430,19 @@ where
                     let bytes = match try_read_arraybuffer_as_vec(data, data_start) {
                       Ok(v) => v,
                       Err(_) => {
-                        caller.get_export("abort").unwrap().into_func().unwrap().call(&mut caller, &[], &mut []).unwrap();
-                        return;
+                        trap_abort(&mut caller);
+                        unreachable!();
                       }
                     };
                     println!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
                 },
             )
             .unwrap();
-        /*
         linker
             .func_wrap("env", "abort", |_: i32, _: i32, _: i32, _: i32| {
-                panic!("abort!");
+              debug!("abort!");
             })
             .unwrap();
-            */
     }
     pub fn db_append_annotated(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
@@ -473,7 +497,7 @@ where
           Err(_) => { return i32::MAX }
         };
         let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, context_get_len.lock().unwrap().height);
-        return value.len().try_into().unwrap();
+        return to_signed_or_trap(&mut caller, value.len());
       }).unwrap();
     }
     pub fn setup_linker_indexer(
@@ -497,8 +521,8 @@ where
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                       Ok(v) => v,
                       Err(_) => {
-                        caller.get_export("abort").unwrap().into_func().unwrap().call(&mut caller, &[], &mut []).unwrap();
-                        return;
+                        trap_abort(&mut caller);
+                        unreachable!();
                       }
                     };
                     let mut batch = T::Batch::default();
@@ -548,8 +572,9 @@ where
                                     .unwrap()
                                     .unwrap();
                                 value_vec.truncate(value_vec.len().saturating_sub(4));
+                                let len = to_usize_or_trap(&mut caller, value);
                                 let _ =
-                                    mem.write(&mut caller, value.try_into().unwrap(), value_vec.as_slice());
+                                    mem.write(&mut caller, len, value_vec.as_slice());
                             }
                         },
                         Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }

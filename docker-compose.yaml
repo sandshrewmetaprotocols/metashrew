@@ -11,10 +11,10 @@ services:
       - DAEMON_P2P_ADDR=${DAEMON_P2P_ADDR:-127.0.0.1:8333}
       - NETWORK=${NETWORK:-bitcoin}
       - LOG_FILTERS=${LOG_FILTERS:-INFO}
+      - RUST_BACKTRACE=1
     volumes:
       - ${METASHREW_DATA}:/metashrew
       - ${BITCOIN_DATA}:/bitcoin
-    restart: unless-stopped
   metashrew-view:
     network_mode: 'host'
     image: sandshrewmetaprotocols/metashrew-view

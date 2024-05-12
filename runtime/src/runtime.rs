@@ -5,7 +5,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
-use wasmtime_environ::__core::{unreachable};
 
 type SerBlock = Vec<u8>;
 pub trait BatchLike {
@@ -141,7 +140,7 @@ pub fn to_usize_or_trap<'a, T: TryInto<usize>>(caller: &mut Caller<'_, State>, v
     Ok(v) => v,
     Err(_) => {
       trap_abort(caller);
-      unreachable!();
+      return usize::MAX;
     }
   }
 }
@@ -412,9 +411,10 @@ where
                     let mut input_clone: Vec<u8> =
                         <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
                     input_clone.extend(input.clone());
+                    let sz: usize = to_usize_or_trap(&mut caller, data_start);
                     let _ = mem.write(
                         &mut caller,
-                        data_start.try_into().unwrap(),
+                        sz,
                         input_clone.as_slice(),
                     );
                 },
@@ -431,7 +431,7 @@ where
                       Ok(v) => v,
                       Err(_) => {
                         trap_abort(&mut caller);
-                        unreachable!();
+                        return;
                       }
                     };
                     println!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
@@ -522,7 +522,7 @@ where
                       Ok(v) => v,
                       Err(_) => {
                         trap_abort(&mut caller);
-                        unreachable!();
+                        return;
                       }
                     };
                     let mut batch = T::Batch::default();

@@ -89,7 +89,9 @@ impl Stats {
 }
 
 pub struct RocksDBRuntimeAdapter(&'static DB);
-pub struct RocksDBBatch(pub rocksdb::WriteBatch);
+pub struct RocksDBBatch(pub Arc<Box<rocksdb::WriteBatch>>);
+
+static mut _batch: Option<Arc<Box<rocksdb::WriteBatch>>> = None;
 
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
@@ -99,7 +101,12 @@ impl Clone for RocksDBRuntimeAdapter {
 
 impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
-        RocksDBBatch(rocksdb::WriteBatch::default())
+        unsafe {
+          if _batch.is_none() {
+            _batch = Some(Arc::new(Box::new(rocksdb::WriteBatch::default())));
+          }
+          RocksDBBatch(_batch.unwrap().clone())
+        }
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
         return self.0.put_cf(index_cf(get_db()), k, v);
@@ -124,7 +131,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        let _ = self.0.write(batch.0);
+//      let _ = self.0.write(batch.0);
         Ok(())
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -141,6 +148,16 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     {
         self.0.put_cf(index_cf(get_db()), key, value)
     }
+}
+pub fn commit_batch() -> Result<(), anyhow::Error> {
+  unsafe {
+    let result = match get_db().write(*(_batch.unwrap().as_ref()).clone()) {
+      Ok(_) => Ok(()),
+      Err(e) => Err(anyhow!("failed to commit batch"))
+    };
+    _batch = Some(Arc::new(rocksdb::WriteBatch::default()));
+    result
+  }
 }
 
 /// Confirmed transactions' address index
@@ -337,6 +354,7 @@ fn index_single_block(
     // create new instance with fresh memory and run again
     if let Err(_) = runtime.run() {
         debug!("{}", "Dropping cache");
+        commit_batch().unwrap();
         runtime.refresh_memory();
         if let Err(e) = runtime.run() {
             panic!("Runtime run failed after retry: {}", e);

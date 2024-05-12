@@ -336,10 +336,10 @@ fn index_single_block(
     runtime.context.lock().unwrap().block = block.as_ref().clone();
     // create new instance with fresh memory and run again
     if let Err(_) = runtime.run() {
-        debug!("{}", "Dropping cache");
+        debug!("{}", "dropping cache");
         runtime.refresh_memory();
         if let Err(e) = runtime.run() {
-            panic!("Runtime run failed after retry: {}", e);
+            panic!("runtime run failed after retry: {}", e);
         }
     }
     struct IndexBlockVisitor<'a> {

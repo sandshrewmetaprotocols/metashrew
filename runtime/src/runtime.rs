@@ -126,7 +126,7 @@ pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v:
     Ok(v) => v,
     Err(_) => {
       trap_abort(caller);
-      unreachable!();
+      return i32::MAX;
     }
   }
 }
@@ -440,7 +440,7 @@ where
             .unwrap();
         linker
             .func_wrap("env", "abort", |_: i32, _: i32, _: i32, _: i32| {
-              debug!("abort!");
+              debug!("respawn cache");
             })
             .unwrap();
     }

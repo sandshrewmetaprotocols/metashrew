@@ -11,6 +11,7 @@ services:
       - DAEMON_P2P_ADDR=${DAEMON_P2P_ADDR:-127.0.0.1:8333}
       - NETWORK=${NETWORK:-bitcoin}
       - LOG_FILTERS=${LOG_FILTERS:-INFO}
+      - INDEX_BATCH_SIZE=${INDEX_BATCH_SIZE:-2000}
       - RUST_BACKTRACE=1
     volumes:
       - ${METASHREW_DATA}:/metashrew

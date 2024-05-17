@@ -74,8 +74,6 @@ impl Connection {
             .recv()
             .context("failed to get new headers")?;
 
-        debug!("got {} new headers", headers.len());
-        debug!("first {:?}", headers.first().unwrap());
         let prev_blockhash = match headers.first() {
             None => return Ok(vec![]),
             Some(first) => first.prev_blockhash,

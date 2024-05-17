@@ -12,6 +12,8 @@ services:
       - NETWORK=${NETWORK:-bitcoin}
       - LOG_FILTERS=${LOG_FILTERS:-INFO}
       - INDEX_BATCH_SIZE=${INDEX_BATCH_SIZE:-2000}
+      - MONITORING_ADDR=${MONITORING_ADDR:-127.0.0.1:34442}
+      - ELECTRUM_RPC_ADDR=${ELECTRUM_RPC_ADDR:-127.0.0.1:50009}
       - RUST_BACKTRACE=1
     volumes:
       - ${METASHREW_DATA}:/metashrew
@@ -25,6 +27,7 @@ services:
     environment:
       - PROGRAM_PATH=/metashrew/indexer.wasm
       - DB_LOCATION=/metashrew/rocksdb
+      - PORT=${RPC_PORT:-8080}
     volumes:
       - ${METASHREW_DATA}:/metashrew
     restart: unless-stopped

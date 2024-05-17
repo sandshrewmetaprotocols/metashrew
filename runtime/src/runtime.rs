@@ -196,8 +196,7 @@ where
             linker.define_unknown_imports_as_traps(&self.module)?;
         }
         let instance = linker.instantiate(&mut wasmstore, &self.module).unwrap();
-        let func = self
-            .instance
+        let func = instance
             .get_typed_func::<(), i32>(&mut wasmstore, symbol.as_str())
             .unwrap();
         let result = func.call(&mut wasmstore, ());
@@ -285,6 +284,7 @@ where
         let length: i32 = Self::db_length_at_key(context.clone(), &key).try_into().unwrap();
         let mut index: i32 = length - 1;
         while index >= 0 {
+            println!("{}", index);
             let value: Vec<u8> = match context.lock().unwrap()
                 .db
                 .get(db_make_list_key(key, index.try_into().unwrap()))

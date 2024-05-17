@@ -15,22 +15,28 @@ use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
     Module, Mutability, SharedMemory, Store, Val, ValType,
 };
+
 pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub rocksdb::WriteBatch);
+
+pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
+}
+
+const INDEX_CF: &str = "index";
+
+impl Clone for RocksDBRuntimeAdapter {
+    fn clone(&self) -> Self {
+        return Self(self.0);
+    }
+}
 
 impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
         RocksDBBatch(rocksdb::WriteBatch::default())
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-        return self.0.put(k, v);
     }
-}
-
-impl Clone for RocksDBRuntimeAdapter {
-  fn clone(&self) -> Self {
-    return Self(self.0);
-  }
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
@@ -41,10 +47,10 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         Ok(())
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.0.get(key)
+        self.0.get_cf(index_cf(self.0), key)
     }
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
-        let _ = self.0.delete(key);
+        let _ = self.0.delete_cf(index_cf(self.0), key);
         Ok(())
     }
     fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error>
@@ -52,7 +58,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        self.0.put(key, value)
+        self.0.put_cf(index_cf(self.0), key, value)
     }
 }
 
@@ -98,7 +104,7 @@ async fn view(
         if hex::decode(
             body.params[0]
                 .to_string()
-                .substring(2, (body.params[0].len() - 2)),
+                .substring(2, (body.params[0].len())),
         )
         .unwrap()
             != context.hash
@@ -160,6 +166,7 @@ async fn main() -> std::io::Result<()> {
     let mut output = [0; 32];
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
+    println!("program hash: 0x{}", hex::encode(output));
     let path_clone: PathBuf = path.into();
 
     HttpServer::new(move || {

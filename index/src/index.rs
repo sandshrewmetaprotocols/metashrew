@@ -91,7 +91,7 @@ impl Stats {
 }
 
 pub struct RocksDBRuntimeAdapter(&'static DB);
-pub struct RocksDBBatch(usize);
+pub struct RocksDBBatch(pub rocksdb::WriteBatch);
 
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
@@ -99,21 +99,13 @@ impl Clone for RocksDBRuntimeAdapter {
     }
 }
 
-static mut _batch: Option<HashMap> = None;
-
 impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
-        unsafe {
-          if _batch.is_none() {
-            _batch = Some(HashMap<Vec<u8>, Vec<u8>>::new());
-          }
-        }
-        RocksDBBatch(0)
+        RocksDBBatch(rocksdb::WriteBatch::default())
     }
-    fn put<K, V>(&mut self, k: K, v: V) {
-        unsafe {
-          _batch.unwrap().insert(k, v);
-        }
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
+        self.0.put_cf(index_cf(get_db()), k, v)
+        
     }
 }
 
@@ -144,10 +136,8 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         let _ = self.0.delete_cf(index_cf(self.0), key);
         Ok(())
     }
-    fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error> {
-        unsafe {
-          _batch.unwrap().insert(k, v);
-        }
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
+        self.0.put_cf(index_cf(self.0), key, value)
     }
 }
 

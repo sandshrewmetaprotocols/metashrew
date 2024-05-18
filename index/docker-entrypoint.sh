@@ -16,4 +16,4 @@ while [ ! -f $_INDEXER ]; do
   sleep 5
 done
 
-/opt/metashrew/target/release/metashrew --log-filters $_LOG_FILTERS --db-dir $_DB_DIR --index-batch-size ${_INDEX_BATCH_SIZE} --daemon-dir $_DAEMON_DIR --network $_NETWORK --daemon-rpc-addr $_DAEMON_RPC_ADDR --daemon-p2p-addr $_DAEMON_P2P_ADDR --electrum-rpc-addr ${_ELECTRUM_RPC_ADDR} --monitoring-addr $_MONITORING_ADDR --indexer $_INDEXER
+/opt/metashrew/target/release/metashrew --log-filters $_LOG_FILTERS --db-dir $_DB_DIR --daemon-dir $_DAEMON_DIR --network $_NETWORK --daemon-rpc-addr $_DAEMON_RPC_ADDR --daemon-p2p-addr $_DAEMON_P2P_ADDR --electrum-rpc-addr ${_ELECTRUM_RPC_ADDR} --monitoring-addr $_MONITORING_ADDR --indexer $_INDEXER

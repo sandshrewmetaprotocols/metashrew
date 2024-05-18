@@ -67,6 +67,7 @@ impl Stats {
         self.observe_size("write_spending_rows", &batch.spending_rows);
         self.observe_size("write_txid_rows", &batch.txid_rows);
         self.observe_size("write_header_rows", &batch.header_rows);
+        /*
         debug!(
             "writing {} funding and {} spending rows from {} transactions, {} blocks",
             batch.funding_rows.len(),
@@ -74,6 +75,7 @@ impl Stats {
             batch.txid_rows.len(),
             batch.header_rows.len()
         );
+        */
     }
 
     fn observe_chain(&self, chain: &Chain) {
@@ -89,7 +91,7 @@ impl Stats {
 }
 
 pub struct RocksDBRuntimeAdapter(&'static DB);
-pub struct RocksDBBatch(pub rocksdb::WriteBatch);
+pub struct RocksDBBatch(usize);
 
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
@@ -97,12 +99,21 @@ impl Clone for RocksDBRuntimeAdapter {
     }
 }
 
+static mut _batch: Option<HashMap> = None;
+
 impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
-        RocksDBBatch(rocksdb::WriteBatch::default())
+        unsafe {
+          if _batch.is_none() {
+            _batch = Some(HashMap<Vec<u8>, Vec<u8>>::new());
+          }
+        }
+        RocksDBBatch(0)
     }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-        return self.0.put_cf(index_cf(get_db()), k, v);
+    fn put<K, V>(&mut self, k: K, v: V) {
+        unsafe {
+          _batch.unwrap().insert(k, v);
+        }
     }
 }
 
@@ -124,7 +135,6 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        let _ = self.0.write(batch.0);
         Ok(())
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -134,12 +144,10 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         let _ = self.0.delete_cf(index_cf(self.0), key);
         Ok(())
     }
-    fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-    {
-        self.0.put_cf(index_cf(get_db()), key, value)
+    fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error> {
+        unsafe {
+          _batch.unwrap().insert(k, v);
+        }
     }
 }
 

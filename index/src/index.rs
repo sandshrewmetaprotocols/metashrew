@@ -312,7 +312,6 @@ impl Index {
         self.stats
             .observe_duration("write", || self.store.write(&batch));
         self.stats.observe_db(&self.store);
-        self.store.flush();
         Ok(())
     }
 
@@ -332,8 +331,10 @@ fn index_single_block(
     height: usize,
     blockhash: Arc<BlockHash>,
 ) {
-    runtime.context.lock().unwrap().height = height as u32;
-    runtime.context.lock().unwrap().block = block.as_ref().clone();
+    {
+      runtime.context.lock().unwrap().height = height as u32;
+      runtime.context.lock().unwrap().block = block.as_ref().clone();
+    }
     // create new instance with fresh memory and run again
     if let Err(_) = runtime.run() {
         runtime.refresh_memory();

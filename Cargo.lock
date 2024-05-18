@@ -1794,6 +1794,7 @@ dependencies = [
  "bitcoin_slices",
  "bitcoincore-rpc",
  "crossbeam-channel",
+ "hex",
  "itertools 0.12.1",
  "log",
  "rayon",

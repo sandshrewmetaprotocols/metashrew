@@ -127,7 +127,10 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        Ok(())
+        match self.0.write(batch.0) {
+          Ok(_) => Ok(()),
+          Err(e) => Err(e)
+        }
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         self.0.get_cf(index_cf(self.0), key)

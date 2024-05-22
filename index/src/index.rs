@@ -168,10 +168,8 @@ impl Index {
         lookup_limit: Option<usize>,
         reindex_last_blocks: usize,
     ) -> Result<Self> {
-        debug!("LOAD INDEX");
         set_db(store);
         if let Some(row) = store.get_tip() {
-            debug!("GOT TIP");
             let tip = deserialize(&row).expect("invalid tip");
             let headers = store
                 .read_headers()
@@ -312,6 +310,7 @@ impl Index {
         self.stats.observe_batch(&batch);
         self.stats
             .observe_duration("write", || self.store.write(&batch));
+        //self.store.write(&batch);
         self.stats.observe_db(&self.store);
         Ok(())
     }

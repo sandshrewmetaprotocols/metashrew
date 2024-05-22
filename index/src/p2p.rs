@@ -103,7 +103,6 @@ impl Connection {
                 return Ok(());
             }
             self.blocks_duration.observe_duration("request", || {
-                debug!("loading {} blocks", blockhashes.len());
                 self.req_send.send(Request::get_blocks(&blockhashes))
             })?;
 

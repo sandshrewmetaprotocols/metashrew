@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use rocksdb;
 
+use hex;
 use rand::random;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,9 +115,9 @@ fn default_opts() -> rocksdb::Options {
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
     opts.set_target_file_size_base(256 << 20);
     opts.set_write_buffer_size(256 << 24);
-    opts.set_disable_auto_compactions(true); // for initial bulk load
+//    opts.set_disable_auto_compactions(true); // for initial bulk load
     opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
-//    opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+    opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
     opts.set_block_based_table_factory(&block_opts);
     opts
 }
@@ -199,6 +200,7 @@ impl DBStore {
         } else {
             None
         };
+        /*
         if let Some(cause) = reindex_cause {
             if !auto_reindex {
                 bail!("re-index required due to {}", cause);
@@ -219,6 +221,7 @@ impl DBStore {
             store = Self::open_internal(path, log_dir, view)?;
             config = Config::default(); // re-init config after dropping DB
         }
+        */
         if config.compacted {
             store.start_compactions();
         }
@@ -304,13 +307,15 @@ impl DBStore {
         for key in &batch.header_rows {
             db_batch.put_cf(self.headers_cf(), key, b"");
         }
+        debug!("PUT TIP {}", &hex::encode(&*batch.tip_row));
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
 
-        let mut opts = rocksdb::WriteOptions::new();
-        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
-        opts.set_sync(!bulk_import);
-        opts.disable_wal(bulk_import);
-        self.db.write_opt(db_batch, &opts).unwrap();
+//        let mut opts = rocksdb::WriteOptions::new();
+//        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
+//        opts.set_sync(!bulk_import);
+//        opts.disable_wal(bulk_import);
+        self.db.write(db_batch).unwrap();
+//        self.flush();
     }
 
     pub(crate) fn flush(&self) {

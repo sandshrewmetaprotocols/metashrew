@@ -108,15 +108,15 @@ fn default_opts() -> rocksdb::Options {
     block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);
 
     let mut opts = rocksdb::Options::default();
-    opts.set_keep_log_file_num(10);
-    opts.set_max_open_files(16);
+//    opts.set_keep_log_file_num(10);
+//    opts.set_max_open_files(16);
     opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
-    opts.set_compression_type(rocksdb::DBCompressionType::Zstd);
+    opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
     opts.set_target_file_size_base(256 << 20);
-    opts.set_write_buffer_size(256 << 20);
+    opts.set_write_buffer_size(256 << 24);
     opts.set_disable_auto_compactions(true); // for initial bulk load
     opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
-    opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+//    opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
     opts.set_block_based_table_factory(&block_opts);
     opts
 }

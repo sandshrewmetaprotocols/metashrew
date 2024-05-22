@@ -48,7 +48,11 @@ uuid = "1.7.0"
 wasmtime = "15.0.1"
 wasmtime-wasi = "15.0.1"
 metashrew-runtime = { path = "../runtime" }
-rocksdb = "0.22.0"
+
+[dependencies.rocksdb]
+version = "0.22.0"
+default-features = false
+features = ["lz4"]
 
 [build-dependencies]
 configure_me_codegen = { version = "0.4.4", default-features = false }

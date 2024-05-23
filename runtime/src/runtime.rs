@@ -227,7 +227,7 @@ where
             .instance
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .unwrap();
-        Self::handle_reorg(self.context.clone());
+//        Self::handle_reorg(self.context.clone());
         start.call(&mut self.wasmstore, ())
     }
 

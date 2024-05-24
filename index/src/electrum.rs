@@ -135,6 +135,7 @@ pub struct Rpc {
 impl Rpc {
     /// Perform initial index sync (may take a while on first run).
     pub fn new(config: &'static Config, metrics: Metrics) -> Result<Self> {
+        debug!("adding histogram_vec rpc_duration");
         let rpc_duration = metrics.histogram_vec(
             "rpc_duration",
             "RPC duration (in seconds)",
@@ -142,8 +143,10 @@ impl Rpc {
             metrics::default_duration_buckets(),
         );
 
+        debug!("starting tracker");
         let tracker = Tracker::new(config, metrics)?;
         let signal = Signal::new();
+        debug!("connecting to daemon");
         let daemon = Daemon::connect(config, signal.exit_flag(), tracker.metrics())?;
         let cache = Cache::new(tracker.metrics());
         Ok(Self {

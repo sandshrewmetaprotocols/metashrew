@@ -42,6 +42,7 @@ impl Tracker {
             )
             .unwrap(),
         ));
+        debug!("opened database");
         let chain = Chain::new(config.network);
         Ok(Self {
             index: Index::load(

@@ -171,6 +171,7 @@ impl Index {
         reindex_last_blocks: usize,
     ) -> Result<Self> {
         set_db(store);
+        debug!("get tip");
         if let Some(row) = store.get_tip() {
             let tip = deserialize(&row).expect("invalid tip");
             let headers = store

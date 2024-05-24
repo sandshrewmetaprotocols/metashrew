@@ -82,12 +82,14 @@ fn serve() -> Result<()> {
         spawn("accept_loop", || accept_loop(listener, server_tx)); // detach accepting thread
     };
 
+    debug!("adding histogram_vec server_batch_size");
     let server_batch_size = metrics.histogram_vec(
         "server_batch_size",
         "# of server events handled in a single batch",
         "type",
         metrics::default_size_buckets(),
     );
+    debug!("adding histogram_vec server_loop_duration");
     let duration = metrics.histogram_vec(
         "server_loop_duration",
         "server loop duration",
@@ -95,8 +97,10 @@ fn serve() -> Result<()> {
         metrics::default_duration_buckets(),
     );
     let mut rpc = Rpc::new(config, metrics)?;
+    debug!("started RPC");
 
     let new_block_rx = rpc.new_block_notification();
+    debug!("got new block notification");
     let mut peers = HashMap::<usize, Peer>::new();
     loop {
         // initial sync and compaction may take a few hours

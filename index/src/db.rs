@@ -110,13 +110,13 @@ fn default_opts() -> rocksdb::Options {
 
     let mut opts = rocksdb::Options::default();
 //    opts.set_keep_log_file_num(10);
-//    opts.set_max_open_files(16);
+    opts.set_max_open_files(-1);
     opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-    opts.set_target_file_size_base(256 << 20);
+//    opts.set_target_file_size_base(256 << 20);
     opts.set_write_buffer_size(256 << 24);
-//    opts.set_disable_auto_compactions(true); // for initial bulk load
-    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
+    opts.set_disable_auto_compactions(true); // for initial bulk load
+//    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
     opts.set_block_based_table_factory(&block_opts);
     opts
@@ -130,6 +130,7 @@ impl DBStore {
     }
 
     fn open_internal(path: &Path, log_dir: Option<&Path>, view: bool) -> Result<Self> {
+        debug!("DBStore open_internal");
         let mut db_opts = default_opts();
         db_opts.create_if_missing(true);
         db_opts.create_missing_column_families(true);
@@ -152,9 +153,11 @@ impl DBStore {
                 .path(),
             )?
         } else {
-            rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors())
-                .with_context(|| format!("failed to open DB: {}", path.display()))?
+            debug!("open_cf_descriptors");
+            rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors()).expect(&format!("failed to open DB: {}", path.display()))
+//                .with_context(|| format!("failed to open DB: {}", path.display()))?
         };
+        debug!("rocksdb opened");
         let live_files = db.live_files()?;
         info!(
             "{:?}: {} SST files, {} GB, {} Grows",
@@ -373,8 +376,8 @@ impl DBStore {
 
     fn set_config(&self, config: Config) {
         let mut opts = rocksdb::WriteOptions::default();
-        opts.set_sync(true);
-        opts.disable_wal(false);
+//        opts.set_sync(true);
+//        opts.disable_wal(false);
         let value = serde_json::to_vec(&config).expect("failed to serialize config");
         self.db
             .put_cf_opt(self.config_cf(), CONFIG_KEY, value, &opts)

@@ -59,6 +59,11 @@ doc = "JSONRPC authentication ('USER:PASSWORD', default: use cookie file)"
 # Force the user to use config file in order to avoid password leaks
 
 [[param]]
+name = "exit_at"
+type = "usize"
+doc = "Exit process after reaching the specified block"
+
+[[param]]
 name = "cookie_file"
 type = "std::path::PathBuf"
 doc = "JSONRPC authentication cookie file (default: ~/.bitcoin/.cookie)"

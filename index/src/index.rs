@@ -6,6 +6,7 @@ use itertools::Itertools;
 use rlp;
 use rocksdb::{WriteBatchWithTransaction, DB};
 use std::collections::HashSet;
+use std::process;
 use std::convert::AsRef;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use crate::{
     daemon::Daemon,
     db::{index_cf, DBStore, Row, WriteBatch},
     metrics::{self, Gauge, Histogram, Metrics},
+    server::{get_config},
     signals::ExitFlag,
     types::{
         HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow, TxidRow,
@@ -299,6 +301,13 @@ impl Index {
                 index_single_block(&mut batch, &mut self.runtime, blockarc, height, blockhasharc);
             });
             self.stats.height.set("tip", height as f64);
+            if let Some(exit_block) = get_config().exit_at {
+                if (height as usize == exit_block) {
+                  self.store.write(&batch);
+                  info!("snapshot built for block {}", height);
+                  std::process::exit(0);
+                }
+            }
         })?;
         let heights: Vec<_> = heights.collect();
         assert!(

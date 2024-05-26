@@ -129,7 +129,8 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        match self.0.write(batch.0) {
+        let mut opts = rocksdb::WriteOptions::default();
+        match self.0.write_opt(batch.0, &opts) {
           Ok(_) => Ok(()),
           Err(e) => Err(e)
         }
@@ -347,6 +348,7 @@ fn index_single_block(
     }
     // create new instance with fresh memory and run again
     if let Err(_) = runtime.run() {
+        debug!("respawn cache");
         runtime.refresh_memory();
         if let Err(e) = runtime.run() {
             panic!("runtime run failed after retry: {}", e);

@@ -35,6 +35,7 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike + Clone> {
     pub db: T,
     pub height: u32,
     pub block: SerBlock,
+    pub state: u32
 }
 
 impl<T: KeyValueStoreLike + Clone> Clone for MetashrewRuntimeContext<T> {
@@ -42,7 +43,8 @@ impl<T: KeyValueStoreLike + Clone> Clone for MetashrewRuntimeContext<T> {
     return Self {
       db: self.db.clone(),
       height: self.height,
-      block: self.block.clone()
+      block: self.block.clone(),
+      state: self.state
     };
   }
 }
@@ -53,6 +55,7 @@ impl<T: KeyValueStoreLike + Clone> MetashrewRuntimeContext<T> {
             db: db,
             height: height,
             block: block,
+            state: 0
         };
     }
 }
@@ -223,12 +226,19 @@ where
         batch.put(&key, &value_vec);
     }
     pub fn run(&mut self) -> Result<(), anyhow::Error> {
+        self.context.lock().unwrap().state = 0;
         let start = self
             .instance
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .unwrap();
 //        Self::handle_reorg(self.context.clone());
-        start.call(&mut self.wasmstore, ())
+        match start.call(&mut self.wasmstore, ()) {
+          Ok(_) => {
+            if self.context.lock().unwrap().state != 1 { return Err(anyhow!("indexer exited unexpectedly")); }
+            return Ok(());
+          },
+          Err(e) => Err(e)
+        }
     }
 
     pub fn check_latest_block_for_reorg(
@@ -440,8 +450,9 @@ where
             )
             .unwrap();
         linker
-            .func_wrap("env", "abort", |_: i32, _: i32, _: i32, _: i32| {
-              debug!("respawn cache");
+            .func_wrap("env", "abort", |mut caller: Caller<'_, State>, _: i32, _: i32, _: i32, _: i32| {
+              trap_abort(&mut caller);
+              return;
             })
             .unwrap();
     }
@@ -550,6 +561,7 @@ where
                         decoded.len() / 2,
                         height
                     );
+                    context_ref.clone().lock().unwrap().state = 1;
                     context_ref.clone().lock().unwrap().db.write(batch).unwrap();
                 },
             )

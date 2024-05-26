@@ -312,11 +312,11 @@ impl DBStore {
         }
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
 
-//        let mut opts = rocksdb::WriteOptions::new();
+        let mut opts = rocksdb::WriteOptions::default();
 //        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
 //        opts.set_sync(!bulk_import);
-//        opts.disable_wal(bulk_import);
-        self.db.write(db_batch).unwrap();
+        self.db.write_opt(db_batch, &opts).unwrap();
+//        self.db.flush_wal(true).unwrap();
 //        self.flush();
     }
 

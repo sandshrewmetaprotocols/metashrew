@@ -6,6 +6,9 @@ use hex;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
+use protobuf::{EnumOrUnknown, Message};
+
+use crate::proto::metashrew::{KeyValueFlush};
 
 type SerBlock = Vec<u8>;
 pub trait BatchLike {
@@ -539,9 +542,9 @@ where
                     };
                     let mut batch = T::Batch::default();
                     let _ = Self::db_create_empty_update_list(&mut batch, height as u32);
-                    let decoded: Vec<Vec<u8>> = rlp::decode_list(&encoded_vec);
+                    let decoded: KeyValueFlush = KeyValueFlush::parse_from_bytes(&encoded_vec).unwrap();
 
-                    for (k, v) in decoded.iter().tuples() {
+                    for (k, v) in decoded.list.iter().tuples() {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
                         let v_owned = <Vec<u8> as Clone>::clone(v);
                         Self::db_append_annotated(
@@ -558,7 +561,7 @@ where
                     }
                     debug!(
                         "saving {:?} k/v pairs for block {:?}",
-                        decoded.len() / 2,
+                        decoded.list.len() / 2,
                         height
                     );
                     context_ref.clone().lock().unwrap().state = 1;

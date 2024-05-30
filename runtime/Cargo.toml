@@ -2,6 +2,7 @@
 name = "metashrew-runtime"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -22,3 +23,9 @@ serde_json = "1.0"
 tempdir = "0.3.7"
 wasmtime-environ = "20.0.2"
 hex = "0.4.3"
+protobuf = "3"
+
+[build-dependencies]
+protobuf-codegen = "3.4.0"
+protoc-rust = { version = "2.28.0" }
+

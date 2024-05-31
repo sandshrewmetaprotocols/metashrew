@@ -298,7 +298,6 @@ where
         let length: i32 = Self::db_length_at_key(context.clone(), &key).try_into().unwrap();
         let mut index: i32 = length - 1;
         while index >= 0 {
-            println!("{}", index);
             let value: Vec<u8> = match context.lock().unwrap()
                 .db
                 .get(db_make_list_key(key, index.try_into().unwrap()))
@@ -495,10 +494,14 @@ where
       linker.func_wrap("env", "__get", move |mut caller: Caller<'_, State>, key: i32, value: i32| {
         let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
         let data = mem.data(&caller);
+        let height = {
+            let val = context_get.clone().lock().unwrap().height;
+            val
+        };
         let key_vec_result = try_read_arraybuffer_as_vec(data, key);
         match key_vec_result {
           Ok(key_vec) => {
-            let value = Self::db_value_at_block(context_get.clone(), &key_vec, context_get.lock().unwrap().height);
+            let value = Self::db_value_at_block(context_get.clone(), &key_vec, height);
             let _ = mem.write(&mut caller, value.len(), value.as_slice());
           }
           Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }
@@ -507,11 +510,15 @@ where
       linker.func_wrap("env", "__get_len", move |mut caller: Caller<'_, State>, key: i32| -> i32 {
         let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
         let data = mem.data(&caller);
+        let height = {
+            let val = context_get_len.clone().lock().unwrap().height;
+            val
+        };
         let key_vec = match try_read_arraybuffer_as_vec(data, key) {
           Ok(v) => v,
           Err(_) => { return i32::MAX }
         };
-        let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, context_get_len.lock().unwrap().height);
+        let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
         return to_signed_or_trap(&mut caller, value.len());
       }).unwrap();
     }
@@ -577,23 +584,16 @@ where
                     let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
+                    let height = {
+                        let val = context_get.clone().lock().unwrap().height;
+                        val
+                    };
                     match key_vec_result {
-                        Ok(key_vec) => {
-                            let length =
-                                Self::db_length_at_key(context_get.clone(), &db_make_length_key(&key_vec));
-                            if length != 0 {
-                                let indexed_key = db_make_list_key(&key_vec, length - 1);
-                                let mut value_vec = (context_get.clone().lock().unwrap().db)
-                                    .get(&indexed_key)
-                                    .unwrap()
-                                    .unwrap();
-                                value_vec.truncate(value_vec.len().saturating_sub(4));
-                                let len = to_usize_or_trap(&mut caller, value);
-                                let _ =
-                                    mem.write(&mut caller, len, value_vec.as_slice());
-                            }
-                        },
-                        Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }
+                      Ok(key_vec) => {
+                        let value = Self::db_value_at_block(context_get.clone(), &key_vec, height);
+                        let _ = mem.write(&mut caller, value.len(), value.as_slice());
+                      }
+                      Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }
                     };
                 },
             )
@@ -605,28 +605,18 @@ where
                 move |mut caller: Caller<'_, State>, key: i32| -> i32 {
                     let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                     let data = mem.data(&caller);
-                    let key_vec = match try_read_arraybuffer_as_vec(data, key) {
-                      Ok(v) => v,
-                      Err(_) => { return i32::MAX }
+                    let key_vec_result = try_read_arraybuffer_as_vec(data, key);
+                    let height = {
+                        let val = context_get_len.clone().lock().unwrap().height;
+                        val
                     };
-                    let length = Self::db_length_at_key(
-                        context_get_len.clone(),
-                        &db_make_length_key(&key_vec),
-                    );
-                    if length != 0 {
-                        let indexed_key = db_make_list_key(&key_vec, length - 1);
-                        let value_vec = context_get_len
-                            .clone()
-                            .lock()
-                            .unwrap()
-                            .db
-                            .get(&indexed_key)
-                            .unwrap()
-                            .unwrap();
-                        return (value_vec.len() - 4).try_into().unwrap();
-                    } else {
-                        return 0;
-                    }
+                    match key_vec_result {
+                      Ok(key_vec) => {
+                        let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
+                        return value.len() as i32;
+                      }
+                      Err(_) => { return i32::MAX; }
+                    };
                 },
             )
             .unwrap();

@@ -234,7 +234,7 @@ where
             .instance
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .unwrap();
-        Self::handle_reorg(self.context.clone());
+        self.handle_reorg();
         match start.call(&mut self.wasmstore, ()) {
           Ok(_) => {
             if self.context.lock().unwrap().state != 1 { return Err(anyhow!("indexer exited unexpectedly")); }
@@ -390,11 +390,15 @@ where
             .unwrap();
     }
 
-    pub fn handle_reorg(context: Arc<Mutex<MetashrewRuntimeContext<T>>>) {
+    pub fn handle_reorg(&mut self) {
+        let context: Arc<Mutex<MetashrewRuntimeContext<T>>> = self.context.clone();
         let height = { context.lock().unwrap().height };
         let latest: u32 = Self::check_latest_block_for_reorg(context.clone(), height);
         let set: HashSet<Vec<u8>> =
             Self::db_updated_keys_for_block_range(context.clone(), height, latest);
+        if set.len() != 0 {
+            self.refresh_memory();
+        }
         for key in set.iter() {
             Self::db_rollback_key(context.clone(), &key, height);
         }

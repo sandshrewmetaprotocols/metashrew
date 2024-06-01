@@ -346,13 +346,18 @@ fn index_single_block(
       runtime.context.lock().unwrap().height = height as u32;
       runtime.context.lock().unwrap().block = block.as_ref().clone();
     }
+    if get_config().no_cache {
+      runtime.run().unwrap();
+      runtime.refresh_memory();
+    } else {
     // create new instance with fresh memory and run again
-    if let Err(_) = runtime.run() {
+      if let Err(_) = runtime.run() {
         debug!("respawn cache");
         runtime.refresh_memory();
         if let Err(e) = runtime.run() {
             panic!("runtime run failed after retry: {}", e);
         }
+      }
     }
     struct IndexBlockVisitor<'a> {
         batch: &'a mut WriteBatch,

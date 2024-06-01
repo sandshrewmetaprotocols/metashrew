@@ -234,7 +234,7 @@ where
             .instance
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .unwrap();
-//        Self::handle_reorg(self.context.clone());
+        Self::handle_reorg(self.context.clone());
         match start.call(&mut self.wasmstore, ()) {
           Ok(_) => {
             if self.context.lock().unwrap().state != 1 { return Err(anyhow!("indexer exited unexpectedly")); }
@@ -295,7 +295,7 @@ where
         return set;
     }
     pub fn db_value_at_block(context: Arc<Mutex<MetashrewRuntimeContext<T>>>, key: &Vec<u8>, height: u32) -> Vec<u8> {
-        let length: i32 = Self::db_length_at_key(context.clone(), &key).try_into().unwrap();
+        let length: i32 = Self::db_length_at_key(context.clone(), &db_make_length_key(key)).try_into().unwrap();
         let mut index: i32 = length - 1;
         while index >= 0 {
             let value: Vec<u8> = match context.lock().unwrap()
@@ -310,7 +310,12 @@ where
             let value_height: u32 =
                 u32::from_le_bytes(value.as_slice()[(value.len() - 4)..].try_into().unwrap());
             if height >= value_height.try_into().unwrap() {
-                value.clone().truncate(value.len().saturating_sub(4));
+                let mut result = value.clone();
+                result.truncate(value.len().saturating_sub(4));
+                /*
+                panic!("exit");
+                */
+                return result;
             }
             index -= 1;
         }
@@ -501,9 +506,9 @@ where
         let key_vec_result = try_read_arraybuffer_as_vec(data, key);
         match key_vec_result {
           Ok(key_vec) => {
-            let value = Self::db_value_at_block(context_get.clone(), &key_vec, height);
-            let _ = mem.write(&mut caller, value.len(), value.as_slice());
-          }
+            let lookup = Self::db_value_at_block(context_get.clone(), &key_vec, height);
+            let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
+          },
           Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }
         };
       }).unwrap();
@@ -590,8 +595,8 @@ where
                     };
                     match key_vec_result {
                       Ok(key_vec) => {
-                        let value = Self::db_value_at_block(context_get.clone(), &key_vec, height);
-                        let _ = mem.write(&mut caller, value.len(), value.as_slice());
+                        let lookup = Self::db_value_at_block(context_get.clone(), &key_vec, height);
+                        let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
                       }
                       Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }
                     };

@@ -156,6 +156,7 @@ pub struct Config {
     pub indexer: PathBuf,
     pub view: bool,
     pub exit_at: Option<usize>,
+    pub no_cache: bool,
     pub db_log_dir: Option<PathBuf>,
     pub daemon_dir: PathBuf,
     pub daemon_auth: SensitiveAuth,
@@ -421,6 +422,7 @@ impl Config {
         let config = Config {
             network: network,
             db_path: config.db_dir,
+            no_cache: config.no_cache,
             indexer: config.indexer,
             view: config.view,
             exit_at: config.exit_at,

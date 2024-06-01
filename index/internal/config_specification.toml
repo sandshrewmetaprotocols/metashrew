@@ -116,6 +116,10 @@ name = "ignore_mempool"
 doc = "Don't sync mempool - queries will show only confirmed transactions."
 
 [[switch]]
+name = "no_cache"
+doc = "Don't retain WASM memory"
+
+[[switch]]
 name = "disable_electrum_rpc"
 doc = "Disable Electrum RPC server - only sync and index blocks."
 

@@ -9,6 +9,8 @@ use std::env;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
+use std::process::id;
+use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
 use wasmtime::{
@@ -16,6 +18,7 @@ use wasmtime::{
     Module, Mutability, SharedMemory, Store, Val, ValType,
 };
 
+static mut init_db: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub WriteBatch);
 
@@ -151,10 +154,28 @@ async fn view(
             Ok(val) => val,
             Err(e) => "/mnt/volume/rocksdb".to_string(),
         };
-        let db: &'static DB = Box::leak(Box::new(
-            DB::open_cf_for_read_only(&Options::default(), db_path, create_cf_descriptors(), false).unwrap(),
-        ));
-        let internal_db = RocksDBRuntimeAdapter(db);
+        let time = SystemTime::now();
+        let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
+        let secondary = match env::var("DB_LOCATION"){
+            Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
+            Err(e) => "/mnt/volume/rocksdb".to_string(),
+        };
+        let db_ = match unsafe { init_db } {
+            Some(db) => {
+                db.try_catch_up_with_primary();
+                db
+            },
+            None => {
+                let db = Box::leak(Box::new(
+                    DB::open_cf_as_secondary(&Options::default(), db_path, secondary, create_cf_descriptors()).unwrap(),
+                ));
+                unsafe {
+                    init_db = Some(db);
+                }
+                db
+            }
+        };
+        let internal_db = RocksDBRuntimeAdapter(db_);
         let mut runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
         let height = body.params[3].parse::<u32>().unwrap();

@@ -2,7 +2,7 @@ use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use rlp::Rlp;
-use rocksdb::{Options, DB};
+use rocksdb::{WriteBatch, ColumnFamily, Options, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
@@ -17,13 +17,12 @@ use wasmtime::{
 };
 
 pub struct RocksDBRuntimeAdapter(&'static DB);
-pub struct RocksDBBatch(pub rocksdb::WriteBatch);
+pub struct RocksDBBatch(pub WriteBatch);
 
-pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
+pub fn index_cf(db: &DB) -> &ColumnFamily {
     db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
 }
 
-const INDEX_CF: &str = "index";
 
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
@@ -33,7 +32,7 @@ impl Clone for RocksDBRuntimeAdapter {
 
 impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
-        RocksDBBatch(rocksdb::WriteBatch::default())
+        RocksDBBatch(WriteBatch::default())
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
     }
@@ -88,6 +87,38 @@ struct Context {
     path: PathBuf,
 }
 
+fn default_opts() -> rocksdb::Options {
+    let mut block_opts = rocksdb::BlockBasedOptions::default();
+    block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);
+
+    let mut opts = rocksdb::Options::default();
+//    opts.set_keep_log_file_num(10);
+    opts.set_max_open_files(-1);
+    opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
+    opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+//    opts.set_target_file_size_base(256 << 20);
+    opts.set_write_buffer_size(256 << 24);
+    opts.set_disable_auto_compactions(true); // for initial bulk load
+//    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
+    opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+    opts.set_block_based_table_factory(&block_opts);
+    opts
+}
+const CONFIG_CF: &str = "config";
+const HEADERS_CF: &str = "headers";
+const TXID_CF: &str = "txid";
+const FUNDING_CF: &str = "funding";
+const SPENDING_CF: &str = "spending";
+const INDEX_CF: &str = "index";
+
+const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF];
+
+
+fn create_cf_descriptors() -> Vec<&'static str> {
+    COLUMN_FAMILIES.into()
+}
+
+
 #[post("/")]
 async fn view(
     body: web::Json<JsonRpcRequest>,
@@ -121,7 +152,7 @@ async fn view(
             Err(e) => "/mnt/volume/rocksdb".to_string(),
         };
         let db: &'static DB = Box::leak(Box::new(
-            DB::open_for_read_only(&Options::default(), db_path, false).unwrap(),
+            DB::open_cf_for_read_only(&Options::default(), db_path, create_cf_descriptors(), false).unwrap(),
         ));
         let internal_db = RocksDBRuntimeAdapter(db);
         let mut runtime =

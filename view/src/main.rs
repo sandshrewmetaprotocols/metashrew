@@ -2,7 +2,7 @@ use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use rlp::Rlp;
-use rocksdb::{WriteBatch, ColumnFamily, Options, DB};
+use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
@@ -26,7 +26,6 @@ pub fn index_cf(db: &DB) -> &ColumnFamily {
     db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
 }
 
-
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
         return Self(self.0);
@@ -37,8 +36,7 @@ impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
         RocksDBBatch(WriteBatch::default())
     }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-    }
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {}
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
@@ -95,14 +93,14 @@ fn default_opts() -> rocksdb::Options {
     block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);
 
     let mut opts = rocksdb::Options::default();
-//    opts.set_keep_log_file_num(10);
+    //    opts.set_keep_log_file_num(10);
     opts.set_max_open_files(-1);
     opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-//    opts.set_target_file_size_base(256 << 20);
+    //    opts.set_target_file_size_base(256 << 20);
     opts.set_write_buffer_size(256 << 24);
     opts.set_disable_auto_compactions(true); // for initial bulk load
-//    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
+                                             //    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
     opts.set_block_based_table_factory(&block_opts);
     opts
@@ -114,13 +112,18 @@ const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
 
-const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF];
-
+const COLUMN_FAMILIES: &[&str] = &[
+    CONFIG_CF,
+    HEADERS_CF,
+    TXID_CF,
+    FUNDING_CF,
+    SPENDING_CF,
+    INDEX_CF,
+];
 
 fn create_cf_descriptors() -> Vec<&'static str> {
     COLUMN_FAMILIES.into()
 }
-
 
 #[post("/")]
 async fn view(
@@ -156,26 +159,29 @@ async fn view(
         };
         let time = SystemTime::now();
         let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
-        let secondary = match env::var("DB_LOCATION"){
+        let secondary = match env::var("DB_LOCATION") {
             Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
             Err(e) => "/mnt/volume/rocksdb".to_string(),
         };
-        let db_ = match unsafe { init_db } {
-            Some(db) => {
-                db.try_catch_up_with_primary();
-                db
-            },
-            None => {
-                let db = Box::leak(Box::new(
-                    DB::open_cf_as_secondary(&Options::default(), db_path, secondary, create_cf_descriptors()).unwrap(),
-                ));
-                unsafe {
-                    init_db = Some(db);
+        unsafe {
+            match init_db {
+                Some(db) => {
+                    db.try_catch_up_with_primary();
                 }
-                db
-            }
-        };
-        let internal_db = RocksDBRuntimeAdapter(db_);
+                None => {
+                    init_db = Some(Box::leak(Box::new(
+                        DB::open_cf_as_secondary(
+                            &Options::default(),
+                            db_path,
+                            secondary,
+                            create_cf_descriptors(),
+                        )
+                        .unwrap(),
+                    )));
+                }
+            };
+        }
+        let internal_db = unsafe { RocksDBRuntimeAdapter(init_db.unwrap()) };
         let mut runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
         let height = body.params[3].parse::<u32>().unwrap();

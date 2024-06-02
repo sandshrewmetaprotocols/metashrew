@@ -126,6 +126,8 @@ async fn view(
         let internal_db = RocksDBRuntimeAdapter(db);
         let mut runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
+        let height = body.params[3].parse::<u32>().unwrap();
+        runtime.context.lock().unwrap().height = height;
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
             result: hex::encode(
@@ -135,7 +137,7 @@ async fn view(
                         &hex::decode(
                             body.params[2]
                                 .to_string()
-                                .substring(2, body.params[2].len() - 2),
+                                .substring(2, body.params[2].len()),
                         )
                         .unwrap(),
                         body.params[3].parse::<u32>().unwrap(),

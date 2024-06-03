@@ -153,34 +153,6 @@ async fn view(
             };
             return Ok(HttpResponse::Ok().json(resp));
         }
-        let db_path = match env::var("DB_LOCATION") {
-            Ok(val) => val,
-            Err(e) => "/mnt/volume/rocksdb".to_string(),
-        };
-        let time = SystemTime::now();
-        let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
-        let secondary = match env::var("DB_LOCATION") {
-            Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
-            Err(e) => "/mnt/volume/rocksdb".to_string(),
-        };
-        unsafe {
-            match init_db {
-                Some(db) => {
-                    db.try_catch_up_with_primary();
-                }
-                None => {
-                    init_db = Some(Box::leak(Box::new(
-                        DB::open_cf_as_secondary(
-                            &Options::default(),
-                            db_path,
-                            secondary,
-                            create_cf_descriptors(),
-                        )
-                        .unwrap(),
-                    )));
-                }
-            };
-        }
         let internal_db = unsafe { RocksDBRuntimeAdapter(init_db.unwrap()) };
         let mut runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
@@ -227,6 +199,28 @@ async fn main() -> std::io::Result<()> {
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
     println!("program hash: 0x{}", hex::encode(output));
+    let db_path = match env::var("DB_LOCATION") {
+        Ok(val) => val,
+        Err(e) => "/mnt/volume/rocksdb".to_string(),
+    };
+    let time = SystemTime::now();
+    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
+    let secondary = match env::var("DB_LOCATION") {
+        Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
+        Err(e) => "/mnt/volume/rocksdb".to_string(),
+    };
+    unsafe {
+        init_db = Some(Box::leak(Box::new(
+            DB::open_cf_as_secondary(
+                &Options::default(),
+                db_path,
+                secondary,
+                create_cf_descriptors(),
+            )
+            .unwrap(),
+        )));
+    }
+    println!("initialized rocksdb as secondary");
     let path_clone: PathBuf = path.into();
 
     HttpServer::new(move || {

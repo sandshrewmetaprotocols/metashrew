@@ -26,7 +26,6 @@ use crate::{
     tracker::Tracker,
     types::ScriptHash,
 };
-use wasmtime::{Linker, Store};
 
 const PROTOCOL_VERSION: &str = "1.4";
 const UNKNOWN_FEE: isize = -1; // (allowed by Electrum protocol)

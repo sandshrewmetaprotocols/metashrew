@@ -1,21 +1,16 @@
 use anyhow::{Context, Result};
-use bitcoin::block::Header;
 use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use rocksdb;
 use itertools::Itertools;
-use rlp;
-use rocksdb::{WriteBatchWithTransaction, DB};
-use std::collections::HashSet;
-use std::process;
+use rocksdb::{DB};
 use std::convert::AsRef;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::ops::ControlFlow;
-use wasmtime::{Caller, Linker, Store};
 use bitcoin_slices::{bsl, Visitor, Visit};
 
-use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
+use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 
 use crate::{
     chain::{Chain, NewHeader},
@@ -130,7 +125,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        let mut opts = rocksdb::WriteOptions::default();
+        let opts = rocksdb::WriteOptions::default();
         match self.0.write_opt(batch.0, &opts) {
           Ok(_) => Ok(()),
           Err(e) => Err(e)
@@ -304,7 +299,7 @@ impl Index {
             });
             self.stats.height.set("tip", height as f64);
             if let Some(exit_block) = get_config().exit_at {
-                if (height as usize == exit_block) {
+                if height as usize == exit_block {
                   self.store.write(&batch);
                   info!("snapshot built for block {}", height);
                   std::process::exit(0);

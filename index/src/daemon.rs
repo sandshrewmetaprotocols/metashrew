@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
 
-use bitcoin::{Amount, BlockHash, Network, Transaction, Txid};
+use bitcoin::{Amount, BlockHash, Transaction, Txid};
 use bitcoincore_rpc::{json, jsonrpc, Auth, Client, RpcApi};
 use crossbeam_channel::Receiver;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 
 use std::fs::File;
 use std::io::Read;

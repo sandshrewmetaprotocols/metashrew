@@ -10,10 +10,16 @@ use uuid::Uuid;
 
 pub(crate) type Row = Box<[u8]>;
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone)]
+pub struct HeaderRow {
+    pub row: Row,
+    pub height: u32,
+}
+
 #[derive(Default)]
 pub(crate) struct WriteBatch {
     pub(crate) tip_row: Row,
-    pub(crate) header_rows: Vec<Row>,
+    pub(crate) header_rows: Vec<HeaderRow>,
     pub(crate) funding_rows: Vec<Row>,
     pub(crate) spending_rows: Vec<Row>,
     pub(crate) txid_rows: Vec<Row>,
@@ -308,7 +314,7 @@ impl DBStore {
             db_batch.put_cf(self.txid_cf(), key, b"");
         }
         for key in &batch.header_rows {
-            db_batch.put_cf(self.headers_cf(), key, b"");
+            db_batch.put_cf(self.headers_cf(), &key.row, &key.height.to_le_bytes());
         }
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
 

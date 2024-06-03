@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use bitcoin::block::Header;
 use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use rocksdb;
@@ -68,7 +69,7 @@ impl Stats {
         self.observe_size("write_funding_rows", &batch.funding_rows);
         self.observe_size("write_spending_rows", &batch.spending_rows);
         self.observe_size("write_txid_rows", &batch.txid_rows);
-        self.observe_size("write_header_rows", &batch.header_rows);
+        self.observe_size("write_header_rows", &batch.header_rows.clone().into_iter().map(|header| header.row).collect::<Vec<_>>());
         /*
         debug!(
             "writing {} funding and {} spending rows from {} transactions, {} blocks",
@@ -146,7 +147,6 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         self.0.put_cf(index_cf(self.0), key, value)
     }
 }
-
 /// Confirmed transactions' address index
 pub struct Index {
     pub store: &'static DBStore,
@@ -380,9 +380,11 @@ fn index_single_block(
         fn visit_block_header(&mut self, header: &bsl::BlockHeader) -> ControlFlow<()> {
             let header = bitcoin::block::Header::consensus_decode(&mut header.as_ref())
                 .expect("block header was already validated");
+            let new_row = 
             self.batch
                 .header_rows
-                .push(HeaderRow::new(header).to_db_row());
+
+                .push(crate::db::HeaderRow { row: HeaderRow::new(header).to_db_row(), height: self.height as u32 });
             ControlFlow::Continue(())
         }
     }

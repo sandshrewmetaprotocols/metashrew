@@ -168,6 +168,8 @@ async fn view(
         if body.params[3] == "latest" {
             unsafe{
                 let tip_header = init_db.unwrap().get_cf(headers_cf(init_db.expect("db isn't there")), TIP_KEY).expect("get tip failed");
+                let deserialized = deserialize::<Vec<u8>>(&(tip_header.unwrap()));
+                print!("{:?}", deserialized);
                 // get the height out of the header_row
                 let row = init_db.unwrap().get_cf(headers_cf(init_db.expect("db wasn't there")), deserialize::<Vec<u8>>((&(tip_header.unwrap()))).expect("invalid tip")).expect("get header failed");
                 height = u32::from_le_bytes(row.unwrap().try_into().unwrap());

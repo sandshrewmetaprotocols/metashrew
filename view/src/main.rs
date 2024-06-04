@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::process::id;
 use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
+use bitcoin::consensus::{deserialize};
 use tiny_keccak::{Hasher, Sha3};
 use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
@@ -168,7 +169,7 @@ async fn view(
             unsafe{
                 let tip_header = init_db.unwrap().get_cf(headers_cf(init_db.expect("db isn't there")), TIP_KEY).expect("get tip failed");
                 // get the height out of the header_row
-                let row = init_db.unwrap().get_cf(headers_cf(init_db.expect("db wasn't there")), tip_header.unwrap()).expect("get header failed");
+                let row = init_db.unwrap().get_cf(headers_cf(init_db.expect("db wasn't there")), deserialize::<Vec<u8>>((&(tip_header.unwrap()))).expect("invalid tip")).expect("get header failed");
                 height = u32::from_le_bytes(row.unwrap().try_into().unwrap());
             }
         } else {

@@ -163,12 +163,17 @@ async fn view(
         let internal_db = unsafe { RocksDBRuntimeAdapter(init_db.unwrap()) };
         let runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
+        let height: u32;
         if body.params[3] == "latest" {
             unsafe{
-                let tip_header = init_db.unwrap().get_cf(headers_cf(init_db), TIP_KEY).expect("get tip failed");
+                let tip_header = init_db.unwrap().get_cf(headers_cf(init_db.expect("db isn't there")), TIP_KEY).expect("get tip failed");
+                // get the height out of the header_row
+                let row = init_db.unwrap().get_cf(headers_cf(init_db.expect("db wasn't there")), tip_header.unwrap()).expect("get header failed");
+                height = u32::from_le_bytes(row.unwrap().try_into().unwrap());
             }
+        } else {
+            height = body.params[3].parse::<u32>().unwrap();
         }
-        let height = body.params[3].parse::<u32>().unwrap();
         runtime.context.lock().unwrap().height = height;
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,

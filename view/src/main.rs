@@ -22,9 +22,16 @@ static mut init_db: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub WriteBatch);
 
+pub const TIP_KEY: &[u8] = b"T";
+
 pub fn index_cf(db: &DB) -> &ColumnFamily {
     db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
 }
+
+pub fn headers_cf(db: &DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
+}
+
 
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
@@ -154,8 +161,13 @@ async fn view(
             return Ok(HttpResponse::Ok().json(resp));
         }
         let internal_db = unsafe { RocksDBRuntimeAdapter(init_db.unwrap()) };
-        let mut runtime =
+        let runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
+        if body.params[3] == "latest" {
+            unsafe{
+                let tip_header = init_db.unwrap().get_cf(headers_cf(init_db), TIP_KEY).expect("get tip failed");
+            }
+        }
         let height = body.params[3].parse::<u32>().unwrap();
         runtime.context.lock().unwrap().height = height;
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
@@ -206,7 +218,7 @@ async fn main() -> std::io::Result<()> {
     let time = SystemTime::now();
     let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
     let secondary = match env::var("DB_LOCATION") {
-        Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
+        Ok(val) => val + &'-'.to_string() + &id().to_string() + &'-'.to_string() + &since_epoch.as_millis().to_string(),
         Err(e) => "/mnt/volume/rocksdb".to_string(),
     };
     unsafe {

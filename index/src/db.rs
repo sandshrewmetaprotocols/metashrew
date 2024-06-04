@@ -1,6 +1,7 @@
-use anyhow::{Result};
+use anyhow::{Context, Result};
 use rocksdb;
 
+use hex;
 use rand::random;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -193,10 +194,10 @@ impl DBStore {
         auto_reindex: bool,
         view: bool,
     ) -> Result<Self> {
-        let store = Self::open_internal(path, log_dir, view)?;
+        let mut store = Self::open_internal(path, log_dir, view)?;
         let config = store.get_config();
         debug!("DB {:?}", config);
-        let config = config.unwrap_or_default(); // use default config when DB is empty
+        let mut config = config.unwrap_or_default(); // use default config when DB is empty
 
         let reindex_cause = if store.is_legacy_format() {
             Some("legacy format".to_owned())
@@ -317,7 +318,7 @@ impl DBStore {
         }
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
 
-        let opts = rocksdb::WriteOptions::default();
+        let mut opts = rocksdb::WriteOptions::default();
 //        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
 //        opts.set_sync(!bulk_import);
         self.db.write_opt(db_batch, &opts).unwrap();
@@ -380,7 +381,7 @@ impl DBStore {
     }
 
     fn set_config(&self, config: Config) {
-        let opts = rocksdb::WriteOptions::default();
+        let mut opts = rocksdb::WriteOptions::default();
 //        opts.set_sync(true);
 //        opts.disable_wal(false);
         let value = serde_json::to_vec(&config).expect("failed to serialize config");

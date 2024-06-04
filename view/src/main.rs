@@ -1,6 +1,7 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
+use bitcoin::consensus::{deserialize, serialize};
 use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
@@ -12,7 +13,6 @@ use std::path::PathBuf;
 use std::process::id;
 use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
-use bitcoin::consensus::{deserialize};
 use tiny_keccak::{Hasher, Sha3};
 use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
@@ -133,6 +133,22 @@ fn create_cf_descriptors() -> Vec<&'static str> {
     COLUMN_FAMILIES.into()
 }
 
+/*
+fn to_db_row(&self) -> db::Row {
+  let mut vec = Vec::with_capacity(HEADER_ROW_SIZE);
+  vec.into_boxed_slice()
+}
+fn read_headers(&self) -> Vec<Row> {
+    let mut opts = rocksdb::ReadOptions::default();
+    opts.fill_cache(false);
+    self.db
+        .iterator_cf_opt(unsafe { headers_cf(init_db.expect("db isn't there")) }, opts, rocksdb::IteratorMode::Start)
+        .map(|row| row.expect("header iterator failed").0) // extract key from row
+        .filter(|key| &key[..] != TIP_KEY) // headers' rows are longer than TIP_KEY
+        .collect()
+}
+*/
+
 #[post("/")]
 async fn view(
     body: web::Json<JsonRpcRequest>,
@@ -168,10 +184,11 @@ async fn view(
         if body.params[3] == "latest" {
             unsafe{
                 let tip_header = init_db.unwrap().get_cf(headers_cf(init_db.expect("db isn't there")), TIP_KEY).expect("get tip failed");
-                let deserialized = deserialize::<Vec<u8>>(&(tip_header.unwrap()));
-                print!("{:?}", deserialized);
+                let deserialized = deserialize::<Vec<u8>>(&(tip_header.as_ref().unwrap()));
+                println!("deserialized: {:?}", &deserialized);
                 // get the height out of the header_row
-                let row = init_db.unwrap().get_cf(headers_cf(init_db.expect("db wasn't there")), deserialize::<Vec<u8>>((&(tip_header.unwrap()))).expect("invalid tip")).expect("get header failed");
+                let row = init_db.unwrap().get_cf(headers_cf(init_db.expect("db wasn't there")), tip_header.as_ref().unwrap()).unwrap();
+                println!("row: {:?}", &row);
                 height = u32::from_le_bytes(row.unwrap().try_into().unwrap());
             }
         } else {

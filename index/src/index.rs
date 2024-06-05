@@ -111,17 +111,17 @@ impl BatchLike for RocksDBBatch {
     }
 }
 
-static mut _db: Option<&'static DBStore> = None;
+static mut _DB: Option<&'static DBStore> = None;
 
 pub fn set_db(store: &'static DBStore) {
   unsafe {
-    _db = Some(store);
+    _DB = Some(store);
   }
 }
 
 pub fn get_db() -> &'static rocksdb::DB {
   unsafe {
-    &(_db.unwrap()).db
+    &(_DB.unwrap()).db
   }
 }
 

@@ -1,6 +1,7 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
+use bitcoin::consensus::{deserialize, serialize};
 use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,7 @@ const TXID_CF: &str = "txid";
 const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
+const HEIGHT_CF: &str = "height";
 const HEIGHT_KEY: &[u8] = b"H";
 
 const COLUMN_FAMILIES: &[&str] = &[
@@ -120,6 +122,7 @@ const COLUMN_FAMILIES: &[&str] = &[
     FUNDING_CF,
     SPENDING_CF,
     INDEX_CF,
+    HEIGHT_CF
 ];
 
 fn create_cf_descriptors() -> Vec<&'static str> {
@@ -128,6 +131,10 @@ fn create_cf_descriptors() -> Vec<&'static str> {
 
 pub fn headers_cf(db: &DB) -> &rocksdb::ColumnFamily {
     db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
+}
+
+pub fn height_cf(db: &DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(HEIGHT_CF).expect("missing HEIGHT_CF")
 }
 
 #[post("/")]
@@ -166,9 +173,9 @@ async fn view(
             unsafe {
                 let height_bytes: Vec<u8> = init_db
                         .unwrap()
-                        .get_cf(headers_cf(init_db.expect("db isn't there")), HEIGHT_KEY)
+                        .get_cf(height_cf(init_db.expect("db isn't there")), HEIGHT_KEY)
                         .expect("get tip failed").unwrap();
-                height = u32::from_le_bytes(height_bytes.try_into().unwrap());
+                height = u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap());
             }
         } else {
             height = body.params[3].parse::<u32>().unwrap();

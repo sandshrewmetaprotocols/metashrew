@@ -41,12 +41,17 @@ const TXID_CF: &str = "txid";
 const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
+const HEIGHT_CF: &str = "height";
 
-const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF];
+const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF, HEIGHT_CF];
 
 const CONFIG_KEY: &str = "C";
 pub(crate) const TIP_KEY: &[u8] = b"T";
 pub(crate) const HEIGHT_KEY: &[u8] = b"H";
+
+pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
+}
 
 // Taken from https://github.com/facebook/rocksdb/blob/master/include/rocksdb/db.h#L654-L689
 const DB_PROPERIES: &[&str] = &[
@@ -102,9 +107,6 @@ impl Default for Config {
     }
 }
 
-pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
-    db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
-}
 
 fn default_opts() -> rocksdb::Options {
     let mut block_opts = rocksdb::BlockBasedOptions::default();
@@ -253,6 +255,9 @@ impl DBStore {
     fn headers_cf(&self) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
     }
+    fn height_cf(&self) -> &rocksdb::ColumnFamily {
+        self.db.cf_handle(HEIGHT_CF).expect("missing HEADERS_CF")
+    }
     fn index_cf(&self) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
     }
@@ -313,7 +318,7 @@ impl DBStore {
             db_batch.put_cf(self.headers_cf(), key, b"");
         }
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
-        db_batch.put_cf(self.headers_cf(), HEIGHT_KEY, (&batch.tip_height.to_le_bytes()));
+        db_batch.put_cf(self.height_cf(), HEIGHT_KEY, &batch.tip_height.to_le_bytes().to_vec());
 
         let mut opts = rocksdb::WriteOptions::default();
 //        let bulk_import = self.bulk_import.load(Ordering::Relaxed);

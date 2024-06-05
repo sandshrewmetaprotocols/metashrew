@@ -13,6 +13,7 @@ pub(crate) type Row = Box<[u8]>;
 #[derive(Default)]
 pub(crate) struct WriteBatch {
     pub(crate) tip_row: Row,
+    pub(crate) tip_height: u32,
     pub(crate) header_rows: Vec<Row>,
     pub(crate) funding_rows: Vec<Row>,
     pub(crate) spending_rows: Vec<Row>,
@@ -45,6 +46,7 @@ const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, S
 
 const CONFIG_KEY: &str = "C";
 pub(crate) const TIP_KEY: &[u8] = b"T";
+pub(crate) const HEIGHT_KEY: &[u8] = b"H";
 
 // Taken from https://github.com/facebook/rocksdb/blob/master/include/rocksdb/db.h#L654-L689
 const DB_PROPERIES: &[&str] = &[
@@ -311,6 +313,7 @@ impl DBStore {
             db_batch.put_cf(self.headers_cf(), key, b"");
         }
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
+        db_batch.put_cf(self.headers_cf(), HEIGHT_KEY, (&batch.tip_height.to_le_bytes()));
 
         let mut opts = rocksdb::WriteOptions::default();
 //        let bulk_import = self.bulk_import.load(Ordering::Relaxed);

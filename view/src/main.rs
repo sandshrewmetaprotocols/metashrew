@@ -111,6 +111,7 @@ const TXID_CF: &str = "txid";
 const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
+const HEIGHT_KEY: &[u8] = b"H";
 
 const COLUMN_FAMILIES: &[&str] = &[
     CONFIG_CF,
@@ -123,6 +124,10 @@ const COLUMN_FAMILIES: &[&str] = &[
 
 fn create_cf_descriptors() -> Vec<&'static str> {
     COLUMN_FAMILIES.into()
+}
+
+pub fn headers_cf(db: &DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
 }
 
 #[post("/")]
@@ -156,8 +161,18 @@ async fn view(
         let internal_db = unsafe { RocksDBRuntimeAdapter(init_db.unwrap()) };
         let mut runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
-        let height = body.params[3].parse::<u32>().unwrap();
-        runtime.context.lock().unwrap().height = height;
+        let mut height: u32 = 0;
+        if body.params[3] == "latest" {
+            unsafe {
+                let height_bytes: Vec<u8> = init_db
+                        .unwrap()
+                        .get_cf(headers_cf(init_db.expect("db isn't there")), HEIGHT_KEY)
+                        .expect("get tip failed").unwrap();
+                height = u32::from_le_bytes(height_bytes.try_into().unwrap());
+            }
+        } else {
+            height = body.params[3].parse::<u32>().unwrap();
+        }
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
             result: hex::encode(
@@ -170,7 +185,7 @@ async fn view(
                                 .substring(2, body.params[2].len()),
                         )
                         .unwrap(),
-                        body.params[3].parse::<u32>().unwrap(),
+                        height,
                     )
                     .unwrap(),
             ),
@@ -209,6 +224,7 @@ async fn main() -> std::io::Result<()> {
         Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
         Err(e) => "/mnt/volume/rocksdb".to_string(),
     };
+    println!("acquiring database handle -- this takes a while ...");
     unsafe {
         init_db = Some(Box::leak(Box::new(
             DB::open_cf_as_secondary(
@@ -220,7 +236,7 @@ async fn main() -> std::io::Result<()> {
             .unwrap(),
         )));
     }
-    println!("initialized rocksdb as secondary");
+    println!("rocksdb opened in secondary");
     let path_clone: PathBuf = path.into();
 
     HttpServer::new(move || {

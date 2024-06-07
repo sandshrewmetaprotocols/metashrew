@@ -377,6 +377,7 @@ fn index_single_block(
     let mut index_block = IndexBlockVisitor { batch };
     bsl::Block::visit(&block, &mut index_block).expect("core returned invalid block");
     batch.tip_row = serialize(blockhash.as_ref()).into_boxed_slice();
+    batch.tip_height = height as u32;
 
     // save block hash to the headers_cf
 

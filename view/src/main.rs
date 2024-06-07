@@ -2,13 +2,15 @@ use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 //use rlp::Rlp;
-use rocksdb::{Options, DB};
+use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 //use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
+use std::process::id;
+use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
 /*
@@ -18,14 +20,13 @@ use wasmtime::{
 };
 */
 
+static mut INIT_DB: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
-pub struct RocksDBBatch(pub rocksdb::WriteBatch);
+pub struct RocksDBBatch(pub WriteBatch);
 
-pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
+pub fn index_cf(db: &DB) -> &ColumnFamily {
     db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
 }
-
-const INDEX_CF: &str = "index";
 
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
@@ -37,8 +38,7 @@ impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
         RocksDBBatch(rocksdb::WriteBatch::default())
     }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, _k: K, _v: V) {
-    }
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, _k: K, _v: V) {}
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
@@ -92,6 +92,56 @@ struct Context {
     path: PathBuf,
 }
 
+/*
+fn default_opts() -> rocksdb::Options {
+    let mut block_opts = rocksdb::BlockBasedOptions::default();
+    block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);
+
+    let mut opts = rocksdb::Options::default();
+    //    opts.set_keep_log_file_num(10);
+    opts.set_max_open_files(-1);
+    opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
+    opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+    //    opts.set_target_file_size_base(256 << 20);
+    opts.set_write_buffer_size(256 << 24);
+    opts.set_disable_auto_compactions(true); // for initial bulk load
+                                             //    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
+    opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
+    opts.set_block_based_table_factory(&block_opts);
+    opts
+}
+*/
+const CONFIG_CF: &str = "config";
+const HEADERS_CF: &str = "headers";
+const TXID_CF: &str = "txid";
+const FUNDING_CF: &str = "funding";
+const SPENDING_CF: &str = "spending";
+const INDEX_CF: &str = "index";
+const HEIGHT_CF: &str = "height";
+const HEIGHT_KEY: &[u8] = b"H";
+
+const COLUMN_FAMILIES: &[&str] = &[
+    CONFIG_CF,
+    HEADERS_CF,
+    TXID_CF,
+    FUNDING_CF,
+    SPENDING_CF,
+    INDEX_CF,
+    HEIGHT_CF,
+];
+
+fn create_cf_descriptors() -> Vec<&'static str> {
+    COLUMN_FAMILIES.into()
+}
+
+pub fn headers_cf(db: &DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
+}
+
+pub fn height_cf(db: &DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(HEIGHT_CF).expect("missing HEIGHT_CF")
+}
+
 #[post("/")]
 async fn view(
     body: web::Json<JsonRpcRequest>,
@@ -120,16 +170,21 @@ async fn view(
             };
             return Ok(HttpResponse::Ok().json(resp));
         }
-        let db_path = match env::var("DB_LOCATION") {
-            Ok(val) => val,
-            Err(_e) => "/mnt/volume/rocksdb".to_string(),
-        };
-        let db: &'static DB = Box::leak(Box::new(
-            DB::open_for_read_only(&Options::default(), db_path, false).unwrap(),
-        ));
-        let internal_db = RocksDBRuntimeAdapter(db);
+        let internal_db = unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) };
         let runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
+        let height: u32 = if body.params[3] == "latest" {
+            unsafe {
+                let height_bytes: Vec<u8> = INIT_DB
+                    .unwrap()
+                    .get_cf(height_cf(INIT_DB.expect("db isn't there")), HEIGHT_KEY)
+                    .expect("get tip failed")
+                    .unwrap();
+                u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap())
+            }
+        } else {
+            body.params[3].parse::<u32>().unwrap()
+        };
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
             result: hex::encode(
@@ -139,10 +194,10 @@ async fn view(
                         &hex::decode(
                             body.params[2]
                                 .to_string()
-                                .substring(2, body.params[2].len() - 2),
+                                .substring(2, body.params[2].len()),
                         )
                         .unwrap(),
-                        body.params[3].parse::<u32>().unwrap(),
+                        height,
                     )
                     .unwrap(),
             ),
@@ -171,6 +226,29 @@ async fn main() -> std::io::Result<()> {
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
     println!("program hash: 0x{}", hex::encode(output));
+    let db_path = match env::var("DB_LOCATION") {
+        Ok(val) => val,
+        Err(_e) => "/mnt/volume/rocksdb".to_string(),
+    };
+    let time = SystemTime::now();
+    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
+    let secondary = match env::var("DB_LOCATION") {
+        Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
+        Err(_e) => "/mnt/volume/rocksdb".to_string(),
+    };
+    println!("acquiring database handle -- this takes a while ...");
+    unsafe {
+        INIT_DB = Some(Box::leak(Box::new(
+            DB::open_cf_as_secondary(
+                &Options::default(),
+                db_path,
+                secondary,
+                create_cf_descriptors(),
+            )
+            .unwrap(),
+        )));
+    }
+    println!("rocksdb opened in secondary");
     let path_clone: PathBuf = path.into();
 
     HttpServer::new(move || {

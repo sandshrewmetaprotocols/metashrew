@@ -5,7 +5,7 @@ use bitcoin::{
     BlockHash, Txid,
 };
 use crossbeam_channel::Receiver;
-use hex;
+//use hex;
 use rayon::prelude::*;
 use serde_derive::Deserialize;
 use serde_json::{self, json, Value};
@@ -26,7 +26,7 @@ use crate::{
     tracker::Tracker,
     types::ScriptHash,
 };
-use wasmtime::{Linker, Store};
+//use wasmtime::{Linker, Store};
 
 const PROTOCOL_VERSION: &str = "1.4";
 const UNKNOWN_FEE: isize = -1; // (allowed by Electrum protocol)
@@ -122,7 +122,6 @@ impl RpcError {
 
 /// Electrum RPC handler
 pub struct Rpc {
-    config: &'static Config,
     tracker: Tracker,
     cache: Cache,
     rpc_duration: Histogram,
@@ -150,7 +149,6 @@ impl Rpc {
         let daemon = Daemon::connect(config, signal.exit_flag(), tracker.metrics())?;
         let cache = Cache::new(tracker.metrics());
         Ok(Self {
-            config,
             tracker,
             cache,
             rpc_duration,
@@ -225,8 +223,8 @@ impl Rpc {
         };
         Ok(json!(serialize_hex(header)))
     }
+    /*
     fn view(&self, (symbol, input_rlp, block_tag): &(String, String, String)) -> Result<Value> {
-        /*
         let engine = wasmtime::Engine::default();
         let module =
             wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string())
@@ -270,9 +268,9 @@ impl Rpc {
         let mem = instance.get_memory(&mut store, "memory").unwrap();
         let data = mem.data(&mut store);
         let encoded_vec = read_arraybuffer_as_vec(data, result);
-        */
         return Ok(json!({ "result": hex::encode(Vec::<u8>::new())  }));
     }
+*/
 
     fn block_headers(&self, (start_height, count): (usize, usize)) -> Result<Value> {
         let chain = self.tracker.chain();
@@ -616,7 +614,7 @@ impl Rpc {
                 Params::TransactionGetMerkle(args) => self.transaction_get_merkle(args),
                 Params::TransactionFromPosition(args) => self.transaction_from_pos(*args),
                 Params::Version(args) => self.version(args),
-                Params::View(args) => self.view(args),
+                //Params::View(args) => self.view(args),
             };
             call.response(result)
         })
@@ -646,7 +644,7 @@ enum Params {
     TransactionGetMerkle((Txid, usize)),
     TransactionFromPosition((usize, usize, bool)),
     Version((String, VersionRequest)),
-    View((String, String, String)),
+    //View((String, String, String)),
 }
 
 impl Params {
@@ -669,7 +667,7 @@ impl Params {
                 Params::TransactionFromPosition(convert(params)?)
             }
             "mempool.get_fee_histogram" => Params::MempoolFeeHistogram,
-            "metashrew.view" => Params::View(convert(params)?),
+            //"metashrew.view" => Params::View(convert(params)?),
             "server.banner" => Params::Banner,
             "server.donation_address" => Params::Donation,
             "server.features" => Params::Features,

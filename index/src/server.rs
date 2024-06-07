@@ -60,18 +60,18 @@ pub fn run() -> Result<()> {
     result.context("metashrew failed")
 }
 
-static mut _config: Option<&'static Config> = None;
+static mut _CONFIG: Option<&'static Config> = None;
 
 pub fn get_config() -> &'static Config {
   unsafe {
-    _config.unwrap()
+    _CONFIG.unwrap()
   }
 }
 
 fn serve() -> Result<()> {
     let config: &'static Config = Box::leak(Box::new(Config::from_args()));
     unsafe {
-      _config = Some(config);
+      _CONFIG = Some(config);
     }
     let metrics = Metrics::new(config.monitoring_addr)?;
 

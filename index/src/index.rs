@@ -2,16 +2,13 @@ use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use rocksdb;
-use itertools::Itertools;
-use rlp;
-use rocksdb::{WriteBatchWithTransaction, DB};
-use std::collections::HashSet;
-use std::process;
+use rocksdb::{DB};
+use std;
 use std::convert::AsRef;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::ops::ControlFlow;
-use wasmtime::{Caller, Linker, Store};
+//use wasmtime;
 use bitcoin_slices::{bsl, Visitor, Visit};
 
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
@@ -111,17 +108,17 @@ impl BatchLike for RocksDBBatch {
     }
 }
 
-static mut _db: Option<&'static DBStore> = None;
+static mut _DB: Option<&'static DBStore> = None;
 
 pub fn set_db(store: &'static DBStore) {
   unsafe {
-    _db = Some(store);
+    _DB = Some(store);
   }
 }
 
 pub fn get_db() -> &'static rocksdb::DB {
   unsafe {
-    &(_db.unwrap()).db
+    &(_DB.unwrap()).db
   }
 }
 
@@ -129,7 +126,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        let mut opts = rocksdb::WriteOptions::default();
+        let opts = rocksdb::WriteOptions::default();
         match self.0.write_opt(batch.0, &opts) {
           Ok(_) => Ok(()),
           Err(e) => Err(e)
@@ -154,11 +151,9 @@ pub struct Index {
     lookup_limit: Option<usize>,
     chain: Chain,
     stats: Stats,
-    runtime: metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
+    runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
     is_ready: bool,
-    flush_needed: bool,
-    engine: wasmtime::Engine,
-    module: wasmtime::Module,
+    flush_needed: bool
 }
 
 impl Index {
@@ -186,11 +181,8 @@ impl Index {
         let stats = Stats::new(metrics);
         stats.observe_chain(&chain);
         stats.observe_db(store);
-        let engine = wasmtime::Engine::default();
-        let module =
-            wasmtime::Module::from_file(&engine, indexer.clone().into_os_string()).unwrap();
         let internal_db = RocksDBRuntimeAdapter(&store.db);
-        let runtime = metashrew_runtime::MetashrewRuntime::load(indexer, internal_db).unwrap();
+        let runtime = MetashrewRuntime::load(indexer, internal_db).unwrap();
         Ok(Index {
             store,
             batch_size,
@@ -200,8 +192,6 @@ impl Index {
             runtime,
             is_ready: false,
             flush_needed: false,
-            engine,
-            module,
         })
     }
 
@@ -295,8 +285,6 @@ impl Index {
 
         daemon.for_blocks(blockhashes, |blockhash, block| {
             let height = heights.next().expect("unexpected block");
-            let engine = Arc::new(&self.engine);
-            let module = Arc::new(&self.module);
             let blockarc = Arc::new(block);
             let blockhasharc = Arc::new(blockhash);
             self.stats.observe_duration("block", || {
@@ -304,7 +292,7 @@ impl Index {
             });
             self.stats.height.set("tip", height as f64);
             if let Some(exit_block) = get_config().exit_at {
-                if (height as usize == exit_block) {
+                if height as usize == exit_block {
                   self.store.write(&batch);
                   info!("snapshot built for block {}", height);
                   std::process::exit(0);
@@ -337,7 +325,7 @@ fn db_rows_size(rows: &[Row]) -> usize {
 
 fn index_single_block(
     batch: &mut WriteBatch,
-    runtime: &mut metashrew_runtime::MetashrewRuntime<RocksDBRuntimeAdapter>,
+    runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>,
     block: Arc<SerBlock>,
     height: usize,
     blockhash: Arc<BlockHash>,
@@ -361,19 +349,18 @@ fn index_single_block(
     }
     struct IndexBlockVisitor<'a> {
         batch: &'a mut WriteBatch,
-        height: usize,
     }
 
     impl<'a> Visitor for IndexBlockVisitor<'a> {
-        fn visit_transaction(&mut self, tx: &bsl::Transaction) -> ControlFlow<()> {
+        fn visit_transaction(&mut self, _tx: &bsl::Transaction) -> ControlFlow<()> {
             ControlFlow::Continue(())
         }
 
-        fn visit_tx_out(&mut self, _vout: usize, tx_out: &bsl::TxOut) -> ControlFlow<()> {
+        fn visit_tx_out(&mut self, _vout: usize, _tx_out: &bsl::TxOut) -> ControlFlow<()> {
             ControlFlow::Continue(())
         }
 
-        fn visit_tx_in(&mut self, _vin: usize, tx_in: &bsl::TxIn) -> ControlFlow<()> {
+        fn visit_tx_in(&mut self, _vin: usize, _tx_in: &bsl::TxIn) -> ControlFlow<()> {
             ControlFlow::Continue(())
         }
 
@@ -387,7 +374,7 @@ fn index_single_block(
         }
     }
 
-    let mut index_block = IndexBlockVisitor { batch, height };
+    let mut index_block = IndexBlockVisitor { batch };
     bsl::Block::visit(&block, &mut index_block).expect("core returned invalid block");
     batch.tip_row = serialize(blockhash.as_ref()).into_boxed_slice();
 

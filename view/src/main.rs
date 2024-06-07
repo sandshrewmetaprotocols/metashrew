@@ -1,20 +1,22 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
-use itertools::Itertools;
-use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
-use rlp::Rlp;
+//use itertools::Itertools;
+use metashrew_runtime::{BatchLike, KeyValueStoreLike};
+//use rlp::Rlp;
 use rocksdb::{Options, DB};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+//use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
+/*
 use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
     Module, Mutability, SharedMemory, Store, Val, ValType,
 };
+*/
 
 pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub rocksdb::WriteBatch);
@@ -35,7 +37,7 @@ impl BatchLike for RocksDBBatch {
     fn default() -> RocksDBBatch {
         RocksDBBatch(rocksdb::WriteBatch::default())
     }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, _k: K, _v: V) {
     }
 }
 
@@ -67,6 +69,7 @@ struct JsonRpcRequest {
     id: u32,
     method: String,
     params: Vec<String>,
+    #[allow(dead_code)]
     jsonrpc: String,
 }
 #[derive(Serialize)]
@@ -84,6 +87,7 @@ struct JsonRpcResult {
 
 struct Context {
     hash: [u8; 32],
+    #[allow(dead_code)]
     program: Vec<u8>,
     path: PathBuf,
 }
@@ -104,7 +108,7 @@ async fn view(
         if hex::decode(
             body.params[0]
                 .to_string()
-                .substring(2, (body.params[0].len())),
+                .substring(2, body.params[0].len()),
         )
         .unwrap()
             != context.hash
@@ -118,13 +122,13 @@ async fn view(
         }
         let db_path = match env::var("DB_LOCATION") {
             Ok(val) => val,
-            Err(e) => "/mnt/volume/rocksdb".to_string(),
+            Err(_e) => "/mnt/volume/rocksdb".to_string(),
         };
         let db: &'static DB = Box::leak(Box::new(
             DB::open_for_read_only(&Options::default(), db_path, false).unwrap(),
         ));
         let internal_db = RocksDBRuntimeAdapter(db);
-        let mut runtime =
+        let runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
@@ -152,7 +156,7 @@ async fn main() -> std::io::Result<()> {
     // get the
     let path = match env::var("PROGRAM_PATH") {
         Ok(val) => val,
-        Err(e) => PathBuf::from("/mnt/volume/indexer.wasm")
+        Err(_e) => PathBuf::from("/mnt/volume/indexer.wasm")
             .to_str()
             .unwrap()
             .try_into()
@@ -161,7 +165,7 @@ async fn main() -> std::io::Result<()> {
     let program = File::open(path.clone()).expect("msg");
     let mut buf = BufReader::new(program);
     let mut bytes: Vec<u8> = vec![];
-    buf.read_to_end(&mut bytes);
+    let _ = buf.read_to_end(&mut bytes);
     let mut hasher = Sha3::v256();
     let mut output = [0; 32];
     hasher.update(bytes.as_slice());
@@ -181,11 +185,11 @@ async fn main() -> std::io::Result<()> {
     .bind((
         match env::var("HOST") {
             Ok(val) => val,
-            Err(e) => String::from("127.0.0.1"),
+            Err(_e) => String::from("127.0.0.1"),
         },
         match env::var("PORT") {
             Ok(val) => val.parse::<u16>().unwrap(),
-            Err(e) => 8080,
+            Err(_e) => 8080,
         },
     ))?
     .run()

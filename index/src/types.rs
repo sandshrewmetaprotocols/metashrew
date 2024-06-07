@@ -40,6 +40,7 @@ macro_rules! impl_consensus_encoding {
 }
 
 const HASH_PREFIX_LEN: usize = 8;
+#[allow(dead_code)]
 const HEIGHT_SIZE: usize = 4;
 
 type HashPrefix = [u8; HASH_PREFIX_LEN];
@@ -52,9 +53,11 @@ pub(crate) struct HashPrefixRow {
     height: Height, // transaction confirmed height
 }
 
+#[allow(dead_code)]
 const HASH_PREFIX_ROW_SIZE: usize = HASH_PREFIX_LEN + HEIGHT_SIZE;
 
 impl HashPrefixRow {
+    #[allow(dead_code)]
     pub(crate) fn to_db_row(&self) -> db::Row {
         let mut vec = Vec::with_capacity(HASH_PREFIX_ROW_SIZE);
         let len = self
@@ -86,6 +89,7 @@ impl ScriptHash {
         ScriptHash::hash(script.as_bytes())
     }
 
+    #[allow(dead_code)]
     fn prefix(&self) -> HashPrefix {
         let mut prefix = HashPrefix::default();
         prefix.copy_from_slice(&self.0[..HASH_PREFIX_LEN]);
@@ -100,6 +104,7 @@ impl ScriptHashRow {
         scripthash.0[..HASH_PREFIX_LEN].to_vec().into_boxed_slice()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn row(scripthash: ScriptHash, height: usize) -> HashPrefixRow {
         HashPrefixRow {
             prefix: scripthash.prefix(),
@@ -131,6 +136,7 @@ impl SpendingPrefixRow {
         Box::new(spending_prefix(outpoint))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn row(outpoint: OutPoint, height: usize) -> HashPrefixRow {
         HashPrefixRow {
             prefix: spending_prefix(outpoint),

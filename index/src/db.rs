@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use rocksdb;
 
-use hex;
+//use hex;
 use rand::random;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -139,7 +139,6 @@ impl DBStore {
         }
 
         let db = if view {
-            panic!("should not open as secondary");
             rocksdb::DB::open_as_secondary(
                 &db_opts,
                 path,
@@ -173,6 +172,7 @@ impl DBStore {
         Ok(store)
     }
 
+    /*
     fn is_legacy_format(&self) -> bool {
         // In legacy DB format, all data was stored in a single (default) column family.
         self.db
@@ -181,18 +181,19 @@ impl DBStore {
             .is_some()
     }
 
+    */
     /// Opens a new RocksDB at the specified location.
     pub fn open(
         path: &Path,
         log_dir: Option<&Path>,
-        auto_reindex: bool,
         view: bool,
     ) -> Result<Self> {
-        let mut store = Self::open_internal(path, log_dir, view)?;
+        let store = Self::open_internal(path, log_dir, view)?;
         let config = store.get_config();
         debug!("DB {:?}", config);
-        let mut config = config.unwrap_or_default(); // use default config when DB is empty
+        let config = config.unwrap_or_default(); // use default config when DB is empty
 
+        /*
         let reindex_cause = if store.is_legacy_format() {
             Some("legacy format".to_owned())
         } else if config.format != CURRENT_FORMAT {
@@ -203,6 +204,7 @@ impl DBStore {
         } else {
             None
         };
+        */
         /*
         if let Some(cause) = reindex_cause {
             if !auto_reindex {
@@ -251,9 +253,11 @@ impl DBStore {
     fn headers_cf(&self) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
     }
+    /*
     fn index_cf(&self) -> &rocksdb::ColumnFamily {
         self.db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
     }
+    */
 
     pub(crate) fn iter_funding(&self, prefix: Row) -> impl Iterator<Item = Row> + '_ {
         self.iter_prefix_cf(self.funding_cf(), prefix)
@@ -312,7 +316,7 @@ impl DBStore {
         }
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
 
-        let mut opts = rocksdb::WriteOptions::default();
+        let opts = rocksdb::WriteOptions::default();
 //        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
 //        opts.set_sync(!bulk_import);
         self.db.write_opt(db_batch, &opts).unwrap();
@@ -375,7 +379,7 @@ impl DBStore {
     }
 
     fn set_config(&self, config: Config) {
-        let mut opts = rocksdb::WriteOptions::default();
+        let opts = rocksdb::WriteOptions::default();
 //        opts.set_sync(true);
 //        opts.disable_wal(false);
         let value = serde_json::to_vec(&config).expect("failed to serialize config");

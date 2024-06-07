@@ -24,11 +24,6 @@ abbr = "r"
 doc = "Open in view-only mode"
 default = false
 
-[[switch]]
-name = "auto_reindex"
-doc = "Automatically reindex the database if it's inconsistent or in old format"
-default = true
-
 [[param]]
 name = "indexer"
 type = "std::path::PathBuf"

@@ -21,6 +21,7 @@ mod internal {
     #![allow(clippy::unnecessary_lazy_evaluations)]
     #![allow(clippy::useless_conversion)]
 
+    #![allow(unused_imports)]
     include!(concat!(env!("OUT_DIR"), "/configure_me_config.rs"));
 }
 

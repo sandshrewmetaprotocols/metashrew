@@ -86,6 +86,7 @@ struct JsonRpcResult {
 }
 
 struct Context {
+    #[allow(dead_code)]
     hash: [u8; 32],
     #[allow(dead_code)]
     program: Vec<u8>,
@@ -155,25 +156,10 @@ async fn view(
         };
         return Ok(HttpResponse::Ok().json(resp));
     } else {
-        if hex::decode(
-            body.params[0]
-                .to_string()
-                .substring(2, body.params[0].len()),
-        )
-        .unwrap()
-            != context.hash
-        {
-            let resp = JsonRpcError {
-                id: body.id,
-                error: "Hash doesn't match".to_string(),
-                jsonrpc: "2.0".to_string(),
-            };
-            return Ok(HttpResponse::Ok().json(resp));
-        }
         let internal_db = unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) };
         let runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
-        let height: u32 = if body.params[3] == "latest" {
+        let height: u32 = if body.params[2] == "latest" {
             unsafe {
                 let height_bytes: Vec<u8> = INIT_DB
                     .unwrap()
@@ -190,11 +176,11 @@ async fn view(
             result: hex::encode(
                 runtime
                     .view(
-                        body.params[1].clone(),
+                        body.params[0].clone(),
                         &hex::decode(
-                            body.params[2]
+                            body.params[1]
                                 .to_string()
-                                .substring(2, body.params[2].len()),
+                                .substring(2, body.params[1].len()),
                         )
                         .unwrap(),
                         height,

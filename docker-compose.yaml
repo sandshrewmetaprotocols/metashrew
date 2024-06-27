@@ -2,7 +2,7 @@ version: '3.3'
 services:
   metashrew:
     network_mode: 'host'
-    image: sandshrewmetaprotocols/metashrew
+    image: metashrew/metashrew
     build:
       context: ./
       dockerfile: docker/Dockerfile.indexer
@@ -20,7 +20,7 @@ services:
       - ${BITCOIN_DATA}:/bitcoin
   metashrew-view:
     network_mode: 'host'
-    image: sandshrewmetaprotocols/metashrew-view
+    image: metashrew/metashrew-view
     build:
       context: ./
       dockerfile: docker/Dockerfile.view

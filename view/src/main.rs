@@ -169,7 +169,7 @@ async fn view(
                 u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap())
             }
         } else {
-            body.params[3].parse::<u32>().unwrap()
+            body.params[2].parse::<u32>().unwrap()
         };
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,

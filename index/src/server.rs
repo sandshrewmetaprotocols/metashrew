@@ -63,15 +63,13 @@ pub fn run() -> Result<()> {
 static mut _config: Option<&'static Config> = None;
 
 pub fn get_config() -> &'static Config {
-  unsafe {
-    _config.unwrap()
-  }
+    unsafe { _config.unwrap() }
 }
 
 fn serve() -> Result<()> {
     let config: &'static Config = Box::leak(Box::new(Config::from_args()));
     unsafe {
-      _config = Some(config);
+        _config = Some(config);
     }
     let metrics = Metrics::new(config.monitoring_addr)?;
 

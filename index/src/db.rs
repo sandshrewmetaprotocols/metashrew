@@ -1,4 +1,4 @@
-use anyhow::{Result};
+use anyhow::Result;
 use rocksdb;
 
 use rand::random;
@@ -46,7 +46,14 @@ const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
 
-const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF];
+const COLUMN_FAMILIES: &[&str] = &[
+    CONFIG_CF,
+    HEADERS_CF,
+    TXID_CF,
+    FUNDING_CF,
+    SPENDING_CF,
+    INDEX_CF,
+];
 
 const CONFIG_KEY: &str = "C";
 pub(crate) const TIP_KEY: &[u8] = b"T";
@@ -114,14 +121,14 @@ fn default_opts() -> rocksdb::Options {
     block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);
 
     let mut opts = rocksdb::Options::default();
-//    opts.set_keep_log_file_num(10);
+    //    opts.set_keep_log_file_num(10);
     opts.set_max_open_files(-1);
     opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-//    opts.set_target_file_size_base(256 << 20);
+    //    opts.set_target_file_size_base(256 << 20);
     opts.set_write_buffer_size(256 << 24);
     opts.set_disable_auto_compactions(true); // for initial bulk load
-//    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
+                                             //    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
     opts.set_block_based_table_factory(&block_opts);
     opts
@@ -159,8 +166,9 @@ impl DBStore {
             )?
         } else {
             debug!("open_cf_descriptors");
-            rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors()).expect(&format!("failed to open DB: {}", path.display()))
-//                .with_context(|| format!("failed to open DB: {}", path.display()))?
+            rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors())
+                .expect(&format!("failed to open DB: {}", path.display()))
+            //                .with_context(|| format!("failed to open DB: {}", path.display()))?
         };
         debug!("rocksdb opened");
         let live_files = db.live_files()?;
@@ -318,11 +326,11 @@ impl DBStore {
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
 
         let opts = rocksdb::WriteOptions::default();
-//        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
-//        opts.set_sync(!bulk_import);
+        //        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
+        //        opts.set_sync(!bulk_import);
         self.db.write_opt(db_batch, &opts).unwrap();
-//        self.db.flush_wal(true).unwrap();
-//        self.flush();
+        //        self.db.flush_wal(true).unwrap();
+        //        self.flush();
     }
 
     pub(crate) fn flush(&self) {
@@ -381,8 +389,8 @@ impl DBStore {
 
     fn set_config(&self, config: Config) {
         let opts = rocksdb::WriteOptions::default();
-//        opts.set_sync(true);
-//        opts.disable_wal(false);
+        //        opts.set_sync(true);
+        //        opts.disable_wal(false);
         let value = serde_json::to_vec(&config).expect("failed to serialize config");
         self.db
             .put_cf_opt(self.config_cf(), CONFIG_KEY, value, &opts)

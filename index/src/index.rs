@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
-use rocksdb;
+use bitcoin_slices::{bsl, Visit, Visitor};
 use itertools::Itertools;
-use rocksdb::{DB};
+use rocksdb;
+use rocksdb::DB;
 use std::convert::AsRef;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::ops::ControlFlow;
-use bitcoin_slices::{bsl, Visitor, Visit};
 
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 
@@ -17,7 +17,7 @@ use crate::{
     daemon::Daemon,
     db::{index_cf, DBStore, Row, WriteBatch},
     metrics::{self, Gauge, Histogram, Metrics},
-    server::{get_config},
+    server::get_config,
     signals::ExitFlag,
     types::{
         HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow, TxidRow,
@@ -64,7 +64,15 @@ impl Stats {
         self.observe_size("write_funding_rows", &batch.funding_rows);
         self.observe_size("write_spending_rows", &batch.spending_rows);
         self.observe_size("write_txid_rows", &batch.txid_rows);
-        self.observe_size("write_header_rows", &batch.header_rows.clone().into_iter().map(|header| header.row).collect::<Vec<_>>());
+        self.observe_size(
+            "write_header_rows",
+            &batch
+                .header_rows
+                .clone()
+                .into_iter()
+                .map(|header| header.row)
+                .collect::<Vec<_>>(),
+        );
         /*
         debug!(
             "writing {} funding and {} spending rows from {} transactions, {} blocks",
@@ -103,22 +111,19 @@ impl BatchLike for RocksDBBatch {
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
         self.0.put_cf(index_cf(get_db()), k, v)
-        
     }
 }
 
 static mut _db: Option<&'static DBStore> = None;
 
 pub fn set_db(store: &'static DBStore) {
-  unsafe {
-    _db = Some(store);
-  }
+    unsafe {
+        _db = Some(store);
+    }
 }
 
 pub fn get_db() -> &'static rocksdb::DB {
-  unsafe {
-    &(_db.unwrap()).db
-  }
+    unsafe { &(_db.unwrap()).db }
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
@@ -127,8 +132,8 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
         let opts = rocksdb::WriteOptions::default();
         match self.0.write_opt(batch.0, &opts) {
-          Ok(_) => Ok(()),
-          Err(e) => Err(e)
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
         }
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -295,14 +300,20 @@ impl Index {
             let blockarc = Arc::new(block);
             let blockhasharc = Arc::new(blockhash);
             self.stats.observe_duration("block", || {
-                index_single_block(&mut batch, &mut self.runtime, blockarc, height, blockhasharc);
+                index_single_block(
+                    &mut batch,
+                    &mut self.runtime,
+                    blockarc,
+                    height,
+                    blockhasharc,
+                );
             });
             self.stats.height.set("tip", height as f64);
             if let Some(exit_block) = get_config().exit_at {
                 if height as usize == exit_block {
-                  self.store.write(&batch);
-                  info!("snapshot built for block {}", height);
-                  std::process::exit(0);
+                    self.store.write(&batch);
+                    info!("snapshot built for block {}", height);
+                    std::process::exit(0);
                 }
             }
         })?;
@@ -338,21 +349,21 @@ fn index_single_block(
     blockhash: Arc<BlockHash>,
 ) {
     {
-      runtime.context.lock().unwrap().height = height as u32;
-      runtime.context.lock().unwrap().block = block.as_ref().clone();
+        runtime.context.lock().unwrap().height = height as u32;
+        runtime.context.lock().unwrap().block = block.as_ref().clone();
     }
     if get_config().no_cache {
-      runtime.run().unwrap();
-      runtime.refresh_memory();
-    } else {
-    // create new instance with fresh memory and run again
-      if let Err(_) = runtime.run() {
-        debug!("respawn cache");
+        runtime.run().unwrap();
         runtime.refresh_memory();
-        if let Err(e) = runtime.run() {
-            panic!("runtime run failed after retry: {}", e);
+    } else {
+        // create new instance with fresh memory and run again
+        if let Err(_) = runtime.run() {
+            debug!("respawn cache");
+            runtime.refresh_memory();
+            if let Err(e) = runtime.run() {
+                panic!("runtime run failed after retry: {}", e);
+            }
         }
-      }
     }
     struct IndexBlockVisitor<'a> {
         batch: &'a mut WriteBatch,
@@ -375,11 +386,10 @@ fn index_single_block(
         fn visit_block_header(&mut self, header: &bsl::BlockHeader) -> ControlFlow<()> {
             let header = bitcoin::block::Header::consensus_decode(&mut header.as_ref())
                 .expect("block header was already validated");
-            let new_row = 
-            self.batch
-                .header_rows
-
-                .push(crate::db::HeaderRow { row: HeaderRow::new(header).to_db_row(), height: self.height as u32 });
+            let new_row = self.batch.header_rows.push(crate::db::HeaderRow {
+                row: HeaderRow::new(header).to_db_row(),
+                height: self.height as u32,
+            });
             ControlFlow::Continue(())
         }
     }
@@ -389,5 +399,4 @@ fn index_single_block(
     batch.tip_row = serialize(blockhash.as_ref()).into_boxed_slice();
 
     // save block hash to the headers_cf
-
 }

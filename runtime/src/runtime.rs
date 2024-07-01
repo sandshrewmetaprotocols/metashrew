@@ -1,14 +1,14 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
+use hex;
 use itertools::Itertools;
+use protobuf::{EnumOrUnknown, Message};
 use rlp;
 use std::collections::HashSet;
-use hex;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
-use protobuf::{EnumOrUnknown, Message};
 
-use crate::proto::metashrew::{KeyValueFlush};
+use crate::proto::metashrew::KeyValueFlush;
 
 type SerBlock = Vec<u8>;
 pub trait BatchLike {
@@ -38,18 +38,18 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike + Clone> {
     pub db: T,
     pub height: u32,
     pub block: SerBlock,
-    pub state: u32
+    pub state: u32,
 }
 
 impl<T: KeyValueStoreLike + Clone> Clone for MetashrewRuntimeContext<T> {
-  fn clone(&self) -> Self {
-    return Self {
-      db: self.db.clone(),
-      height: self.height,
-      block: self.block.clone(),
-      state: self.state
-    };
-  }
+    fn clone(&self) -> Self {
+        return Self {
+            db: self.db.clone(),
+            height: self.height,
+            block: self.block.clone(),
+            state: self.state,
+        };
+    }
 }
 
 impl<T: KeyValueStoreLike + Clone> MetashrewRuntimeContext<T> {
@@ -58,7 +58,7 @@ impl<T: KeyValueStoreLike + Clone> MetashrewRuntimeContext<T> {
             db: db,
             height: height,
             block: block,
-            state: 0
+            state: 0,
         };
     }
 }
@@ -104,20 +104,23 @@ pub fn u32_to_vec(v: u32) -> Vec<u8> {
 }
 
 pub fn try_read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Result<Vec<u8>> {
-    if data_start < 4 { return Err(anyhow!("memory error")); }
+    if data_start < 4 {
+        return Err(anyhow!("memory error"));
+    }
     let len = u32::from_le_bytes(
         (data[((data_start - 4) as usize)..(data_start as usize)])
             .try_into()
             .unwrap(),
     );
-    return Ok(Vec::<u8>::from(&data[(data_start as usize)..(((data_start as u32) + len) as usize)]));
+    return Ok(Vec::<u8>::from(
+        &data[(data_start as usize)..(((data_start as u32) + len) as usize)],
+    ));
 }
-
 
 pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     match try_read_arraybuffer_as_vec(data, data_start) {
-      Ok(v) => v,
-      Err(_) => Vec::<u8>::new()
+        Ok(v) => v,
+        Err(_) => Vec::<u8>::new(),
     }
 }
 
@@ -129,34 +132,39 @@ pub fn db_annotate_value(v: &Vec<u8>, block_height: u32) -> Vec<u8> {
 }
 
 pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v: T) -> i32 {
-  return match <T as TryInto<i32>>::try_into(v) {
-    Ok(v) => v,
-    Err(_) => {
-      trap_abort(caller);
-      return i32::MAX;
-    }
-  }
+    return match <T as TryInto<i32>>::try_into(v) {
+        Ok(v) => v,
+        Err(_) => {
+            trap_abort(caller);
+            return i32::MAX;
+        }
+    };
 }
 
 pub fn trap_abort<'a>(caller: &mut Caller<'_, State>) {
-  let _ = caller.get_export("trap").unwrap().into_func().unwrap().call(caller, &mut [], &mut []);
+    let _ = caller
+        .get_export("trap")
+        .unwrap()
+        .into_func()
+        .unwrap()
+        .call(caller, &mut [], &mut []);
 }
 
 pub fn to_usize_or_trap<'a, T: TryInto<usize>>(caller: &mut Caller<'_, State>, v: T) -> usize {
-  return match <T as TryInto<usize>>::try_into(v) {
-    Ok(v) => v,
-    Err(_) => {
-      trap_abort(caller);
-      return usize::MAX;
-    }
-  }
+    return match <T as TryInto<usize>>::try_into(v) {
+        Ok(v) => v,
+        Err(_) => {
+            trap_abort(caller);
+            return usize::MAX;
+        }
+    };
 }
 
 impl<T: KeyValueStoreLike> MetashrewRuntime<T>
 where
     T: KeyValueStoreLike,
     T: Sync + Send,
-    T: Clone
+    T: Clone,
 {
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         let engine = wasmtime::Engine::default();
@@ -190,9 +198,14 @@ where
     pub fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
         let mut linker = Linker::<State>::new(&self.engine);
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(self.context.clone().lock().unwrap().clone()));
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(
+            self.context.clone().lock().unwrap().clone(),
+        ));
         {
-          (context.lock().unwrap().height, context.lock().unwrap().block) = (height, input.clone());
+            (
+                context.lock().unwrap().height,
+                context.lock().unwrap().block,
+            ) = (height, input.clone());
         }
         {
             wasmstore.limiter(|state| &mut state.limits)
@@ -208,8 +221,14 @@ where
             .unwrap();
         let result = func.call(&mut wasmstore, ());
         return match result {
-          Ok(v) => Ok(read_arraybuffer_as_vec(instance.get_memory(&mut wasmstore, "memory").unwrap().data(&mut wasmstore), v)),
-          Err(e) => Err(e)
+            Ok(v) => Ok(read_arraybuffer_as_vec(
+                instance
+                    .get_memory(&mut wasmstore, "memory")
+                    .unwrap()
+                    .data(&mut wasmstore),
+                v,
+            )),
+            Err(e) => Err(e),
         };
     }
     pub fn refresh_memory(&mut self) {
@@ -236,11 +255,13 @@ where
             .unwrap();
         self.handle_reorg();
         match start.call(&mut self.wasmstore, ()) {
-          Ok(_) => {
-            if self.context.lock().unwrap().state != 1 { return Err(anyhow!("indexer exited unexpectedly")); }
-            return Ok(());
-          },
-          Err(e) => Err(e)
+            Ok(_) => {
+                if self.context.lock().unwrap().state != 1 {
+                    return Err(anyhow!("indexer exited unexpectedly"));
+                }
+                return Ok(());
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -294,11 +315,19 @@ where
         }
         return set;
     }
-    pub fn db_value_at_block(context: Arc<Mutex<MetashrewRuntimeContext<T>>>, key: &Vec<u8>, height: u32) -> Vec<u8> {
-        let length: i32 = Self::db_length_at_key(context.clone(), &db_make_length_key(key)).try_into().unwrap();
+    pub fn db_value_at_block(
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        key: &Vec<u8>,
+        height: u32,
+    ) -> Vec<u8> {
+        let length: i32 = Self::db_length_at_key(context.clone(), &db_make_length_key(key))
+            .try_into()
+            .unwrap();
         let mut index: i32 = length - 1;
         while index >= 0 {
-            let value: Vec<u8> = match context.lock().unwrap()
+            let value: Vec<u8> = match context
+                .lock()
+                .unwrap()
                 .db
                 .get(db_make_list_key(key, index.try_into().unwrap()))
                 .unwrap()
@@ -434,11 +463,7 @@ where
                         <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
                     input_clone.extend(input.clone());
                     let sz: usize = to_usize_or_trap(&mut caller, data_start);
-                    let _ = mem.write(
-                        &mut caller,
-                        sz,
-                        input_clone.as_slice(),
-                    );
+                    let _ = mem.write(&mut caller, sz, input_clone.as_slice());
                 },
             )
             .unwrap();
@@ -450,21 +475,25 @@ where
                     let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                     let data = mem.data(&caller);
                     let bytes = match try_read_arraybuffer_as_vec(data, data_start) {
-                      Ok(v) => v,
-                      Err(_) => {
-                        trap_abort(&mut caller);
-                        return;
-                      }
+                        Ok(v) => v,
+                        Err(_) => {
+                            trap_abort(&mut caller);
+                            return;
+                        }
                     };
                     println!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
                 },
             )
             .unwrap();
         linker
-            .func_wrap("env", "abort", |mut caller: Caller<'_, State>, _: i32, _: i32, _: i32, _: i32| {
-              trap_abort(&mut caller);
-              return;
-            })
+            .func_wrap(
+                "env",
+                "abort",
+                |mut caller: Caller<'_, State>, _: i32, _: i32, _: i32, _: i32| {
+                    trap_abort(&mut caller);
+                    return;
+                },
+            )
             .unwrap();
     }
     pub fn db_append_annotated(
@@ -496,40 +525,71 @@ where
         let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
         batch.put(&length_key, &new_length_bits);
     }
-    pub fn setup_linker_view(context: Arc<Mutex<MetashrewRuntimeContext<T>>>, linker: &mut Linker<State>) {
-      let context_get = context.clone();
-      let context_get_len = context.clone();
-      linker.func_wrap("env", "__flush", move |_caller: Caller<'_, State>, _encoded: i32| {}).unwrap();
-      linker.func_wrap("env", "__get", move |mut caller: Caller<'_, State>, key: i32, value: i32| {
-        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
-        let data = mem.data(&caller);
-        let height = {
-            let val = context_get.clone().lock().unwrap().height;
-            val
-        };
-        let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-        match key_vec_result {
-          Ok(key_vec) => {
-            let lookup = Self::db_value_at_block(context_get.clone(), &key_vec, height);
-            let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
-          },
-          Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }
-        };
-      }).unwrap();
-      linker.func_wrap("env", "__get_len", move |mut caller: Caller<'_, State>, key: i32| -> i32 {
-        let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
-        let data = mem.data(&caller);
-        let height = {
-            let val = context_get_len.clone().lock().unwrap().height;
-            val
-        };
-        let key_vec = match try_read_arraybuffer_as_vec(data, key) {
-          Ok(v) => v,
-          Err(_) => { return i32::MAX }
-        };
-        let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
-        return to_signed_or_trap(&mut caller, value.len());
-      }).unwrap();
+    pub fn setup_linker_view(
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        linker: &mut Linker<State>,
+    ) {
+        let context_get = context.clone();
+        let context_get_len = context.clone();
+        linker
+            .func_wrap(
+                "env",
+                "__flush",
+                move |_caller: Caller<'_, State>, _encoded: i32| {},
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "__get",
+                move |mut caller: Caller<'_, State>, key: i32, value: i32| {
+                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let data = mem.data(&caller);
+                    let height = {
+                        let val = context_get.clone().lock().unwrap().height;
+                        val
+                    };
+                    let key_vec_result = try_read_arraybuffer_as_vec(data, key);
+                    match key_vec_result {
+                        Ok(key_vec) => {
+                            let lookup =
+                                Self::db_value_at_block(context_get.clone(), &key_vec, height);
+                            let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
+                        }
+                        Err(_) => {
+                            mem.write(
+                                &mut caller,
+                                (value - 4) as usize,
+                                <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes())
+                                    .unwrap()
+                                    .as_slice(),
+                            )
+                            .unwrap();
+                        }
+                    };
+                },
+            )
+            .unwrap();
+        linker
+            .func_wrap(
+                "env",
+                "__get_len",
+                move |mut caller: Caller<'_, State>, key: i32| -> i32 {
+                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let data = mem.data(&caller);
+                    let height = {
+                        let val = context_get_len.clone().lock().unwrap().height;
+                        val
+                    };
+                    let key_vec = match try_read_arraybuffer_as_vec(data, key) {
+                        Ok(v) => v,
+                        Err(_) => return i32::MAX,
+                    };
+                    let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
+                    return to_signed_or_trap(&mut caller, value.len());
+                },
+            )
+            .unwrap();
     }
     pub fn setup_linker_indexer(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
@@ -550,15 +610,16 @@ where
                     let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                     let data = mem.data(&caller);
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
-                      Ok(v) => v,
-                      Err(_) => {
-                        trap_abort(&mut caller);
-                        return;
-                      }
+                        Ok(v) => v,
+                        Err(_) => {
+                            trap_abort(&mut caller);
+                            return;
+                        }
                     };
                     let mut batch = T::Batch::default();
                     let _ = Self::db_create_empty_update_list(&mut batch, height as u32);
-                    let decoded: KeyValueFlush = KeyValueFlush::parse_from_bytes(&encoded_vec).unwrap();
+                    let decoded: KeyValueFlush =
+                        KeyValueFlush::parse_from_bytes(&encoded_vec).unwrap();
 
                     for (k, v) in decoded.list.iter().tuples() {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
@@ -598,11 +659,21 @@ where
                         val
                     };
                     match key_vec_result {
-                      Ok(key_vec) => {
-                        let lookup = Self::db_value_at_block(context_get.clone(), &key_vec, height);
-                        let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
-                      }
-                      Err(_) => { mem.write(&mut caller, (value - 4) as usize, <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes()).unwrap().as_slice()).unwrap(); }
+                        Ok(key_vec) => {
+                            let lookup =
+                                Self::db_value_at_block(context_get.clone(), &key_vec, height);
+                            let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
+                        }
+                        Err(_) => {
+                            mem.write(
+                                &mut caller,
+                                (value - 4) as usize,
+                                <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes())
+                                    .unwrap()
+                                    .as_slice(),
+                            )
+                            .unwrap();
+                        }
                     };
                 },
             )
@@ -620,11 +691,14 @@ where
                         val
                     };
                     match key_vec_result {
-                      Ok(key_vec) => {
-                        let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
-                        return value.len() as i32;
-                      }
-                      Err(_) => { return i32::MAX; }
+                        Ok(key_vec) => {
+                            let value =
+                                Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
+                            return value.len() as i32;
+                        }
+                        Err(_) => {
+                            return i32::MAX;
+                        }
                     };
                 },
             )

@@ -1,7 +1,8 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
+use actix::{ Actor, Context}
+use bitcoin::consensus::{deserialize, serialize};
 use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
-use bitcoin::consensus::{deserialize, serialize};
 use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,10 @@ static mut init_db: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub WriteBatch);
 
+pub struct HashMapRuntimeAdapter(HashMap<Vec<u8>, Vec<u8>>);
+
+pub struct HashMapBatch(pub WriteBatch);
+
 pub const TIP_KEY: &[u8] = b"T";
 
 pub fn index_cf(db: &DB) -> &ColumnFamily {
@@ -33,6 +38,14 @@ pub fn headers_cf(db: &DB) -> &rocksdb::ColumnFamily {
     db.cf_handle(HEADERS_CF).expect("missing HEADERS_CF")
 }
 
+impl BatchLike for HashMapBatch {
+    fn default() -> Self {
+        
+    }
+    fn put(K: AsRef<[u8]>, V: AsRef<[u8]>) {
+        
+    }
+}
 
 impl Clone for RocksDBRuntimeAdapter {
     fn clone(&self) -> Self {
@@ -70,6 +83,8 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     }
 }
 
+impl 
+
 #[derive(Deserialize)]
 struct JsonRpcRequest {
     id: u32,
@@ -94,6 +109,7 @@ struct Context {
     hash: [u8; 32],
     program: Vec<u8>,
     path: PathBuf,
+    address: actix::Addr<ViewActor>,
 }
 
 fn default_opts() -> rocksdb::Options {
@@ -131,6 +147,12 @@ const COLUMN_FAMILIES: &[&str] = &[
 
 fn create_cf_descriptors() -> Vec<&'static str> {
     COLUMN_FAMILIES.into()
+}
+
+struct ViewActor {}
+
+impl Actor for ViewActor {
+    type Context = Context<Self>;
 }
 
 /*
@@ -182,12 +204,21 @@ async fn view(
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
         let height: u32;
         if body.params[3] == "latest" {
-            unsafe{
-                let tip_header = init_db.unwrap().get_cf(headers_cf(init_db.expect("db isn't there")), TIP_KEY).expect("get tip failed");
+            unsafe {
+                let tip_header = init_db
+                    .unwrap()
+                    .get_cf(headers_cf(init_db.expect("db isn't there")), TIP_KEY)
+                    .expect("get tip failed");
                 let deserialized = deserialize::<Vec<u8>>(&(tip_header.as_ref().unwrap()));
                 println!("deserialized: {:?}", &deserialized);
                 // get the height out of the header_row
-                let row = init_db.unwrap().get_cf(headers_cf(init_db.expect("db wasn't there")), tip_header.as_ref().unwrap()).unwrap();
+                let row = init_db
+                    .unwrap()
+                    .get_cf(
+                        headers_cf(init_db.expect("db wasn't there")),
+                        tip_header.as_ref().unwrap(),
+                    )
+                    .unwrap();
                 println!("row: {:?}", &row);
                 height = u32::from_le_bytes(row.unwrap().try_into().unwrap());
             }
@@ -243,7 +274,12 @@ async fn main() -> std::io::Result<()> {
     let time = SystemTime::now();
     let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
     let secondary = match env::var("DB_LOCATION") {
-        Ok(val) => val + &'-'.to_string() + &id().to_string() + &'-'.to_string() + &since_epoch.as_millis().to_string(),
+        Ok(val) => {
+            val + &'-'.to_string()
+                + &id().to_string()
+                + &'-'.to_string()
+                + &since_epoch.as_millis().to_string()
+        }
         Err(e) => "/mnt/volume/rocksdb".to_string(),
     };
     unsafe {

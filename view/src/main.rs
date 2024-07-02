@@ -1,12 +1,12 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
-use actix::{ Actor, Context}
+use actix::{ Actor, Context};
 use bitcoin::consensus::{deserialize, serialize};
 use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
@@ -21,11 +21,11 @@ use wasmtime::{
 };
 
 static mut init_db: Option<&'static DB> = None;
+static mut init_hashmap: Option<&'static HashMap<Vec<u8>, Vec<u8>>> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
 pub struct RocksDBBatch(pub WriteBatch);
 
-pub struct HashMapRuntimeAdapter(HashMap<Vec<u8>, Vec<u8>>);
-
+pub struct HashMapRuntimeAdapter(&'static HashMap<Vec<u8>, Vec<u8>>);
 pub struct HashMapBatch(pub WriteBatch);
 
 pub const TIP_KEY: &[u8] = b"T";
@@ -39,11 +39,57 @@ pub fn headers_cf(db: &DB) -> &rocksdb::ColumnFamily {
 }
 
 impl BatchLike for HashMapBatch {
-    fn default() -> Self {
-        
+    fn default() -> HashMapBatch {
+        HashMapBatch(WriteBatch::default())
     }
-    fn put(K: AsRef<[u8]>, V: AsRef<[u8]>) {
-        
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+
+    }
+}
+
+impl KeyValueStoreLike for HashMapRuntimeAdapter {
+    type Batch = HashMapBatch;
+    type Error = rocksdb::Error;
+    fn write(&self, batch: HashMapBatch) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+        // first check to see if the key can be retrieved from the hashmap, then fallback on the db
+        unsafe {
+            if let Some(hashmap) = init_hashmap {
+                let value = hashmap.get(key.as_ref());
+                // if the value is not in there, fallback
+                if let Some(val) = value {
+                    return Ok(Some(val.clone()));
+                } else {
+                    // first check to see that the db has been initialized
+                    if let Some(db) = init_db{
+                        return db.get_cf(index_cf(db), key);
+                    } else {
+                        // uninitialized and we cannot get the value from the hashmap 
+                        return Ok(None);
+                    }
+                }
+            } else {
+                // fallback on the init_db
+                if let Some(db) = init_db{
+                    return db.get_cf(index_cf(db), key);
+                } else {
+                    // uninitialized and we cannot get the value from the hashmap 
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        Ok(())
     }
 }
 
@@ -82,8 +128,6 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         self.0.put_cf(index_cf(self.0), key, value)
     }
 }
-
-impl 
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
@@ -152,7 +196,7 @@ fn create_cf_descriptors() -> Vec<&'static str> {
 struct ViewActor {}
 
 impl Actor for ViewActor {
-    type Context = Context<Self>;
+    type Context = actix::Context<Self>;
 }
 
 /*
@@ -261,6 +305,7 @@ async fn main() -> std::io::Result<()> {
     let program = File::open(path.clone()).expect("msg");
     let mut buf = BufReader::new(program);
     let mut bytes: Vec<u8> = vec![];
+    let addr = ViewActor {}.start();
     buf.read_to_end(&mut bytes);
     let mut hasher = Sha3::v256();
     let mut output = [0; 32];

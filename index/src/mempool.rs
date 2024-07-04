@@ -10,13 +10,60 @@ use bitcoin::{Amount, OutPoint, Transaction, Txid};
 use bitcoincore_rpc::json;
 use rayon::prelude::*;
 use serde::ser::{Serialize, SerializeSeq, Serializer};
+use rocksdb::DB;
+use metashrew_runtime::{MetashrewRuntime, KeyValueStoreLike, BatchLike};
 
 use crate::{
     daemon::Daemon,
+    db::{index_cf, pending_cf},
+    index::{get_db},
+    server::get_config,
     metrics::{Gauge, Metrics},
     signals::ExitFlag,
     types::ScriptHash,
 };
+
+#[derive(Clone)]
+pub struct RocksDBPendingAdapter(&'static DB);
+pub struct RocksDBPendingBatch(pub rocksdb::WriteBatch);
+
+impl BatchLike for RocksDBPendingBatch {
+    fn default() -> RocksDBPendingBatch {
+        RocksDBPendingBatch(rocksdb::WriteBatch::default())
+    }
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
+        self.0.put_cf(pending_cf(get_db()), k, v)
+    }
+}
+
+impl KeyValueStoreLike for RocksDBPendingAdapter {
+    type Batch = RocksDBPendingBatch;
+    type Error = rocksdb::Error;
+    fn write(&self, batch: RocksDBPendingBatch) -> Result<(), Self::Error> {
+        let opts = rocksdb::WriteOptions::default();
+        match self.0.write_opt(batch.0, &opts) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+        match self.0.get_cf(pending_cf(self.0), &key) {
+          Ok(opt) => match opt {
+            None => self.0.get_cf(index_cf(self.0), &key),
+            Some(v) => Ok(Some(v))
+          },
+          Err(e) => Err(e)
+        }
+    }
+    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
+        let _ = self.0.delete_cf(pending_cf(self.0), key);
+        Ok(())
+    }
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
+        self.0.put_cf(pending_cf(self.0), key, value)
+    }
+}
+
 
 pub(crate) struct Entry {
     pub txid: Txid,
@@ -35,6 +82,7 @@ pub(crate) struct Mempool {
     // stats
     vsize: Gauge,
     count: Gauge,
+    pending_runtime: MetashrewRuntime<RocksDBPendingAdapter>,
 }
 
 // Smallest possible txid
@@ -49,6 +97,8 @@ fn txid_max() -> Txid {
 
 impl Mempool {
     pub fn new(metrics: &Metrics) -> Self {
+        let internal_db = RocksDBPendingAdapter(get_db());
+        let indexer = get_config().indexer.clone();
         Self {
             entries: Default::default(),
             by_funding: Default::default(),
@@ -64,6 +114,7 @@ impl Mempool {
                 "Total number of mempool transactions",
                 "fee_rate",
             ),
+            pending_runtime: MetashrewRuntime::<RocksDBPendingAdapter>::load(indexer, internal_db).unwrap()
         }
     }
 

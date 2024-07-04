@@ -42,8 +42,9 @@ const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
 const HEIGHT_CF: &str = "height";
+const PENDING_CF: &str = "pending";
 
-const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF, HEIGHT_CF];
+const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF, HEIGHT_CF, PENDING_CF];
 
 const CONFIG_KEY: &str = "C";
 pub(crate) const TIP_KEY: &[u8] = b"T";
@@ -51,6 +52,10 @@ pub(crate) const HEIGHT_KEY: &[u8] = b"H";
 
 pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
     db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
+}
+
+pub fn pending_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(PENDING_CF).expect("missing PENDING_CF")
 }
 
 // Taken from https://github.com/facebook/rocksdb/blob/master/include/rocksdb/db.h#L654-L689

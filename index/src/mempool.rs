@@ -118,6 +118,28 @@ impl Mempool {
         }
     }
 
+    pub fn construct_entry_block(&self) -> bitcoin::blockdata::block::Block {
+        // create a dummy header
+        let header = bitcoin::blockdata::block::Header {
+            version: bitcoin::blockdata::block::Version::default(),
+            prev_blockhash: BlockHash::all_zeros(),
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: 0,
+            bits: CompactTarget::default(),
+            nonce: 0,
+        };  
+        let mut block = Block {
+            header,
+            txdata: Vec::new(),
+        };
+        let mut sorted: Vec<Entry> = self.entries.values().cloned().collect();
+        sorted.sort_by(|a, b| a.fee.cmp(&b.fee));
+        for entry in sorted {
+            block.txdata.push(entry.tx);
+        }
+        block
+    }
+
     pub(crate) fn fees_histogram(&self) -> &FeeHistogram {
         &self.fees
     }

@@ -199,6 +199,7 @@ impl Mempool {
             self.vsize.set(&label, self.fees.vsize[bin_index] as f64);
             self.count.set(&label, self.fees.count[bin_index] as f64);
         }
+        self.pending_runtime.run().expect("msg")
         debug!(
             "{} mempool txs: {} added, {} removed",
             self.entries.len(),

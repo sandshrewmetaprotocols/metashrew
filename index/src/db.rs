@@ -118,6 +118,10 @@ pub fn index_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
     db.cf_handle(INDEX_CF).expect("missing INDEX_CF")
 }
 
+pub fn pending_cf(db: &rocksdb::DB) -> &rocksdb::ColumnFamily {
+    db.cf_handle(PENDING_CF).expect("missing PENDING_CF")
+}
+
 fn default_opts() -> rocksdb::Options {
     let mut block_opts = rocksdb::BlockBasedOptions::default();
     block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);

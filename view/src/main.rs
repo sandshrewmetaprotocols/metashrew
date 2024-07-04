@@ -1,5 +1,4 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
-use actix::{ Actor, Context};
 use bitcoin::consensus::{deserialize, serialize};
 use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};

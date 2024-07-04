@@ -5,8 +5,8 @@ use std::convert::TryFrom;
 use std::iter::FromIterator;
 use std::ops::Bound;
 
-use bitcoin::hashes::Hash;
-use bitcoin::{Amount, OutPoint, Transaction, Txid};
+use bitcoin::{hashes::Hash, blockdata::block::{Block}};
+use bitcoin::{BlockHash, CompactTarget, Amount, OutPoint, Transaction, Txid};
 use bitcoincore_rpc::json;
 use rayon::prelude::*;
 use serde::ser::{Serialize, SerializeSeq, Serializer};
@@ -221,7 +221,7 @@ impl Mempool {
             self.vsize.set(&label, self.fees.vsize[bin_index] as f64);
             self.count.set(&label, self.fees.count[bin_index] as f64);
         }
-        self.pending_runtime.run().expect("msg")
+        self.pending_runtime.run().expect("msg");
         debug!(
             "{} mempool txs: {} added, {} removed",
             self.entries.len(),

@@ -6,7 +6,7 @@ use std::iter::FromIterator;
 use std::ops::Bound;
 
 use bitcoin::hashes::Hash;
-use bitcoin::{Amount, OutPoint, Transaction, Txid};
+use bitcoin::{block, Amount, Block, BlockHash, CompactTarget, OutPoint, Transaction, Txid};
 use bitcoincore_rpc::json;
 use rayon::prelude::*;
 use serde::ser::{Serialize, SerializeSeq, Serializer};
@@ -17,7 +17,7 @@ use crate::{
     signals::ExitFlag,
     types::ScriptHash,
 };
-
+#[derive(Clone)]
 pub(crate) struct Entry {
     pub txid: Txid,
     pub tx: Transaction,
@@ -95,6 +95,28 @@ impl Mempool {
             .range(range)
             .map(|(_, txid)| self.get(txid).expect("missing spending mempool tx"))
             .collect()
+    }
+
+    pub fn construct_entry_block(&self) -> bitcoin::blockdata::block::Block {
+        // create a dummy header
+        let header = bitcoin::blockdata::block::Header {
+            version: bitcoin::blockdata::block::Version::default(),
+            prev_blockhash: BlockHash::all_zeros(),
+            merkle_root: bitcoin::TxMerkleNode::all_zeros(),
+            time: 0,
+            bits: CompactTarget::default(),
+            nonce: 0,
+        };  
+        let mut block = Block {
+            header,
+            txdata: Vec::new(),
+        };
+        let mut sorted: Vec<Entry> = self.entries.values().cloned().collect();
+        sorted.sort_by(|a, b| a.fee.cmp(&b.fee));
+        for entry in sorted {
+            block.txdata.push(entry.tx);
+        }
+        block
     }
 
     pub fn sync(&mut self, daemon: &Daemon, exit_flag: &ExitFlag) {

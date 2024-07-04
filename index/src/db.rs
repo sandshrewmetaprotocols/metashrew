@@ -45,6 +45,7 @@ const TXID_CF: &str = "txid";
 const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
+const PENDING_CF: &str = "pending";
 
 const COLUMN_FAMILIES: &[&str] = &[
     CONFIG_CF,
@@ -53,6 +54,7 @@ const COLUMN_FAMILIES: &[&str] = &[
     FUNDING_CF,
     SPENDING_CF,
     INDEX_CF,
+    PENDING_CF,
 ];
 
 const CONFIG_KEY: &str = "C";

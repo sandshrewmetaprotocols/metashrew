@@ -15,12 +15,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
 use anyhow;
+use log::{info};
 /*
 use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
     Module, Mutability, SharedMemory, Store, Val, ValType,
 };
 */
+
+use env_logger;
 
 static mut INIT_DB: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
@@ -198,7 +201,7 @@ fn get_secondary_directory() -> Result<OsString, anyhow::Error> {
   let db_path = env::var("DB_LOCATION")?;
   let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
   let mut path = PathBuf::from(db_path.as_str());
-  let dir = String::from(path.file_name().ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?.to_str().ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?);
+  let dir = String::from(path.file_name().ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?.to_str().ok_or(anyhow::anyhow!("couldn't convert path to string"))?);
   path.pop();
   path.push(String::from("view-") + &dir + &String::from("-") + &id().to_string() + &since_epoch.as_millis().to_string());
   Ok(path.into_os_string())
@@ -206,6 +209,7 @@ fn get_secondary_directory() -> Result<OsString, anyhow::Error> {
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    env_logger::init();
     // get the
     let path = match env::var("PROGRAM_PATH") {
         Ok(val) => val,
@@ -223,9 +227,9 @@ async fn main() -> std::io::Result<()> {
     let mut output = [0; 32];
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
-    println!("program hash: 0x{}", hex::encode(output));
+    info!("program hash: 0x{}", hex::encode(output));
     let secondary = get_secondary_directory().unwrap().into_string().unwrap();
-    println!("acquiring database handle -- this takes a while ...");
+    info!("acquiring database handle -- this takes a while ...");
     unsafe {
         INIT_DB = Some(Box::leak(Box::new(
             DB::open_cf_as_secondary(
@@ -237,7 +241,7 @@ async fn main() -> std::io::Result<()> {
             .unwrap(),
         )));
     }
-    println!("rocksdb opened in secondary");
+    info!("rocksdb opened in secondary");
     let path_clone: PathBuf = path.into();
 
     HttpServer::new(move || {

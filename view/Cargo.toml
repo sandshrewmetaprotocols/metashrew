@@ -10,6 +10,7 @@ actix-web = "4.5.1"
 hex = "0.4.3"
 itertools = "0.12.1"
 rlp = "0.5.2"
+log = "0.4"
 serde = { version = "1.0.197", features = ["derive"] }
 substring = "1.4.5"
 tiny-keccak = {version = "2.0.2", features = ["sha3"]}
@@ -18,3 +19,4 @@ metashrew-runtime = { path = "../runtime" }
 rocksdb = { version = "0.22.0", features = ["zstd", "snappy"] }
 bitcoin = "0.32.1"
 anyhow = "1.0.86"
+env_logger = "0.11.3"

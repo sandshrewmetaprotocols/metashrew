@@ -7,12 +7,14 @@ use serde::{Deserialize, Serialize};
 //use std::collections::HashSet;
 use std::env;
 use std::fs::File;
+use std::ffi::OsString;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
 use std::process::id;
 use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
+use anyhow;
 /*
 use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
@@ -192,6 +194,16 @@ async fn view(
     }
 }
 
+fn get_secondary_directory() -> Result<OsString, anyhow::Error> {
+  let db_path = env::var("DB_LOCATION")?;
+  let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+  let mut path = PathBuf::from(db_path.as_str());
+  let dir = String::from(path.file_name().ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?.to_str().ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?);
+  path.pop();
+  path.push(String::from("view-") + &dir + &String::from("-") + &id().to_string() + &since_epoch.as_millis().to_string());
+  Ok(path.into_os_string())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // get the
@@ -212,22 +224,13 @@ async fn main() -> std::io::Result<()> {
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
     println!("program hash: 0x{}", hex::encode(output));
-    let db_path = match env::var("DB_LOCATION") {
-        Ok(val) => val,
-        Err(_e) => "/mnt/volume/rocksdb".to_string(),
-    };
-    let time = SystemTime::now();
-    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
-    let secondary = match env::var("DB_LOCATION") {
-        Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
-        Err(_e) => "/mnt/volume/rocksdb".to_string(),
-    };
+    let secondary = get_secondary_directory().unwrap().into_string().unwrap();
     println!("acquiring database handle -- this takes a while ...");
     unsafe {
         INIT_DB = Some(Box::leak(Box::new(
             DB::open_cf_as_secondary(
                 &Options::default(),
-                db_path,
+                env::var("DB_LOCATION").unwrap(),
                 secondary,
                 create_cf_descriptors(),
             )

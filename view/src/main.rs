@@ -1,6 +1,6 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
-use metashrew_runtime::{BatchLike, KeyValueStoreLike};
+use metashrew_runtime::{MetashrewRuntime, BatchLike, KeyValueStoreLike};
 //use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
@@ -96,7 +96,7 @@ struct Context {
     hash: [u8; 32],
     #[allow(dead_code)]
     program: Vec<u8>,
-    path: PathBuf,
+    runtime: MetashrewRuntime<RocksDBRuntimeAdapter>
 }
 
 /*
@@ -155,7 +155,7 @@ async fn view(
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
     {
-      debug!("REQUEST: {}", serde_json::to_string(&body).unwrap());
+      debug!("{}", serde_json::to_string(&body).unwrap());
     }
     if body.method != "metashrew_view" {
         let resp = JsonRpcError {
@@ -165,9 +165,6 @@ async fn view(
         };
         return Ok(HttpResponse::Ok().json(resp));
     } else {
-        let internal_db = unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) };
-        let runtime =
-            metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
         debug!("catching up with primary");
         unsafe {
           INIT_DB.unwrap().try_catch_up_with_primary().unwrap();
@@ -188,7 +185,7 @@ async fn view(
         let result = JsonRpcResult {
             id: body.id,
             result: hex::encode(
-                runtime
+                context.runtime
                     .view(
                         body.params[0].clone(),
                         &hex::decode(
@@ -259,7 +256,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                path: path_clone.clone(),
+                runtime: MetashrewRuntime::load(path_clone.clone(), unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) }).unwrap()
             }))
             .service(view)
     })

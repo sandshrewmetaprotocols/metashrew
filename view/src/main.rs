@@ -4,6 +4,7 @@ use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 //use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
+use serde_json;
 //use std::collections::HashSet;
 use std::env;
 use std::fs::File;
@@ -15,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
 use anyhow;
-use log::{info};
+use log::{info, debug};
 /*
 use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
@@ -69,7 +70,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct JsonRpcRequest {
     id: u32,
     method: String,
@@ -153,6 +154,9 @@ async fn view(
     body: web::Json<JsonRpcRequest>,
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
+    {
+      debug!("REQUEST: {}", serde_json::to_string(&body).unwrap());
+    }
     if body.method != "metashrew_view" {
         let resp = JsonRpcError {
             id: body.id,
@@ -164,6 +168,11 @@ async fn view(
         let internal_db = unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) };
         let runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
+        debug!("catching up with primary");
+        unsafe {
+          INIT_DB.unwrap().try_catch_up_with_primary().unwrap();
+        }
+        debug!("caught up!");
         let height: u32 = if body.params[2] == "latest" {
             unsafe {
                 let height_bytes: Vec<u8> = INIT_DB
@@ -176,7 +185,7 @@ async fn view(
         } else {
             body.params[2].parse::<u32>().unwrap()
         };
-        return Ok(HttpResponse::Ok().json(JsonRpcResult {
+        let result = JsonRpcResult {
             id: body.id,
             result: hex::encode(
                 runtime
@@ -193,7 +202,8 @@ async fn view(
                     .unwrap(),
             ),
             jsonrpc: "2.0".to_string(),
-        }));
+        };
+        return Ok(HttpResponse::Ok().json(result));
     }
 }
 

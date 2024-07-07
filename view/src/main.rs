@@ -1,22 +1,22 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
-use metashrew_runtime::{MetashrewRuntime, BatchLike, KeyValueStoreLike};
+use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 //use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 use serde_json;
 //use std::collections::HashSet;
+use anyhow;
+use log::{debug, info};
 use std::env;
-use std::fs::File;
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
 use std::process::id;
 use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
-use anyhow;
-use log::{info, debug};
 /*
 use wasmtime::{
     Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
@@ -96,7 +96,7 @@ struct Context {
     hash: [u8; 32],
     #[allow(dead_code)]
     program: Vec<u8>,
-    runtime: MetashrewRuntime<RocksDBRuntimeAdapter>
+    runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
 }
 
 /*
@@ -149,13 +149,35 @@ pub fn height_cf(db: &DB) -> &rocksdb::ColumnFamily {
     db.cf_handle(HEIGHT_CF).expect("missing HEIGHT_CF")
 }
 
+pub fn catch_up() {
+    debug!("catching up with primary");
+    unsafe {
+        INIT_DB.unwrap().try_catch_up_with_primary().unwrap();
+    }
+    debug!("caught up!");
+}
+
+static mut _HEIGHT: u32 = 0;
+
+pub fn height() -> u32 {
+    unsafe { _HEIGHT }
+}
+
+
+pub fn set_height(h: u32) -> u32 {
+    unsafe {
+        _HEIGHT = h;
+        _HEIGHT
+    }
+}
+
 #[post("/")]
 async fn view(
     body: web::Json<JsonRpcRequest>,
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
     {
-      debug!("{}", serde_json::to_string(&body).unwrap());
+        debug!("{}", serde_json::to_string(&body).unwrap());
     }
     if body.method != "metashrew_view" {
         let resp = JsonRpcError {
@@ -165,27 +187,31 @@ async fn view(
         };
         return Ok(HttpResponse::Ok().json(resp));
     } else {
-        debug!("catching up with primary");
-        unsafe {
-          INIT_DB.unwrap().try_catch_up_with_primary().unwrap();
-        }
-        debug!("caught up!");
         let height: u32 = if body.params[2] == "latest" {
             unsafe {
+                catch_up();
                 let height_bytes: Vec<u8> = INIT_DB
                     .unwrap()
                     .get_cf(height_cf(INIT_DB.expect("db isn't there")), HEIGHT_KEY)
                     .expect("get tip failed")
                     .unwrap();
-                u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap())
+                set_height(u32::from_le_bytes(
+                    height_bytes.into_boxed_slice()[0..4].try_into().unwrap(),
+                ))
             }
         } else {
-            body.params[2].parse::<u32>().unwrap()
+            let h = body.params[2].parse::<u32>().unwrap();
+            if h > height() {
+                catch_up();
+                set_height(h);
+            }
+            h
         };
         let result = JsonRpcResult {
             id: body.id,
-            result: hex::encode(
-                context.runtime
+            result: String::from("0x") + hex::encode(
+                context
+                    .runtime
                     .view(
                         body.params[0].clone(),
                         &hex::decode(
@@ -197,7 +223,7 @@ async fn view(
                         height,
                     )
                     .unwrap(),
-            ),
+            ).as_str(),
             jsonrpc: "2.0".to_string(),
         };
         return Ok(HttpResponse::Ok().json(result));
@@ -205,13 +231,24 @@ async fn view(
 }
 
 fn get_secondary_directory() -> Result<OsString, anyhow::Error> {
-  let db_path = env::var("DB_LOCATION")?;
-  let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
-  let mut path = PathBuf::from(db_path.as_str());
-  let dir = String::from(path.file_name().ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?.to_str().ok_or(anyhow::anyhow!("couldn't convert path to string"))?);
-  path.pop();
-  path.push(String::from("view-") + &dir + &String::from("-") + &id().to_string() + &since_epoch.as_millis().to_string());
-  Ok(path.into_os_string())
+    let db_path = env::var("DB_LOCATION")?;
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    let mut path = PathBuf::from(db_path.as_str());
+    let dir = String::from(
+        path.file_name()
+            .ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?
+            .to_str()
+            .ok_or(anyhow::anyhow!("couldn't convert path to string"))?,
+    );
+    path.pop();
+    path.push(
+        String::from("view-")
+            + &dir
+            + &String::from("-")
+            + &id().to_string()
+            + &since_epoch.as_millis().to_string(),
+    );
+    Ok(path.into_os_string())
 }
 
 #[actix_web::main]
@@ -256,7 +293,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                runtime: MetashrewRuntime::load(path_clone.clone(), unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) }).unwrap()
+                runtime: MetashrewRuntime::load(path_clone.clone(), unsafe {
+                    RocksDBRuntimeAdapter(INIT_DB.unwrap())
+                })
+                .unwrap(),
             }))
             .service(view)
     })

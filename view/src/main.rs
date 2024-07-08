@@ -163,11 +163,23 @@ pub fn height() -> u32 {
     unsafe { _HEIGHT }
 }
 
-
 pub fn set_height(h: u32) -> u32 {
     unsafe {
         _HEIGHT = h;
         _HEIGHT
+    }
+}
+
+pub fn fetch_and_set_height() -> u32 {
+    unsafe {
+        let height_bytes: Vec<u8> = INIT_DB
+            .unwrap()
+            .get_cf(height_cf(INIT_DB.expect("db isn't there")), HEIGHT_KEY)
+            .expect("get tip failed")
+            .unwrap();
+        set_height(u32::from_le_bytes(
+            height_bytes.into_boxed_slice()[0..4].try_into().unwrap(),
+        ))
     }
 }
 
@@ -188,42 +200,35 @@ async fn view(
         return Ok(HttpResponse::Ok().json(resp));
     } else {
         let height: u32 = if body.params[2] == "latest" {
-            unsafe {
-                catch_up();
-                let height_bytes: Vec<u8> = INIT_DB
-                    .unwrap()
-                    .get_cf(height_cf(INIT_DB.expect("db isn't there")), HEIGHT_KEY)
-                    .expect("get tip failed")
-                    .unwrap();
-                set_height(u32::from_le_bytes(
-                    height_bytes.into_boxed_slice()[0..4].try_into().unwrap(),
-                ))
-            }
+            catch_up();
+            fetch_and_set_height()
         } else {
             let h = body.params[2].parse::<u32>().unwrap();
             if h > height() {
                 catch_up();
-                set_height(h);
+                fetch_and_set_height();
             }
             h
         };
         let result = JsonRpcResult {
             id: body.id,
-            result: String::from("0x") + hex::encode(
-                context
-                    .runtime
-                    .view(
-                        body.params[0].clone(),
-                        &hex::decode(
-                            body.params[1]
-                                .to_string()
-                                .substring(2, body.params[1].len()),
+            result: String::from("0x")
+                + hex::encode(
+                    context
+                        .runtime
+                        .view(
+                            body.params[0].clone(),
+                            &hex::decode(
+                                body.params[1]
+                                    .to_string()
+                                    .substring(2, body.params[1].len()),
+                            )
+                            .unwrap(),
+                            height,
                         )
                         .unwrap(),
-                        height,
-                    )
-                    .unwrap(),
-            ).as_str(),
+                )
+                .as_str(),
             jsonrpc: "2.0".to_string(),
         };
         return Ok(HttpResponse::Ok().json(result));

@@ -4,8 +4,12 @@ use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 //use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
+use serde_json;
+use anyhow;
+use log::{debug, info};
 //use std::collections::HashSet;
 use std::env;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
@@ -13,12 +17,8 @@ use std::process::id;
 use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
-/*
-use wasmtime::{
-    Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
-    Module, Mutability, SharedMemory, Store, Val, ValType,
-};
-*/
+use metashrew_indexer::mempool::{RocksDBPendingAdapter, RocksDBPendingBatch};
+use env_logger;
 
 static mut INIT_DB: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
@@ -64,7 +64,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct JsonRpcRequest {
     id: u32,
     method: String,
@@ -119,6 +119,7 @@ const FUNDING_CF: &str = "funding";
 const SPENDING_CF: &str = "spending";
 const INDEX_CF: &str = "index";
 const HEIGHT_CF: &str = "height";
+const PENDING_CF: &str = "pending";
 const HEIGHT_KEY: &[u8] = b"H";
 
 const COLUMN_FAMILIES: &[&str] = &[
@@ -129,6 +130,7 @@ const COLUMN_FAMILIES: &[&str] = &[
     SPENDING_CF,
     INDEX_CF,
     HEIGHT_CF,
+    PENDING_CF,
 ];
 
 fn create_cf_descriptors() -> Vec<&'static str> {
@@ -143,11 +145,48 @@ pub fn height_cf(db: &DB) -> &rocksdb::ColumnFamily {
     db.cf_handle(HEIGHT_CF).expect("missing HEIGHT_CF")
 }
 
+pub fn catch_up() {
+    debug!("catching up with primary");
+    unsafe {
+        INIT_DB.unwrap().try_catch_up_with_primary().unwrap();
+    }
+    debug!("caught up!");
+}
+
+static mut _HEIGHT: u32 = 0;
+
+pub fn height() -> u32 {
+    unsafe { _HEIGHT }
+}
+
+pub fn set_height(h: u32) -> u32 {
+    unsafe {
+        _HEIGHT = h;
+        _HEIGHT
+    }
+}
+
+pub fn fetch_and_set_height() -> u32 {
+    unsafe {
+        let height_bytes: Vec<u8> = INIT_DB
+            .unwrap()
+            .get_cf(height_cf(INIT_DB.expect("db isn't there")), HEIGHT_KEY)
+            .expect("get tip failed")
+            .unwrap();
+        set_height(u32::from_le_bytes(
+            height_bytes.into_boxed_slice()[0..4].try_into().unwrap(),
+        ))
+    }
+}
+
 #[post("/")]
 async fn view(
     body: web::Json<JsonRpcRequest>,
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
+    {
+        debug!("{}", serde_json::to_string(&body).unwrap());
+    }
     if body.method != "metashrew_view" {
         let resp = JsonRpcError {
             id: body.id,
@@ -157,19 +196,52 @@ async fn view(
         return Ok(HttpResponse::Ok().json(resp));
     } else {
         let internal_db = unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) };
+        let pending_db = unsafe { RocksDBPendingAdapter(INIT_DB.unwrap()) };
         let runtime =
             metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
+        
         let height: u32 = if body.params[2] == "latest" {
+            catch_up();
+            fetch_and_set_height()
+        } else if body.params[2] == "pending" {
+            let pending_runtime = metashrew_runtime::MetashrewRuntime::load(
+                context.path.clone(),
+                pending_db).unwrap();
+            let mut pending;
             unsafe {
                 let height_bytes: Vec<u8> = INIT_DB
                     .unwrap()
                     .get_cf(height_cf(INIT_DB.expect("db isn't there")), HEIGHT_KEY)
                     .expect("get tip failed")
                     .unwrap();
-                u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap())
+                pending = u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap());
+                pending += 1;
             }
+            return Ok(HttpResponse::Ok().json(JsonRpcResult {
+                id: body.id,
+                result: hex::encode(
+                    pending_runtime
+                        .view(
+                            body.params[0].clone(),
+                            &hex::decode(
+                                body.params[1]
+                                    .to_string()
+                                    .substring(2, body.params[1].len()),
+                            )
+                            .unwrap(),
+                            pending,
+                        )
+                        .unwrap(),
+                ),
+                jsonrpc: "2.0".to_string(),
+            }));
         } else {
-            body.params[2].parse::<u32>().unwrap()
+            let h = body.params[2].parse::<u32>().unwrap();
+            if h > height() {
+                catch_up();
+                fetch_and_set_height();
+            }
+            h
         };
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
@@ -192,8 +264,30 @@ async fn view(
     }
 }
 
+fn get_secondary_directory() -> Result<OsString, anyhow::Error> {
+    let db_path = env::var("DB_LOCATION")?;
+    let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    let mut path = PathBuf::from(db_path.as_str());
+    let dir = String::from(
+        path.file_name()
+            .ok_or(anyhow::anyhow!("filename couldn't be retrieved from path"))?
+            .to_str()
+            .ok_or(anyhow::anyhow!("couldn't convert path to string"))?,
+    );
+    path.pop();
+    path.push(
+        String::from("view-")
+            + &dir
+            + &String::from("-")
+            + &id().to_string()
+            + &since_epoch.as_millis().to_string(),
+    );
+    Ok(path.into_os_string())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    env_logger::init();
     // get the
     let path = match env::var("PROGRAM_PATH") {
         Ok(val) => val,
@@ -211,30 +305,21 @@ async fn main() -> std::io::Result<()> {
     let mut output = [0; 32];
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
-    println!("program hash: 0x{}", hex::encode(output));
-    let db_path = match env::var("DB_LOCATION") {
-        Ok(val) => val,
-        Err(_e) => "/mnt/volume/rocksdb".to_string(),
-    };
-    let time = SystemTime::now();
-    let since_epoch = time.duration_since(UNIX_EPOCH).unwrap();
-    let secondary = match env::var("DB_LOCATION") {
-        Ok(val) => val + &id().to_string() + &since_epoch.as_millis().to_string(),
-        Err(_e) => "/mnt/volume/rocksdb".to_string(),
-    };
-    println!("acquiring database handle -- this takes a while ...");
+    info!("program hash: 0x{}", hex::encode(output));
+    let secondary = get_secondary_directory().unwrap().into_string().unwrap();
+    info!("acquiring database handle -- this takes a while ...");
     unsafe {
         INIT_DB = Some(Box::leak(Box::new(
             DB::open_cf_as_secondary(
                 &Options::default(),
-                db_path,
+                env::var("DB_LOCATION").unwrap(),
                 secondary,
                 create_cf_descriptors(),
             )
             .unwrap(),
         )));
     }
-    println!("rocksdb opened in secondary");
+    info!("rocksdb opened in secondary");
     let path_clone: PathBuf = path.into();
 
     HttpServer::new(move || {
@@ -242,7 +327,10 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                path: path_clone.clone(),
+                runtime: MetashrewRuntime::load(path_clone.clone(), unsafe {
+                    RocksDBRuntimeAdapter(INIT_DB.unwrap())
+                })
+                .unwrap(),
             }))
             .service(view)
     })
@@ -258,4 +346,5 @@ async fn main() -> std::io::Result<()> {
     ))?
     .run()
     .await
+
 }

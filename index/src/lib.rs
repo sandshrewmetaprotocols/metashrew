@@ -16,7 +16,7 @@ mod daemon;
 mod db;
 mod electrum;
 mod index;
-mod mempool;
+pub mod mempool;
 mod merkle;
 mod metrics;
 mod p2p;

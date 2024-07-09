@@ -202,6 +202,8 @@ impl Chain {
 
 #[cfg(test)]
 mod tests {
+    use crate::config::BitcoinCompatibleNetwork;
+
     use super::{Chain, NewHeader};
     use bitcoin::blockdata::block::Header as BlockHeader;
     use bitcoin::consensus::deserialize;

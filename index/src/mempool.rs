@@ -1,4 +1,5 @@
 use anyhow::Result;
+use bitcoin::consensus::Encodable;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::TryFrom;
@@ -22,9 +23,9 @@ use crate::{
     signals::ExitFlag,
     types::ScriptHash,
 };
-
+static mut PENDING_HASH: Option<BlockHash> = None;
 #[derive(Clone)]
-pub struct RocksDBPendingAdapter(&'static DB);
+pub struct RocksDBPendingAdapter(pub &'static DB);
 pub struct RocksDBPendingBatch(pub rocksdb::WriteBatch);
 
 impl BatchLike for RocksDBPendingBatch {
@@ -47,6 +48,11 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
         }
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+        // append the blockhash bytes to the key then perform the lookup
+        let mut blockhash_bytes = BlockHash::as_byte_array(&{ unsafe { PENDING_HASH }});
+        let owned_k = key.as_ref().to_vec().as_slice();
+        
+        let merge = 
         match self.0.get_cf(pending_cf(self.0), &key) {
           Ok(opt) => match opt {
             None => self.0.get_cf(index_cf(self.0), &key),
@@ -64,7 +70,7 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
     }
 }
 
-
+#[derive(Clone)]
 pub(crate) struct Entry {
     pub txid: Txid,
     pub tx: Transaction,
@@ -137,6 +143,7 @@ impl Mempool {
         for entry in sorted {
             block.txdata.push(entry.tx);
         }
+        unsafe { PENDING_HASH = Some(block.block_hash());}
         block
     }
 
@@ -221,6 +228,9 @@ impl Mempool {
             self.vsize.set(&label, self.fees.vsize[bin_index] as f64);
             self.count.set(&label, self.fees.count[bin_index] as f64);
         }
+        let mut writer = Vec::new();
+        let _block = self.construct_entry_block().consensus_encode(&mut writer);
+        self.pending_runtime.context.lock().unwrap().block = writer;
         self.pending_runtime.run().expect("msg");
         debug!(
             "{} mempool txs: {} added, {} removed",

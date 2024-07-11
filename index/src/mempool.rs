@@ -49,11 +49,12 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         // append the blockhash bytes to the key then perform the lookup
-        let mut blockhash_bytes = BlockHash::as_byte_array(&{ unsafe { PENDING_HASH }});
-        let owned_k = key.as_ref().to_vec().as_slice();
-        
-        let merge = 
-        match self.0.get_cf(pending_cf(self.0), &key) {
+        let mut k: Vec<u8> = "/".as_bytes().to_vec();
+        let mut blockhash_bytes = BlockHash::as_byte_array(&{ unsafe { PENDING_HASH.expect("there is no pending?") }}).to_vec();
+        k.append(&mut blockhash_bytes);
+        k.append(&mut key.as_ref().to_vec());
+        // get the value from the pending_cf, if not there, fallback on the index_cf
+        match self.0.get_cf(pending_cf(self.0), &k) {
           Ok(opt) => match opt {
             None => self.0.get_cf(index_cf(self.0), &key),
             Some(v) => Ok(Some(v))
@@ -66,7 +67,11 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
         Ok(())
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
-        self.0.put_cf(pending_cf(self.0), key, value)
+        let mut k: Vec<u8> = "/".as_bytes().to_vec();
+        let mut blockhash_bytes = BlockHash::as_byte_array(&{ unsafe { PENDING_HASH.expect("there is no pending?") }}).to_vec();
+        k.append(&mut blockhash_bytes);
+        k.append(&mut key.as_ref().to_vec());
+        self.0.put_cf(pending_cf(self.0), k, value)
     }
 }
 

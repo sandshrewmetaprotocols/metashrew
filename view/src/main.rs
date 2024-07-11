@@ -1,6 +1,6 @@
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
-use metashrew_runtime::{BatchLike, KeyValueStoreLike};
+use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 //use rlp::Rlp;
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
@@ -90,8 +90,10 @@ struct Context {
     hash: [u8; 32],
     #[allow(dead_code)]
     program: Vec<u8>,
-    path: PathBuf,
+    runtime: Option<MetashrewRuntime<RocksDBRuntimeAdapter>>,
+    pending: Option<MetashrewRuntime<RocksDBPendingAdapter>>,
 }
+
 
 /*
 fn default_opts() -> rocksdb::Options {
@@ -194,19 +196,11 @@ async fn view(
             jsonrpc: "2.0".to_string(),
         };
         return Ok(HttpResponse::Ok().json(resp));
-    } else {
-        let internal_db = unsafe { RocksDBRuntimeAdapter(INIT_DB.unwrap()) };
-        let pending_db = unsafe { RocksDBPendingAdapter(INIT_DB.unwrap()) };
-        let runtime =
-            metashrew_runtime::MetashrewRuntime::load(context.path.clone(), internal_db).unwrap();
-        
+    } else {        
         let height: u32 = if body.params[2] == "latest" {
             catch_up();
             fetch_and_set_height()
         } else if body.params[2] == "pending" {
-            let pending_runtime = metashrew_runtime::MetashrewRuntime::load(
-                context.path.clone(),
-                pending_db).unwrap();
             let mut pending;
             unsafe {
                 let height_bytes: Vec<u8> = INIT_DB
@@ -220,7 +214,8 @@ async fn view(
             return Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: hex::encode(
-                    pending_runtime
+                    context
+                    .pending.as_ref().expect("there is no pending runtime set in the context")
                         .view(
                             body.params[0].clone(),
                             &hex::decode(
@@ -246,7 +241,7 @@ async fn view(
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
             result: hex::encode(
-                runtime
+                context.runtime.as_ref().expect("the runtime was not set in context")
                     .view(
                         body.params[0].clone(),
                         &hex::decode(
@@ -327,10 +322,15 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                runtime: MetashrewRuntime::load(path_clone.clone(), unsafe {
+                runtime: Some(MetashrewRuntime::load(path_clone.clone(), unsafe {
                     RocksDBRuntimeAdapter(INIT_DB.unwrap())
                 })
-                .unwrap(),
+                .unwrap()),
+                pending: Some(MetashrewRuntime::load(path_clone.clone(), unsafe {
+                    RocksDBPendingAdapter(INIT_DB.unwrap())
+                })
+                .unwrap()),
+
             }))
             .service(view)
     })

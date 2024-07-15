@@ -233,16 +233,20 @@ impl Mempool {
             self.vsize.set(&label, self.fees.vsize[bin_index] as f64);
             self.count.set(&label, self.fees.count[bin_index] as f64);
         }
-        let mut writer = Vec::new();
-        let _block = self.construct_entry_block().consensus_encode(&mut writer);
-        self.pending_runtime.context.lock().unwrap().block = writer;
-        self.pending_runtime.run().expect("msg");
         debug!(
             "{} mempool txs: {} added, {} removed",
             self.entries.len(),
             added,
             removed,
         );
+        let mut writer = Vec::new();
+        let entry_block = self.construct_entry_block();
+        let _block = entry_block.consensus_encode(&mut writer);
+        self.pending_runtime.context.lock().unwrap().block = writer;
+        match self.pending_runtime.run() {
+          Ok(_) => debug!("pending block evaluates {} txs", entry_block.txdata.len()),
+          Err(e) => debug!("pending block evaluation failed: {}", e)
+        }
     }
 
     fn add_entry(&mut self, txid: Txid, tx: Transaction, entry: json::GetMempoolEntryResult) {

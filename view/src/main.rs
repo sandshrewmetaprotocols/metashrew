@@ -2,12 +2,14 @@ use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 //use rlp::Rlp;
+use anyhow;
+use log::{debug, info};
 use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 use serde_json;
-use anyhow;
-use log::{debug, info};
 //use std::collections::HashSet;
+use env_logger;
+use metashrew_indexer::mempool::{RocksDBPendingAdapter, RocksDBPendingBatch};
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;
@@ -17,8 +19,6 @@ use std::process::id;
 use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
-use metashrew_indexer::mempool::{RocksDBPendingAdapter, RocksDBPendingBatch};
-use env_logger;
 
 static mut INIT_DB: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
@@ -93,7 +93,6 @@ struct Context {
     runtime: Option<MetashrewRuntime<RocksDBRuntimeAdapter>>,
     pending: Option<MetashrewRuntime<RocksDBPendingAdapter>>,
 }
-
 
 /*
 fn default_opts() -> rocksdb::Options {
@@ -196,7 +195,7 @@ async fn view(
             jsonrpc: "2.0".to_string(),
         };
         return Ok(HttpResponse::Ok().json(resp));
-    } else {        
+    } else {
         let height: u32 = if body.params[2] == "latest" {
             catch_up();
             fetch_and_set_height()
@@ -208,14 +207,17 @@ async fn view(
                     .get_cf(height_cf(INIT_DB.expect("db isn't there")), HEIGHT_KEY)
                     .expect("get tip failed")
                     .unwrap();
-                pending = u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap());
+                pending =
+                    u32::from_le_bytes(height_bytes.into_boxed_slice()[0..4].try_into().unwrap());
                 pending += 1;
             }
             return Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: hex::encode(
                     context
-                    .pending.as_ref().expect("there is no pending runtime set in the context")
+                        .pending
+                        .as_ref()
+                        .expect("there is no pending runtime set in the context")
                         .view(
                             body.params[0].clone(),
                             &hex::decode(
@@ -241,7 +243,10 @@ async fn view(
         return Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
             result: hex::encode(
-                context.runtime.as_ref().expect("the runtime was not set in context")
+                context
+                    .runtime
+                    .as_ref()
+                    .expect("the runtime was not set in context")
                     .view(
                         body.params[0].clone(),
                         &hex::decode(
@@ -322,15 +327,18 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                runtime: Some(MetashrewRuntime::load(path_clone.clone(), unsafe {
-                    RocksDBRuntimeAdapter(INIT_DB.unwrap())
-                })
-                .unwrap()),
-                pending: Some(MetashrewRuntime::load(path_clone.clone(), unsafe {
-                    RocksDBPendingAdapter(INIT_DB.unwrap())
-                })
-                .unwrap()),
-
+                runtime: Some(
+                    MetashrewRuntime::load(path_clone.clone(), unsafe {
+                        RocksDBRuntimeAdapter(INIT_DB.unwrap())
+                    })
+                    .unwrap(),
+                ),
+                pending: Some(
+                    MetashrewRuntime::load(path_clone.clone(), unsafe {
+                        RocksDBPendingAdapter(INIT_DB.unwrap())
+                    })
+                    .unwrap(),
+                ),
             }))
             .service(view)
     })
@@ -346,5 +354,4 @@ async fn main() -> std::io::Result<()> {
     ))?
     .run()
     .await
-
 }

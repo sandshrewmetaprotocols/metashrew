@@ -34,12 +34,7 @@ pub(crate) enum Error {
 impl Tracker {
     pub fn new(config: &Config, metrics: Metrics) -> Result<Self> {
         let store: &'static DBStore = Box::leak(Box::new(
-            DBStore::open(
-                &config.db_path,
-                config.db_log_dir.as_deref(),
-                config.view,
-            )
-            .unwrap(),
+            DBStore::open(&config.db_path, config.db_log_dir.as_deref(), config.view).unwrap(),
         ));
         debug!("opened database");
         let chain = Chain::new(config.network);

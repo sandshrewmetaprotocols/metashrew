@@ -6,20 +6,20 @@ use std::convert::TryFrom;
 use std::iter::FromIterator;
 use std::ops::Bound;
 
-use bitcoin::{hashes::Hash, blockdata::block::{Block}};
-use bitcoin::{BlockHash, CompactTarget, Amount, OutPoint, Transaction, Txid};
+use bitcoin::{blockdata::block::Block, hashes::Hash};
+use bitcoin::{Amount, BlockHash, CompactTarget, OutPoint, Transaction, Txid};
 use bitcoincore_rpc::json;
+use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use rayon::prelude::*;
-use serde::ser::{Serialize, SerializeSeq, Serializer};
 use rocksdb::DB;
-use metashrew_runtime::{MetashrewRuntime, KeyValueStoreLike, BatchLike};
+use serde::ser::{Serialize, SerializeSeq, Serializer};
 
 use crate::{
     daemon::Daemon,
     db::{index_cf, pending_cf},
-    index::{get_db},
-    server::get_config,
+    index::get_db,
     metrics::{Gauge, Metrics},
+    server::get_config,
     signals::ExitFlag,
     types::ScriptHash,
 };
@@ -50,16 +50,18 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         // append the blockhash bytes to the key then perform the lookup
         let mut k: Vec<u8> = "/".as_bytes().to_vec();
-        let mut blockhash_bytes = BlockHash::as_byte_array(&{ unsafe { PENDING_HASH.expect("there is no pending?") }}).to_vec();
+        let mut blockhash_bytes =
+            BlockHash::as_byte_array(&{ unsafe { PENDING_HASH.expect("there is no pending?") } })
+                .to_vec();
         k.append(&mut blockhash_bytes);
         k.append(&mut key.as_ref().to_vec());
         // get the value from the pending_cf, if not there, fallback on the index_cf
         match self.0.get_cf(pending_cf(self.0), &k) {
-          Ok(opt) => match opt {
-            None => self.0.get_cf(index_cf(self.0), &key),
-            Some(v) => Ok(Some(v))
-          },
-          Err(e) => Err(e)
+            Ok(opt) => match opt {
+                None => self.0.get_cf(index_cf(self.0), &key),
+                Some(v) => Ok(Some(v)),
+            },
+            Err(e) => Err(e),
         }
     }
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
@@ -68,7 +70,9 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
         let mut k: Vec<u8> = "/".as_bytes().to_vec();
-        let mut blockhash_bytes = BlockHash::as_byte_array(&{ unsafe { PENDING_HASH.expect("there is no pending?") }}).to_vec();
+        let mut blockhash_bytes =
+            BlockHash::as_byte_array(&{ unsafe { PENDING_HASH.expect("there is no pending?") } })
+                .to_vec();
         k.append(&mut blockhash_bytes);
         k.append(&mut key.as_ref().to_vec());
         self.0.put_cf(pending_cf(self.0), k, value)
@@ -126,7 +130,8 @@ impl Mempool {
                 "Total number of mempool transactions",
                 "fee_rate",
             ),
-            pending_runtime: MetashrewRuntime::<RocksDBPendingAdapter>::load(indexer, internal_db).unwrap()
+            pending_runtime: MetashrewRuntime::<RocksDBPendingAdapter>::load(indexer, internal_db)
+                .unwrap(),
         }
     }
 
@@ -139,7 +144,7 @@ impl Mempool {
             time: 0,
             bits: CompactTarget::default(),
             nonce: 0,
-        };  
+        };
         let mut block = Block {
             header,
             txdata: Vec::new(),
@@ -149,22 +154,44 @@ impl Mempool {
         for entry in sorted {
             block.txdata.push(entry.tx);
         }
-        unsafe { PENDING_HASH = Some(block.block_hash());}
+        unsafe {
+            PENDING_HASH = Some(block.block_hash());
+        }
         block
     }
 
     fn sort_by_dependency(entries: Vec<Entry>) -> Vec<Entry> {
         // construct a vec  of entries that have no unconfirmed transactions as inputs
-        let mut no_deps: Vec<Entry> = Vec::new();
-        // convert the entries to a hashset 
-        let mut entries_set: HashSet<Entry> = HashSet::from_iter(entries.clone());
+        let mut sorted: Vec<Entry> = Vec::new();
+        let mut no_deps: HashMap<Txid, Entry> = HashMap::new();
+        // convert the entries to a hashset
+        let mut entries_set: HashMap<Txid, Entry> =
+            HashMap::from_iter(entries.iter().map(|entry| (entry.txid, entry.clone())));
+        // construct a set of entries with no unconfirmed inputs and remove them from the entries_set
         for entry in entries {
             if !entry.has_unconfirmed_inputs {
-                no_deps.push(entry);
+                no_deps.insert(entry.txid, entry.clone());
+                entries_set.remove(&entry.clone().txid);
             }
         }
-
-        no_deps
+        // iterate through 
+        while !no_deps.is_empty() {
+            let entry: Entry = no_deps.iter().next().unwrap().1.clone();
+            no_deps.remove(&entry.txid);
+            sorted.push(entry.clone());
+            sorted.sort_by(|a, b| a.fee.cmp(&b.fee));
+            for mut current in entries_set.values() {
+                if current.depends.contains(&entry.txid) {
+                    current.depends.remove(&entry.txid);
+                    if current.depends.is_empty() {
+                        no_deps.insert(current.txid, current.clone());
+                        current.has_unconfirmed_inputs = false;
+                        // maybe remove from entries_set ? otherwise this should be fine
+                    }
+                }
+            }
+        }
+        sorted
     }
 
     pub(crate) fn fees_histogram(&self) -> &FeeHistogram {
@@ -259,8 +286,8 @@ impl Mempool {
         let _block = entry_block.consensus_encode(&mut writer);
         self.pending_runtime.context.lock().unwrap().block = writer;
         match self.pending_runtime.run() {
-          Ok(_) => debug!("pending block evaluates {} txs", entry_block.txdata.len()),
-          Err(e) => debug!("pending block evaluation failed: {}", e)
+            Ok(_) => debug!("pending block evaluates {} txs", entry_block.txdata.len()),
+            Err(e) => debug!("pending block evaluation failed: {}", e),
         }
     }
 
@@ -278,7 +305,7 @@ impl Mempool {
             vsize: entry.vsize,
             fee: entry.fees.base,
             has_unconfirmed_inputs: !entry.depends.is_empty(),
-            depends: HashSet::from_iter(entry.depends.clone().into_iter())
+            depends: HashSet::from_iter(entry.depends.clone().into_iter()),
         };
         assert!(
             self.entries.insert(txid, entry).is_none(),

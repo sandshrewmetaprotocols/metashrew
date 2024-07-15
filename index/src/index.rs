@@ -2,14 +2,14 @@ use anyhow::{Context, Result};
 use bitcoin::consensus::{deserialize, serialize, Decodable};
 use bitcoin::{BlockHash, OutPoint, Txid};
 use rocksdb;
-use rocksdb::{DB};
+use rocksdb::DB;
 use std;
 use std::convert::AsRef;
+use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::ops::ControlFlow;
 //use wasmtime;
-use bitcoin_slices::{bsl, Visitor, Visit};
+use bitcoin_slices::{bsl, Visit, Visitor};
 
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 
@@ -18,7 +18,7 @@ use crate::{
     daemon::Daemon,
     db::{index_cf, DBStore, Row, WriteBatch},
     metrics::{self, Gauge, Histogram, Metrics},
-    server::{get_config},
+    server::get_config,
     signals::ExitFlag,
     types::{
         HashPrefixRow, HeaderRow, ScriptHash, ScriptHashRow, SerBlock, SpendingPrefixRow, TxidRow,
@@ -104,22 +104,19 @@ impl BatchLike for RocksDBBatch {
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
         self.0.put_cf(index_cf(get_db()), k, v)
-        
     }
 }
 
 static mut _DB: Option<&'static DBStore> = None;
 
 pub fn set_db(store: &'static DBStore) {
-  unsafe {
-    _DB = Some(store);
-  }
+    unsafe {
+        _DB = Some(store);
+    }
 }
 
 pub fn get_db() -> &'static rocksdb::DB {
-  unsafe {
-    &(_DB.unwrap()).db
-  }
+    unsafe { &(_DB.unwrap()).db }
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
@@ -128,8 +125,8 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
         let opts = rocksdb::WriteOptions::default();
         match self.0.write_opt(batch.0, &opts) {
-          Ok(_) => Ok(()),
-          Err(e) => Err(e)
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
         }
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -153,7 +150,7 @@ pub struct Index {
     stats: Stats,
     runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
     is_ready: bool,
-    flush_needed: bool
+    flush_needed: bool,
 }
 
 impl Index {
@@ -288,14 +285,20 @@ impl Index {
             let blockarc = Arc::new(block);
             let blockhasharc = Arc::new(blockhash);
             self.stats.observe_duration("block", || {
-                index_single_block(&mut batch, &mut self.runtime, blockarc, height, blockhasharc);
+                index_single_block(
+                    &mut batch,
+                    &mut self.runtime,
+                    blockarc,
+                    height,
+                    blockhasharc,
+                );
             });
             self.stats.height.set("tip", height as f64);
             if let Some(exit_block) = get_config().exit_at {
                 if height as usize == exit_block {
-                  self.store.write(&batch);
-                  info!("snapshot built for block {}", height);
-                  std::process::exit(0);
+                    self.store.write(&batch);
+                    info!("snapshot built for block {}", height);
+                    std::process::exit(0);
                 }
             }
         })?;
@@ -331,21 +334,21 @@ fn index_single_block(
     blockhash: Arc<BlockHash>,
 ) {
     {
-      runtime.context.lock().unwrap().height = height as u32;
-      runtime.context.lock().unwrap().block = block.as_ref().clone();
+        runtime.context.lock().unwrap().height = height as u32;
+        runtime.context.lock().unwrap().block = block.as_ref().clone();
     }
     if get_config().no_cache {
-      runtime.run().unwrap();
-      runtime.refresh_memory();
-    } else {
-    // create new instance with fresh memory and run again
-      if let Err(_) = runtime.run() {
-        debug!("respawn cache");
+        runtime.run().unwrap();
         runtime.refresh_memory();
-        if let Err(e) = runtime.run() {
-            panic!("runtime run failed after retry: {}", e);
+    } else {
+        // create new instance with fresh memory and run again
+        if let Err(_) = runtime.run() {
+            debug!("respawn cache");
+            runtime.refresh_memory();
+            if let Err(e) = runtime.run() {
+                panic!("runtime run failed after retry: {}", e);
+            }
         }
-      }
     }
     struct IndexBlockVisitor<'a> {
         batch: &'a mut WriteBatch,
@@ -380,5 +383,4 @@ fn index_single_block(
     batch.tip_height = height as u32;
 
     // save block hash to the headers_cf
-
 }

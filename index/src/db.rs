@@ -1,4 +1,4 @@
-use anyhow::{Result};
+use anyhow::Result;
 use rocksdb;
 
 //use hex;
@@ -44,7 +44,16 @@ const INDEX_CF: &str = "index";
 const HEIGHT_CF: &str = "height";
 const PENDING_CF: &str = "pending";
 
-const COLUMN_FAMILIES: &[&str] = &[CONFIG_CF, HEADERS_CF, TXID_CF, FUNDING_CF, SPENDING_CF, INDEX_CF, HEIGHT_CF, PENDING_CF];
+const COLUMN_FAMILIES: &[&str] = &[
+    CONFIG_CF,
+    HEADERS_CF,
+    TXID_CF,
+    FUNDING_CF,
+    SPENDING_CF,
+    INDEX_CF,
+    HEIGHT_CF,
+    PENDING_CF,
+];
 
 const CONFIG_KEY: &str = "C";
 pub(crate) const TIP_KEY: &[u8] = b"T";
@@ -112,20 +121,19 @@ impl Default for Config {
     }
 }
 
-
 fn default_opts() -> rocksdb::Options {
     let mut block_opts = rocksdb::BlockBasedOptions::default();
     block_opts.set_checksum_type(rocksdb::ChecksumType::CRC32c);
 
     let mut opts = rocksdb::Options::default();
-//    opts.set_keep_log_file_num(10);
+    //    opts.set_keep_log_file_num(10);
     opts.set_max_open_files(-1);
     opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
     opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-//    opts.set_target_file_size_base(256 << 20);
+    //    opts.set_target_file_size_base(256 << 20);
     opts.set_write_buffer_size(256 << 24);
     opts.set_disable_auto_compactions(true); // for initial bulk load
-//    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
+                                             //    opts.set_advise_random_on_open(false); // bulk load uses sequential I/O
     opts.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(8));
     opts.set_block_based_table_factory(&block_opts);
     opts
@@ -162,8 +170,9 @@ impl DBStore {
             )?
         } else {
             debug!("open_cf_descriptors");
-            rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors()).expect(&format!("failed to open DB: {}", path.display()))
-//                .with_context(|| format!("failed to open DB: {}", path.display()))?
+            rocksdb::DB::open_cf_descriptors(&db_opts, path, Self::create_cf_descriptors())
+                .expect(&format!("failed to open DB: {}", path.display()))
+            //                .with_context(|| format!("failed to open DB: {}", path.display()))?
         };
         debug!("rocksdb opened");
         let live_files = db.live_files()?;
@@ -192,11 +201,7 @@ impl DBStore {
 
     */
     /// Opens a new RocksDB at the specified location.
-    pub fn open(
-        path: &Path,
-        log_dir: Option<&Path>,
-        view: bool,
-    ) -> Result<Self> {
+    pub fn open(path: &Path, log_dir: Option<&Path>, view: bool) -> Result<Self> {
         let store = Self::open_internal(path, log_dir, view)?;
         let config = store.get_config();
         debug!("DB {:?}", config);
@@ -327,14 +332,18 @@ impl DBStore {
             db_batch.put_cf(self.headers_cf(), key, b"");
         }
         db_batch.put_cf(self.headers_cf(), TIP_KEY, &batch.tip_row);
-        db_batch.put_cf(self.height_cf(), HEIGHT_KEY, &batch.tip_height.to_le_bytes().to_vec());
+        db_batch.put_cf(
+            self.height_cf(),
+            HEIGHT_KEY,
+            &batch.tip_height.to_le_bytes().to_vec(),
+        );
 
         let opts = rocksdb::WriteOptions::default();
-//        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
-//        opts.set_sync(!bulk_import);
+        //        let bulk_import = self.bulk_import.load(Ordering::Relaxed);
+        //        opts.set_sync(!bulk_import);
         self.db.write_opt(db_batch, &opts).unwrap();
-//        self.db.flush_wal(true).unwrap();
-//        self.flush();
+        //        self.db.flush_wal(true).unwrap();
+        //        self.flush();
     }
 
     pub(crate) fn flush(&self) {
@@ -393,8 +402,8 @@ impl DBStore {
 
     fn set_config(&self, config: Config) {
         let opts = rocksdb::WriteOptions::default();
-//        opts.set_sync(true);
-//        opts.disable_wal(false);
+        //        opts.set_sync(true);
+        //        opts.disable_wal(false);
         let value = serde_json::to_vec(&config).expect("failed to serialize config");
         self.db
             .put_cf_opt(self.config_cf(), CONFIG_KEY, value, &opts)

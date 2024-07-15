@@ -20,7 +20,6 @@ mod internal {
     #![allow(clippy::enum_variant_names)]
     #![allow(clippy::unnecessary_lazy_evaluations)]
     #![allow(clippy::useless_conversion)]
-
     #![allow(unused_imports)]
     include!(concat!(env!("OUT_DIR"), "/configure_me_config.rs"));
 }

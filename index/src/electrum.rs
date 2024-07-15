@@ -224,53 +224,53 @@ impl Rpc {
         Ok(json!(serialize_hex(header)))
     }
     /*
-    fn view(&self, (symbol, input_rlp, block_tag): &(String, String, String)) -> Result<Value> {
-        let engine = wasmtime::Engine::default();
-        let module =
-            wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string())
-                .unwrap();
-        let mut store = Store::new(&engine, ());
-        let mut linker = Linker::new(&engine);
-        let height: i32 = match block_tag.parse() {
-            Ok(v) => v,
-            Err(_e) => {
-                if block_tag == "latest" {
-                    self.tracker.chain().height().try_into().unwrap()
-                } else {
-                    -1
+        fn view(&self, (symbol, input_rlp, block_tag): &(String, String, String)) -> Result<Value> {
+            let engine = wasmtime::Engine::default();
+            let module =
+                wasmtime::Module::from_file(&engine, self.config.indexer.clone().into_os_string())
+                    .unwrap();
+            let mut store = Store::new(&engine, ());
+            let mut linker = Linker::new(&engine);
+            let height: i32 = match block_tag.parse() {
+                Ok(v) => v,
+                Err(_e) => {
+                    if block_tag == "latest" {
+                        self.tracker.chain().height().try_into().unwrap()
+                    } else {
+                        -1
+                    }
                 }
+            };
+            if height < 0 {
+                return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
             }
-        };
-        if height < 0 {
-            return Ok(json!({ "error": format!("invalid block_tag: {:?}", block_tag) }));
-        }
-        let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
-        setup_linker(&mut linker, &input, height as u32);
-        setup_linker_view(&mut linker, self.tracker.index.store, height);
-        let instance = linker.instantiate(&mut store, &module).unwrap();
-        instance
-            .get_memory(&mut store, "memory")
-            .unwrap()
-            .grow(&mut store, 128)
-            .unwrap();
-        let fnc = instance
-            .get_typed_func::<(), i32>(&mut store, symbol.as_str())
-            .unwrap();
-        if self.config.view {
-            self.tracker
-                .index
-                .store
-                .db
-                .try_catch_up_with_primary()
+            let input: Vec<u8> = input_rlp.as_str().try_into().unwrap();
+            setup_linker(&mut linker, &input, height as u32);
+            setup_linker_view(&mut linker, self.tracker.index.store, height);
+            let instance = linker.instantiate(&mut store, &module).unwrap();
+            instance
+                .get_memory(&mut store, "memory")
+                .unwrap()
+                .grow(&mut store, 128)
                 .unwrap();
+            let fnc = instance
+                .get_typed_func::<(), i32>(&mut store, symbol.as_str())
+                .unwrap();
+            if self.config.view {
+                self.tracker
+                    .index
+                    .store
+                    .db
+                    .try_catch_up_with_primary()
+                    .unwrap();
+            }
+            let result = fnc.call(&mut store, ()).unwrap();
+            let mem = instance.get_memory(&mut store, "memory").unwrap();
+            let data = mem.data(&mut store);
+            let encoded_vec = read_arraybuffer_as_vec(data, result);
+            return Ok(json!({ "result": hex::encode(Vec::<u8>::new())  }));
         }
-        let result = fnc.call(&mut store, ()).unwrap();
-        let mem = instance.get_memory(&mut store, "memory").unwrap();
-        let data = mem.data(&mut store);
-        let encoded_vec = read_arraybuffer_as_vec(data, result);
-        return Ok(json!({ "result": hex::encode(Vec::<u8>::new())  }));
-    }
-*/
+    */
 
     fn block_headers(&self, (start_height, count): (usize, usize)) -> Result<Value> {
         let chain = self.tracker.chain();

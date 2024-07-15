@@ -75,7 +75,7 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub txid: Txid,
     pub depends: HashSet<Txid>,
@@ -151,6 +151,20 @@ impl Mempool {
         }
         unsafe { PENDING_HASH = Some(block.block_hash());}
         block
+    }
+
+    fn sort_by_dependency(entries: Vec<Entry>) -> Vec<Entry> {
+        // construct a vec  of entries that have no unconfirmed transactions as inputs
+        let mut no_deps: Vec<Entry> = Vec::new();
+        // convert the entries to a hashset 
+        let mut entries_set: HashSet<Entry> = HashSet::from_iter(entries.clone());
+        for entry in entries {
+            if !entry.has_unconfirmed_inputs {
+                no_deps.push(entry);
+            }
+        }
+
+        no_deps
     }
 
     pub(crate) fn fees_histogram(&self) -> &FeeHistogram {

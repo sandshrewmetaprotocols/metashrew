@@ -78,6 +78,7 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
 #[derive(Clone)]
 pub(crate) struct Entry {
     pub txid: Txid,
+    pub depends: Vec<Txid>,
     pub tx: Transaction,
     pub fee: Amount,
     pub vsize: u64,
@@ -263,6 +264,7 @@ impl Mempool {
             vsize: entry.vsize,
             fee: entry.fees.base,
             has_unconfirmed_inputs: !entry.depends.is_empty(),
+            depends: entry.depends.clone()
         };
         assert!(
             self.entries.insert(txid, entry).is_none(),

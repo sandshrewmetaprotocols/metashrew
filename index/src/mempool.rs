@@ -82,6 +82,7 @@ impl KeyValueStoreLike for RocksDBPendingAdapter {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Entry {
     pub txid: Txid,
+    pub spent_by: HashSet<Txid>,
     pub depends: HashSet<Txid>,
     pub tx: Transaction,
     pub fee: Amount,
@@ -173,19 +174,22 @@ impl Mempool {
         }
         // iterate through 
         while !no_deps.is_empty() {
-            let entry: Entry = no_deps.iter().next().unwrap().1.clone();
+            let mut entry: Entry = no_deps.iter().next().unwrap().1.clone();
+            // if there is an infinite loop, then it may be not advancing
+            debug!("the current entry is: {}", entry.txid);
             no_deps.remove(&entry.txid);
+            debug!("Size of set with no dependencies after removal: {}", no_deps.len());
             sorted.push(entry.clone());
+            debug!("Size of sorted set after addition: {}", sorted.len());
             sorted.sort_by(|a, b| a.fee.cmp(&b.fee));
-            for current in entries_set.values_mut() {
-                if current.depends.contains(&entry.txid) {
-                    current.depends.remove(&entry.txid);
-                    if current.depends.is_empty() {
-                        no_deps.insert(current.txid, current.clone());
-                        current.has_unconfirmed_inputs = false;
-                        // maybe remove from entries_set ? otherwise this should be fine
-                    }
+            for current in entry.spent_by {
+                let mut e = entries_set.get(&current).expect("could not find entry").to_owned();
+                e.depends.remove(&entry.txid);
+                if e.depends.is_empty() {
+                    no_deps.insert(e.txid, e.clone());
+                    entries_set.remove(&e.txid);
                 }
+                // entry.spent_by.remove(&current);
             }
         }
         sorted
@@ -302,8 +306,10 @@ impl Mempool {
             vsize: entry.vsize,
             fee: entry.fees.base,
             has_unconfirmed_inputs: !entry.depends.is_empty(),
+            spent_by: HashSet::from_iter(entry.spent_by.clone().into_iter()),
             depends: HashSet::from_iter(entry.depends.clone().into_iter()),
         };
+        
         assert!(
             self.entries.insert(txid, entry).is_none(),
             "duplicate mempool txid"

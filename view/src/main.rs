@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 //use std::collections::HashSet;
 use env_logger;
-use metashrew_indexer::mempool::{RocksDBPendingAdapter, RocksDBPendingBatch};
+use metashrew_indexer::mempool::{RocksDBPendingAdapter};
 use std::env;
 use std::ffi::OsString;
 use std::fs::File;

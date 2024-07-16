@@ -145,22 +145,17 @@ impl Mempool {
             bits: CompactTarget::default(),
             nonce: 0,
         };
-        let mut block = Block {
+        let block = Block {
             header,
-            txdata: Vec::new(),
+            txdata: Self::topological_sort(&mut Vec::from_iter(self.entries.values().into_iter().map(|v| v.clone()))).into_iter().map(|v| v.tx.clone()).collect::<Vec<Transaction>>()
         };
-        let mut sorted: Vec<Entry> = self.entries.values().cloned().collect();
-        sorted.sort_by(|a, b| a.fee.cmp(&b.fee));
-        for entry in sorted {
-            block.txdata.push(entry.tx);
-        }
         unsafe {
             PENDING_HASH = Some(block.block_hash());
         }
         block
     }
 
-    fn sort_by_dependency(entries: Vec<Entry>) -> Vec<Entry> {
+    fn topological_sort(entries: &mut Vec<Entry>) -> Vec<Entry> {
         // construct a vec  of entries that have no unconfirmed transactions as inputs
         let mut sorted: Vec<Entry> = Vec::new();
         let mut no_deps: HashMap<Txid, Entry> = HashMap::new();
@@ -180,7 +175,7 @@ impl Mempool {
             no_deps.remove(&entry.txid);
             sorted.push(entry.clone());
             sorted.sort_by(|a, b| a.fee.cmp(&b.fee));
-            for mut current in entries_set.values() {
+            for current in entries_set.values_mut() {
                 if current.depends.contains(&entry.txid) {
                     current.depends.remove(&entry.txid);
                     if current.depends.is_empty() {

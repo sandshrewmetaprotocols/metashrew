@@ -8,7 +8,6 @@ use rocksdb::{ColumnFamily, Options, WriteBatch, DB};
 use serde::{Deserialize, Serialize};
 use serde_json;
 //use std::collections::HashSet;
-use env_logger;
 use metashrew_indexer::mempool::{RocksDBPendingAdapter};
 use std::env;
 use std::ffi::OsString;
@@ -19,6 +18,7 @@ use std::process::id;
 use std::time::{SystemTime, UNIX_EPOCH};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
+use env_logger;
 
 static mut INIT_DB: Option<&'static DB> = None;
 pub struct RocksDBRuntimeAdapter(&'static DB);
@@ -213,7 +213,7 @@ async fn view(
             }
             return Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
-                result: hex::encode(
+                result: String::from("0x") + &hex::encode(
                     context
                         .pending
                         .as_ref()
@@ -240,27 +240,30 @@ async fn view(
             }
             h
         };
-        return Ok(HttpResponse::Ok().json(JsonRpcResult {
+        let result = JsonRpcResult {
             id: body.id,
-            result: hex::encode(
-                context
-                    .runtime
-                    .as_ref()
-                    .expect("the runtime was not set in context")
-                    .view(
-                        body.params[0].clone(),
-                        &hex::decode(
-                            body.params[1]
-                                .to_string()
-                                .substring(2, body.params[1].len()),
+            result: String::from("0x")
+                + hex::encode(
+                    context
+                        .runtime
+                        .as_ref()
+                        .expect("there is no runtime set in the context")
+                        .view(
+                            body.params[0].clone(),
+                            &hex::decode(
+                                body.params[1]
+                                    .to_string()
+                                    .substring(2, body.params[1].len()),
+                            )
+                            .unwrap(),
+                            height,
                         )
                         .unwrap(),
-                        height,
-                    )
-                    .unwrap(),
-            ),
+                )
+                .as_str(),
             jsonrpc: "2.0".to_string(),
-        }));
+        };
+        return Ok(HttpResponse::Ok().json(result));
     }
 }
 
@@ -338,7 +341,7 @@ async fn main() -> std::io::Result<()> {
                         RocksDBPendingAdapter(INIT_DB.unwrap())
                     })
                     .unwrap(),
-                ),
+                )
             }))
             .service(view)
     })

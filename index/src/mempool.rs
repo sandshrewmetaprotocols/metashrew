@@ -136,6 +136,7 @@ impl Mempool {
     }
 
     pub fn construct_entry_block(&self) -> bitcoin::blockdata::block::Block {
+        debug!("building block with {} txs", self.entries.values().len());
         // create a dummy header
         let header = bitcoin::blockdata::block::Header {
             version: bitcoin::blockdata::block::Version::default(),
@@ -149,6 +150,7 @@ impl Mempool {
             header,
             txdata: Self::topological_sort(&mut Vec::from_iter(self.entries.values().into_iter().map(|v| v.clone()))).into_iter().map(|v| v.tx.clone()).collect::<Vec<Transaction>>()
         };
+        debug!("pending block built");
         unsafe {
             PENDING_HASH = Some(block.block_hash());
         }

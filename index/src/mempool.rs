@@ -174,7 +174,7 @@ impl Mempool {
         }
         // iterate through 
         while !no_deps.is_empty() {
-            let mut entry: Entry = no_deps.iter().next().unwrap().1.clone();
+            let entry: Entry = no_deps.iter().next().unwrap().1.clone();
             // if there is an infinite loop, then it may be not advancing
             debug!("the current entry is: {}", entry.txid);
             no_deps.remove(&entry.txid);

@@ -112,6 +112,45 @@ fn txid_max() -> Txid {
     Txid::from_byte_array([0xFF; 32])
 }
 
+
+fn find_no_deps(v: &HashMap<Txid, Entry>) -> Vec<Txid> {
+  Vec::<Txid>::from_iter(v.into_iter().filter(|(_, v)| v.depends.is_empty()).map(|(k, _)| k.clone()))
+}
+
+fn make_entry_hashmap(v: &Vec<Entry>) -> HashMap<Txid, Entry> {
+  HashMap::<Txid, Entry>::from_iter(v.clone().into_iter().map(|entry| (entry.txid, entry)))
+}
+
+fn set_minus(a: &mut HashMap<Txid, Entry>, b: &HashMap<Txid, Entry>) {
+  for (k, _) in b.into_iter() {
+    a.remove(k);
+  }
+}
+
+
+fn topological_sort(entries: &Vec<Entry>) -> Vec<Entry> {
+  // construct a vec  of entries that have no unconfirmed transactions as inputs
+  let mut sorted: Vec<Entry> = Vec::new();
+  let mut entries_set: HashMap<Txid, Entry> = make_entry_hashmap(entries);
+  // construct a set of entries with no unconfirmed inputs and remove them from the entries_set
+  // iterate through 
+  while !entries_set.is_empty() {
+    let mut no_deps = find_no_deps(&entries_set);
+    no_deps.sort_by(|a, b| entries_set.get(a).expect("could not find entry").fee.cmp(&entries_set.get(b).expect("could not find entry").fee));
+    let entry: Txid = no_deps.iter().next().unwrap().clone();
+    // if there is an infinite loop, then it may be not advancing
+    debug!("the current entry is: {}", entry);
+    sorted.push(entries_set.get(&entry).expect("could not find entry").clone());
+    debug!("size of sorted set after addition: {}", sorted.len());
+    let spent_by = entries_set.get(&entry).expect("could not find entry").spent_by.clone();
+    for current in spent_by {
+      let mut dependent_entry = &mut entries_set.get_mut(&current).expect("could not find entry").depends;
+      dependent_entry.remove(&entry);
+    }
+  }
+  sorted
+}
+
 impl Mempool {
     pub fn new(metrics: &Metrics) -> Self {
         let internal_db = RocksDBPendingAdapter(get_db());
@@ -149,7 +188,7 @@ impl Mempool {
         };
         let block = Block {
             header,
-            txdata: Self::topological_sort(&mut Vec::from_iter(self.entries.values().into_iter().map(|v| v.clone()))).into_iter().map(|v| v.tx.clone()).collect::<Vec<Transaction>>()
+            txdata: topological_sort(&self.entries.values().cloned().collect()).into_iter().map(|v| v.tx.clone()).collect::<Vec<Transaction>>()
         };
         debug!("pending block built");
         unsafe {
@@ -158,42 +197,6 @@ impl Mempool {
         block
     }
 
-    fn topological_sort(entries: &mut Vec<Entry>) -> Vec<Entry> {
-        // construct a vec  of entries that have no unconfirmed transactions as inputs
-        let mut sorted: Vec<Entry> = Vec::new();
-        let mut no_deps: HashMap<Txid, Entry> = HashMap::new();
-        // convert the entries to a hashset
-        let mut entries_set: HashMap<Txid, Entry> =
-            HashMap::from_iter(entries.iter().map(|entry| (entry.txid, entry.clone())));
-        // construct a set of entries with no unconfirmed inputs and remove them from the entries_set
-        for entry in entries {
-            if !entry.has_unconfirmed_inputs {
-                no_deps.insert(entry.txid, entry.clone());
-                entries_set.remove(&entry.clone().txid);
-            }
-        }
-        // iterate through 
-        while !no_deps.is_empty() {
-            let entry: Entry = no_deps.iter().next().unwrap().1.clone();
-            // if there is an infinite loop, then it may be not advancing
-            debug!("the current entry is: {}", entry.txid);
-            no_deps.remove(&entry.txid);
-            debug!("Size of set with no dependencies after removal: {}", no_deps.len());
-            sorted.push(entry.clone());
-            debug!("Size of sorted set after addition: {}", sorted.len());
-            sorted.sort_by(|a, b| a.fee.cmp(&b.fee));
-            for current in entry.spent_by {
-                let mut e = entries_set.get(&current).expect("could not find entry").to_owned();
-                e.depends.remove(&entry.txid);
-                if e.depends.is_empty() {
-                    no_deps.insert(e.txid, e.clone());
-                    entries_set.remove(&e.txid);
-                }
-                // entry.spent_by.remove(&current);
-            }
-        }
-        sorted
-    }
 
     pub(crate) fn fees_histogram(&self) -> &FeeHistogram {
         &self.fees

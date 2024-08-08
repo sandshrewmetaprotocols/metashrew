@@ -4,4 +4,4 @@ members = [
   "index",
   "view",
   "runtime"
-, "sync"]
+, "sync", "keydb"]

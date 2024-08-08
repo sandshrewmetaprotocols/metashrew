@@ -21,7 +21,9 @@ struct Args {
   #[arg(long)]
   indexer: String,
   #[arg(long)]
-  redis: String
+  redis: String,
+  #[arg(long)]
+  start_block: Option<u32>
 }
 
 pub struct RedisRuntimeAdapter(pub Arc<Mutex<redis::Connection>>);
@@ -75,10 +77,11 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
 
 #[tokio::main]
 async fn main() {
+    env_logger::init();
     let args = Args::parse();
     let internal_db = RedisRuntimeAdapter(Arc::new(Mutex::new(redis::Client::open(args.redis).unwrap().get_connection().unwrap())));
     let mut runtime = MetashrewRuntime::load(args.indexer.into(), internal_db).unwrap();
-    let mut i: u32 = 0;
+    let mut i: u32 = args.start_block.unwrap_or_else(|| 0);
     loop {
       runtime.context.lock().unwrap().block = pull_block(&args.daemon_rpc_url, i).await.unwrap();
       runtime.context.lock().unwrap().height = i;

@@ -85,7 +85,13 @@ async fn main() {
     loop {
       runtime.context.lock().unwrap().block = pull_block(&args.daemon_rpc_url, i).await.unwrap();
       runtime.context.lock().unwrap().height = i;
-      runtime.run().unwrap();
+      if let Err(_) = runtime.run() {
+        debug!("respawn cache");
+        runtime.refresh_memory();
+        if let Err(e) = runtime.run() {
+            panic!("runtime run failed after retry: {}", e);
+        }
+      }
       i = i + 1;
     }
 }

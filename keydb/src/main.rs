@@ -75,13 +75,24 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     }
 }
 
+const TIP_HEIGHT_KEY: &str = "/__INTERNAL/tip-height";
+
+static mut _height: u32 = 0;
+
+pub fn query_height(internal_db: &RedisRuntimeAdapter, start_block: u32) -> u32 {
+  match internal_db.0.lock().unwrap().get(&TIP_HEIGHT_KEY.as_bytes().to_vec()).unwrap() {
+    None => start_block,
+    Some(v) => u32::from_le_bytes(<&[u8] as TryInto<[u8; 4]>>::try_into(v).unwrap())
+  }
+}
+
 #[tokio::main]
 async fn main() {
     env_logger::init();
     let args = Args::parse();
     let internal_db = RedisRuntimeAdapter(Arc::new(Mutex::new(redis::Client::open(args.redis).unwrap().get_connection().unwrap())));
     let mut runtime = MetashrewRuntime::load(args.indexer.into(), internal_db).unwrap();
-    let mut i: u32 = args.start_block.unwrap_or_else(|| 0);
+    let mut i: u32 = query_height(&runtime.context.lock().unwrap().db, args.start_block.unwrap_or_else(|| 0));
     loop {
       runtime.context.lock().unwrap().block = pull_block(&args.daemon_rpc_url, i).await.unwrap();
       runtime.context.lock().unwrap().height = i;

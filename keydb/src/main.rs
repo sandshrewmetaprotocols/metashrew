@@ -78,7 +78,8 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     }
 }
 
-const TIP_HEIGHT_KEY: &str = "/__INTERNAL/tip-height";
+const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
+const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
 
 static mut _HEIGHT: u32 = 0;
 
@@ -95,9 +96,14 @@ async fn main() {
     let args = Args::parse();
     let internal_db = RedisRuntimeAdapter(Arc::new(Mutex::new(redis::Client::open(args.redis).unwrap().get_connection().unwrap())));
     let mut runtime = MetashrewRuntime::load(args.indexer.into(), internal_db).unwrap();
-    let mut i: u32 = query_height(&runtime.context.lock().unwrap().db, args.start_block.unwrap_or_else(|| 0));
+    let start = args.start_block.unwrap_or_else(|| 0);
+    let mut i: u32 = query_height(&runtime.context.lock().unwrap().db, start);
     loop {
-      runtime.context.lock().unwrap().block = pull_block(&args.daemon_rpc_url, i).await.unwrap();
+      let best: u32 = match best_height(&runtime.context.clone().lock().unwrap().db, &args.daemon_rpc_url, i, start).await {
+        Ok(v) => v,
+        Err(_) => i
+      };
+      runtime.context.lock().unwrap().block = { pull_block(&runtime.context.lock().unwrap().db, &args.daemon_rpc_url, i).await.unwrap() };
       runtime.context.lock().unwrap().height = i;
       if let Err(_) = runtime.run() {
         debug!("respawn cache");
@@ -126,7 +132,33 @@ pub struct JsonRpcResponse {
   pub result: String,
 }
 
-async fn pull_block(rpc_url: &String, block_number: u32) -> Result<Vec<u8>, anyhow::Error> {
+#[derive(Deserialize)]
+pub struct BlockCountResponse {
+  pub id: u32,
+  pub result: u32,
+}
+
+async fn best_height(internal_db: &RedisRuntimeAdapter, rpc_url: &String, block_number: u32, start_block: u32) -> Result<u32> {
+  let response = (reqwest::Client::new().post(rpc_url).body(serde_json::to_string(&JsonRpcRequest::<u32> {
+    id: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().try_into()?,
+    jsonrpc: String::from("2.0"),
+    method: String::from("getblockcount"),
+    params: vec![]
+  })?).send().await?);
+  let tip = response.json::<BlockCountResponse>().await?.result;
+  if block_number + 6 < tip {
+    return Ok(block_number);
+  }
+  return Ok(block_number);
+//  query_height(internal_db, 0);
+  
+}
+
+async fn get_blockhash(internal_db: &RedisRuntimeAdapter, block_number: u32) -> Option<Vec<u8>> {
+  internal_db.get(&(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes()).unwrap()
+}
+
+async fn pull_block(internal_db: &RedisRuntimeAdapter, rpc_url: &String, block_number: u32) -> Result<Vec<u8>, anyhow::Error> {
   let response = reqwest::Client::new().post(rpc_url).body(serde_json::to_string(&JsonRpcRequest::<u32> {
     id: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().try_into()?,
     jsonrpc: String::from("2.0"),
@@ -134,6 +166,7 @@ async fn pull_block(rpc_url: &String, block_number: u32) -> Result<Vec<u8>, anyh
     params: vec![ block_number ]
   })?).send().await?;
   let blockhash = response.json::<JsonRpcResponse>().await?.result;
+  internal_db.put(&(String::from(HEIGHT_TO_HASH) + block_number.to_string().as_str()).into_bytes(), &hex::decode(&blockhash).unwrap());
   Ok(hex::decode(reqwest::Client::new().post(rpc_url).body(serde_json::to_string(&JsonRpcRequest::<Value> {
     id: (<u64 as TryInto<i32>>::try_into(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())? + 1).try_into()?,
     jsonrpc: String::from("2.0"),

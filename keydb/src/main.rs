@@ -9,9 +9,9 @@ use redis;
 use clap::{command, Parser};
 use std::sync::{Arc, Mutex};
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
-use redis::{Commands, ToRedisArgs};
+use redis::{Commands};
 use env_logger;
-use log::{debug, info};
+use log::{debug};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -62,6 +62,9 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     type Batch = RedisBatch;
     type Error = redis::RedisError;
     fn write(&self, batch: RedisBatch) -> Result<(), Self::Error> {
+        let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
+        let height_bytes: Vec<u8> = (unsafe { _HEIGHT }).to_le_bytes().to_vec();
+        let _ok: bool = self.0.lock().unwrap().set(to_redis_args(&key_bytes), to_redis_args(&height_bytes)).unwrap();
         batch.0.query(&mut self.0.lock().unwrap())
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -77,12 +80,12 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
 
 const TIP_HEIGHT_KEY: &str = "/__INTERNAL/tip-height";
 
-static mut _height: u32 = 0;
+static mut _HEIGHT: u32 = 0;
 
 pub fn query_height(internal_db: &RedisRuntimeAdapter, start_block: u32) -> u32 {
   match internal_db.0.lock().unwrap().get(&TIP_HEIGHT_KEY.as_bytes().to_vec()).unwrap() {
     None => start_block,
-    Some(v) => u32::from_le_bytes(<&[u8] as TryInto<[u8; 4]>>::try_into(v).unwrap())
+    Some(v) => u32::from_le_bytes(v)
   }
 }
 
@@ -96,6 +99,7 @@ async fn main() {
     loop {
       runtime.context.lock().unwrap().block = pull_block(&args.daemon_rpc_url, i).await.unwrap();
       runtime.context.lock().unwrap().height = i;
+      unsafe { _HEIGHT = i; }
       if let Err(_) = runtime.run() {
         debug!("respawn cache");
         runtime.refresh_memory();

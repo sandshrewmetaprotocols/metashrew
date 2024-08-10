@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-indexer"
-version = "8.0.3"
+version = "8.0.4"
 authors = ["Sandshrew Inc <inquiries@sandshrew.io>"]
 description = "An efficient re-implementation of Electrum Server in Rust"
 license = "MIT"

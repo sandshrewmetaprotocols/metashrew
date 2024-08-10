@@ -99,7 +99,6 @@ async fn main() {
     loop {
       runtime.context.lock().unwrap().block = pull_block(&args.daemon_rpc_url, i).await.unwrap();
       runtime.context.lock().unwrap().height = i;
-      unsafe { _HEIGHT = i; }
       if let Err(_) = runtime.run() {
         debug!("respawn cache");
         runtime.refresh_memory();
@@ -108,6 +107,7 @@ async fn main() {
         }
       }
       i = i + 1;
+      unsafe { _HEIGHT = i; }
     }
 }
 

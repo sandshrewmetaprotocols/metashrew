@@ -248,15 +248,15 @@ where
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         height: u32,
     ) -> u32 {
-        match context
+        let result = context
             .lock()
             .unwrap()
             .db
             .get(db_make_length_key(&db_make_updated_key(&u32_to_vec(
                 height as u32,
             ))))
-            .unwrap()
-        {
+            .unwrap();
+        match result {
             Some(_v) => Self::check_latest_block_for_reorg(context.clone(), height + 1),
             None => return height,
         }
@@ -276,7 +276,7 @@ where
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         height: u32,
     ) -> HashSet<Vec<u8>> {
-        let key: Vec<u8> = db_make_length_key(&db_make_updated_key(&u32_to_vec(height)));
+        let key: Vec<u8> = db_make_updated_key(&u32_to_vec(height));
         let length: i32 = Self::db_length_at_key(context.clone(), &key) as i32;
         let mut i: i32 = 0;
         let mut set: HashSet<Vec<u8>> = HashSet::<Vec<u8>>::new();
@@ -394,6 +394,7 @@ where
         let context: Arc<Mutex<MetashrewRuntimeContext<T>>> = self.context.clone();
         let height = { context.lock().unwrap().height };
         let latest: u32 = Self::check_latest_block_for_reorg(context.clone(), height);
+        if latest == height { return; }
         let set: HashSet<Vec<u8>> =
             Self::db_updated_keys_for_block_range(context.clone(), height, latest);
         if set.len() != 0 {

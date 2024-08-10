@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-indexer"
-version = "8.0.3"
+version = "8.0.4"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-keydb"
-version = "0.1.0"
+version = "8.0.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -2203,7 +2203,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-runtime"
-version = "8.0.3"
+version = "8.0.4"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2228,7 +2228,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-view"
-version = "8.0.3"
+version = "8.0.4"
 dependencies = [
  "actix-web",
  "anyhow",

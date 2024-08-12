@@ -12,6 +12,7 @@ use serde_json::{Number, Value};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio;
+use tokio::time::{Duration, sleep};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -125,7 +126,6 @@ async fn main() {
             &runtime.context.clone().lock().unwrap().db,
             &args.daemon_rpc_url,
             i,
-            start,
         )
         .await
         {
@@ -133,11 +133,11 @@ async fn main() {
             Err(_) => i,
         };
         runtime.context.lock().unwrap().block = {
-            pull_block(&runtime.context.lock().unwrap().db, &args.daemon_rpc_url, i)
+            pull_block(&runtime.context.lock().unwrap().db, &args.daemon_rpc_url, best)
                 .await
                 .unwrap()
         };
-        runtime.context.lock().unwrap().height = i;
+        runtime.context.lock().unwrap().height = best;
         if let Err(_) = runtime.run() {
             debug!("respawn cache");
             runtime.refresh_memory();
@@ -193,8 +193,7 @@ async fn fetch_blockcount(rpc_url: &String) -> Result<u32> {
 async fn best_height(
     internal_db: &RedisRuntimeAdapter,
     rpc_url: &String,
-    block_number: u32,
-    start_block: u32,
+    block_number: u32
 ) -> Result<u32> {
     let response = reqwest::Client::new()
         .post(rpc_url)
@@ -254,6 +253,12 @@ async fn pull_block(
     rpc_url: &String,
     block_number: u32,
 ) -> Result<Vec<u8>, anyhow::Error> {
+    loop {
+      let count = fetch_blockcount(rpc_url).await?;
+      if block_number > count {
+        sleep(Duration::from_millis(3000)).await;
+      } else { break; }
+    }
     let blockhash = fetch_blockhash(rpc_url, block_number).await.unwrap();
     internal_db
         .put(

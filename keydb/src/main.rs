@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::{command, Parser};
 use env_logger;
 use hex;
@@ -172,6 +172,24 @@ pub struct BlockCountResponse {
     pub result: u32,
 }
 
+async fn fetch_blockcount(rpc_url: &String) -> Result<u32> {
+    let response = (reqwest::Client::new()
+        .post(rpc_url)
+        .body(serde_json::to_string(&JsonRpcRequest::<u32> {
+            id: SystemTime::now()
+                .duration_since(UNIX_EPOCH)?
+                .as_secs()
+                .try_into()?,
+            jsonrpc: String::from("2.0"),
+            method: String::from("getblockcount"),
+            params: vec![],
+        })?)
+        .send()
+        .await?);
+    Ok(response.json::<BlockCountResponse>().await?.result)
+
+}
+
 async fn best_height(
     internal_db: &RedisRuntimeAdapter,
     rpc_url: &String,
@@ -191,12 +209,20 @@ async fn best_height(
         })?)
         .send()
         .await?);
-    let tip = response.json::<BlockCountResponse>().await?.result;
+    let mut tip = response.json::<BlockCountResponse>().await?.result;
     if block_number + 6 < tip {
-        return Ok(block_number);
+        loop {
+          if tip == 0 { break; }
+          let blockhash = get_blockhash(&internal_db, tip).await.ok_or(anyhow!("failed to retrieve blockhash"))?;
+          let remote_blockhash = fetch_blockhash(rpc_url, tip).await?;
+          if blockhash == remote_blockhash {
+            break;
+          } else {
+            tip = tip - 1;
+          }
+        }
     }
-    return Ok(block_number);
-    //  query_height(internal_db, 0);
+    return Ok(tip);
 }
 
 async fn get_blockhash(internal_db: &RedisRuntimeAdapter, block_number: u32) -> Option<Vec<u8>> {
@@ -205,11 +231,7 @@ async fn get_blockhash(internal_db: &RedisRuntimeAdapter, block_number: u32) -> 
         .unwrap()
 }
 
-async fn pull_block(
-    internal_db: &RedisRuntimeAdapter,
-    rpc_url: &String,
-    block_number: u32,
-) -> Result<Vec<u8>, anyhow::Error> {
+async fn fetch_blockhash(rpc_url: &String, block_number: u32) -> Result<Vec<u8>, anyhow::Error> {
     let response = reqwest::Client::new()
         .post(rpc_url)
         .body(serde_json::to_string(&JsonRpcRequest::<u32> {
@@ -224,10 +246,19 @@ async fn pull_block(
         .send()
         .await?;
     let blockhash = response.json::<JsonRpcResponse>().await?.result;
+    Ok(hex::decode(&blockhash)?)
+}
+
+async fn pull_block(
+    internal_db: &RedisRuntimeAdapter,
+    rpc_url: &String,
+    block_number: u32,
+) -> Result<Vec<u8>, anyhow::Error> {
+    let blockhash = fetch_blockhash(rpc_url, block_number).await.unwrap();
     internal_db
         .put(
             &(String::from(HEIGHT_TO_HASH) + block_number.to_string().as_str()).into_bytes(),
-            &hex::decode(&blockhash).unwrap(),
+            &blockhash
         )
         .unwrap();
     Ok(hex::decode(
@@ -240,7 +271,7 @@ async fn pull_block(
                     .try_into()?,
                 jsonrpc: String::from("2.0"),
                 method: String::from("getblock"),
-                params: vec![Value::String(blockhash), Value::Number(Number::from(0))],
+                params: vec![Value::String(hex::encode(&blockhash)), Value::Number(Number::from(0))],
             })?)
             .send()
             .await?

@@ -173,7 +173,7 @@ pub struct BlockCountResponse {
 }
 
 async fn fetch_blockcount(rpc_url: &String) -> Result<u32> {
-    let response = (reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post(rpc_url)
         .body(serde_json::to_string(&JsonRpcRequest::<u32> {
             id: SystemTime::now()
@@ -185,7 +185,7 @@ async fn fetch_blockcount(rpc_url: &String) -> Result<u32> {
             params: vec![],
         })?)
         .send()
-        .await?);
+        .await?;
     Ok(response.json::<BlockCountResponse>().await?.result)
 
 }
@@ -196,7 +196,7 @@ async fn best_height(
     block_number: u32,
     start_block: u32,
 ) -> Result<u32> {
-    let response = (reqwest::Client::new()
+    let response = reqwest::Client::new()
         .post(rpc_url)
         .body(serde_json::to_string(&JsonRpcRequest::<u32> {
             id: SystemTime::now()
@@ -208,7 +208,7 @@ async fn best_height(
             params: vec![],
         })?)
         .send()
-        .await?);
+        .await?;
     let mut tip = response.json::<BlockCountResponse>().await?.result;
     if block_number + 6 < tip {
         loop {

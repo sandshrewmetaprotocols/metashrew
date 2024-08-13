@@ -6,15 +6,15 @@ use log::debug;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use redis;
 use redis::Commands;
+use reqwest::{Error, Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::{Number, Value};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio;
-use std::path::{PathBuf};
 use tokio::time::{sleep, Duration};
-use reqwest::{Response, Url, Error};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -130,11 +130,11 @@ impl MetashrewKeyDBSync {
         reqwest::Client::new()
             .post(match self.args.auth {
                 Some(v) => {
-                  let url = Url::parse((self.args.daemon_rpc_url.as_str()))?;
-                  let options = url.options();
-                  options.authority(v)
-                },
-                None => self.args.daemon_rpc_url,
+                    let url = Url::parse((self.args.daemon_rpc_url.as_str()))?;
+                    url.set_username(self.args.auth.as_ref().unwrap().as_str())?;
+                    url
+                }   
+                None => Url::parse(self.args.daemon_rpc_url.as_str())?,
             })
             .body(body)
             .send()
@@ -242,7 +242,8 @@ impl MetashrewKeyDBSync {
             }
         }
         let blockhash = self.fetch_blockhash(block_number).await.unwrap();
-        self.runtime.context
+        self.runtime
+            .context
             .lock()
             .unwrap()
             .db

@@ -217,6 +217,7 @@ impl MetashrewKeyDBSync {
     }
 
     async fn best_height(&self, block_number: u32) -> Result<u32> {
+        let mut best: u32 = block_number;
         let response = self
             .post(serde_json::to_string(&JsonRpcRequest::<u32> {
                 id: SystemTime::now()
@@ -228,25 +229,25 @@ impl MetashrewKeyDBSync {
                 params: vec![],
             })?)
             .await?;
-        let mut tip = response.json::<BlockCountResponse>().await?.result;
-        if block_number >= tip - 6 {
+        let tip = response.json::<BlockCountResponse>().await?.result;
+        if best >= tip - 6 {
             loop {
-                if tip == 0 {
+                if best == 0 {
                     break;
                 }
                 let blockhash = self
-                    .get_blockhash(tip)
+                    .get_blockhash(best)
                     .await
                     .ok_or(anyhow!("failed to retrieve blockhash"))?;
-                let remote_blockhash = self.fetch_blockhash(tip).await?;
+                let remote_blockhash = self.fetch_blockhash(best).await?;
                 if blockhash == remote_blockhash {
                     break;
                 } else {
-                    tip = tip - 1;
+                    best = best - 1;
                 }
             }
         }
-        return Ok(tip);
+        return Ok(best);
     }
 
     async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {

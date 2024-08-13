@@ -128,13 +128,13 @@ pub struct MetashrewKeyDBSync {
 impl MetashrewKeyDBSync {
     async fn post(&self, body: String) -> Result<Response, reqwest::Error> {
         reqwest::Client::new()
-            .post(match self.args.auth {
+            .post(match self.args.auth.clone() {
                 Some(v) => {
-                    let url = Url::parse((self.args.daemon_rpc_url.as_str()))?;
-                    url.set_username(self.args.auth.as_ref().unwrap().as_str())?;
+                    let mut url = Url::parse((self.args.daemon_rpc_url.as_str())).unwrap();
+                    url.set_username(self.args.auth.as_ref().unwrap().as_str());
                     url
                 }   
-                None => Url::parse(self.args.daemon_rpc_url.as_str())?,
+                None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
             })
             .body(body)
             .send()

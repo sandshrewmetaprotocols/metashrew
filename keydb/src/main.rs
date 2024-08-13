@@ -3,11 +3,11 @@ use clap::{command, Parser};
 use env_logger;
 use hex;
 use itertools::Itertools;
-use log::{debug, info};
+use log::debug;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use redis;
 use redis::Commands;
-use reqwest::{Error, Response, Url};
+use reqwest::{Response, Url};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::{Number, Value};
@@ -123,9 +123,9 @@ pub struct BlockCountResponse {
 }
 
 pub struct MetashrewKeyDBSync {
-    pub runtime: MetashrewRuntime<RedisRuntimeAdapter>,
-    pub args: Args,
-    pub start_block: u32,
+    runtime: MetashrewRuntime<RedisRuntimeAdapter>,
+    args: Args,
+    start_block: u32,
 }
 
 impl MetashrewKeyDBSync {
@@ -133,17 +133,10 @@ impl MetashrewKeyDBSync {
         let response = reqwest::Client::new()
             .post(match self.args.auth.clone() {
                 Some(v) => {
-                    let mut url = Url::parse((self.args.daemon_rpc_url.as_str())).unwrap();
-                    let (username, password) = self
-                        .args
-                        .auth
-                        .as_ref()
-                        .unwrap()
-                        .split(":")
-                        .next_tuple()
-                        .unwrap();
-                    url.set_username(username);
-                    url.set_password(Some(password));
+                    let mut url = Url::parse(self.args.daemon_rpc_url.as_str()).unwrap();
+                    let (username, password) = v.split(":").next_tuple().unwrap();
+                    url.set_username(username).unwrap();
+                    url.set_password(Some(password)).unwrap();
                     url
                 }
                 None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
@@ -328,7 +321,7 @@ impl MetashrewKeyDBSync {
                 Ok(v) => v,
                 Err(_) => i,
             };
-            self.runtime.context.lock().unwrap().block = { self.pull_block(best).await.unwrap() };
+            self.runtime.context.lock().unwrap().block = self.pull_block(best).await.unwrap();
             self.runtime.context.lock().unwrap().height = best;
             if let Err(_) = self.runtime.run() {
                 debug!("respawn cache");

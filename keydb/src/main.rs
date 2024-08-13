@@ -2,7 +2,8 @@ use anyhow::{anyhow, Result};
 use clap::{command, Parser};
 use env_logger;
 use hex;
-use log::debug;
+use itertools::Itertools;
+use log::{debug, info};
 use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
 use redis;
 use redis::Commands;
@@ -111,12 +112,14 @@ pub struct JsonRpcRequest<T> {
 pub struct JsonRpcResponse {
     pub id: u32,
     pub result: String,
+    pub error: Value,
 }
 
 #[derive(Deserialize)]
 pub struct BlockCountResponse {
     pub id: u32,
     pub result: u32,
+    pub error: Value,
 }
 
 pub struct MetashrewKeyDBSync {
@@ -127,19 +130,65 @@ pub struct MetashrewKeyDBSync {
 
 impl MetashrewKeyDBSync {
     async fn post(&self, body: String) -> Result<Response, reqwest::Error> {
-        reqwest::Client::new()
+        let response = reqwest::Client::new()
             .post(match self.args.auth.clone() {
                 Some(v) => {
                     let mut url = Url::parse((self.args.daemon_rpc_url.as_str())).unwrap();
-                    url.set_username(self.args.auth.as_ref().unwrap().as_str());
+                    let (username, password) = self
+                        .args
+                        .auth
+                        .as_ref()
+                        .unwrap()
+                        .split(":")
+                        .next_tuple()
+                        .unwrap();
+                    url.set_username(username);
+                    url.set_password(Some(password));
                     url
-                }   
+                }
                 None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
             })
             .body(body)
             .send()
-            .await
+            .await;
+        return response;
     }
+    /*
+    async fn post_get_text(&self, body: String) -> Result<String, reqwest::Error> {
+        let response = reqwest::Client::new()
+            .post(match self.args.auth.clone() {
+                Some(v) => {
+                    let mut url = Url::parse((self.args.daemon_rpc_url.as_str())).unwrap();
+                    let (username, password) = self.args.auth.as_ref().unwrap().split(":").next_tuple().unwrap();
+                    url.set_username(username);
+                    url.set_password(Some(password));
+                    info!("url: {}", url);
+                    url
+                }
+                None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
+            })
+            .body(body)
+            .send()
+            .await;
+        return response.unwrap().text().await;
+    }
+    */
+    /*
+    async fn fetch_blockcount_text(&self) {
+        let response = self
+            .post_get_text(serde_json::to_string(&JsonRpcRequest::<u32> {
+                id: SystemTime::now()
+                    .duration_since(UNIX_EPOCH).unwrap()
+                    .as_secs()
+                    .try_into().unwrap(),
+                jsonrpc: String::from("2.0"),
+                method: String::from("getblockcount"),
+                params: vec![],
+            }).unwrap())
+            .await.unwrap();
+          info!("blockcount response: {}", response);
+    }
+    */
     async fn fetch_blockcount(&self) -> Result<u32> {
         let response = self
             .post(serde_json::to_string(&JsonRpcRequest::<u32> {
@@ -152,6 +201,7 @@ impl MetashrewKeyDBSync {
                 params: vec![],
             })?)
             .await?;
+
         Ok(response.json::<BlockCountResponse>().await?.result)
     }
 
@@ -186,7 +236,7 @@ impl MetashrewKeyDBSync {
             })?)
             .await?;
         let mut tip = response.json::<BlockCountResponse>().await?.result;
-        if block_number + 6 < tip {
+        if block_number >= tip - 6 {
             loop {
                 if tip == 0 {
                     break;
@@ -316,5 +366,6 @@ async fn main() {
         args,
         start_block,
     };
+    //    sync.fetch_blockcount_text().await;
     sync.run().await.unwrap();
 }

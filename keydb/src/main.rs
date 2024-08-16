@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::{Number, Value};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio;
 use tokio::time::{sleep, Duration};
@@ -32,7 +31,13 @@ struct Args {
     auth: Option<String>,
 }
 
-pub struct RedisRuntimeAdapter(pub Arc<Mutex<redis::Connection>>);
+pub struct RedisRuntimeAdapter(pub String);
+
+impl RedisRuntimeAdapter {
+  pub fn connect(&self) -> Result<redis::Connection> {
+    Ok(redis::Client::open(self.0.clone())?.get_connection()?)
+  }
+}
 
 pub struct RedisBatch(pub redis::Pipeline);
 
@@ -73,24 +78,18 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     fn write(&self, batch: RedisBatch) -> Result<(), Self::Error> {
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
         let height_bytes: Vec<u8> = (unsafe { _HEIGHT }).to_le_bytes().to_vec();
-        let _ok: bool = self
-            .0
-            .lock()
-            .unwrap()
-            .set(to_redis_args(&key_bytes), to_redis_args(&height_bytes))
-            .unwrap();
-        batch.0.query(&mut self.0.lock().unwrap())
+        let mut connection = self.connect().unwrap();
+        let _ok: bool = connection.set(to_redis_args(&key_bytes), to_redis_args(&height_bytes)).unwrap();
+        batch.0.query(&mut connection)
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.0.lock().unwrap().get(to_redis_args(key))
+        self.connect().unwrap().get(to_redis_args(key))
     }
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
-        self.0.lock().unwrap().del(to_redis_args(key))
+        self.connect().unwrap().del(to_redis_args(key))
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
-        self.0
-            .lock()
-            .unwrap()
+        self.connect().unwrap()
             .set(to_redis_args(key), to_redis_args(value))
     }
 }
@@ -205,8 +204,7 @@ impl MetashrewKeyDBSync {
             .lock()
             .unwrap()
             .db
-            .0
-            .lock()
+            .connect()
             .unwrap()
             .get(&TIP_HEIGHT_KEY.as_bytes().to_vec())
             .unwrap()
@@ -349,12 +347,7 @@ async fn main() {
     let mut sync = MetashrewKeyDBSync {
         runtime: MetashrewRuntime::load(
             indexer,
-            RedisRuntimeAdapter(Arc::new(Mutex::new(
-                redis::Client::open(redis_uri)
-                    .unwrap()
-                    .get_connection()
-                    .unwrap(),
-            ))),
+            RedisRuntimeAdapter(redis_uri)
         )
         .unwrap(),
         args,

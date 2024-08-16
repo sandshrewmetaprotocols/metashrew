@@ -18,7 +18,7 @@ pub trait BatchLike {
 pub trait KeyValueStoreLike {
     type Error: std::fmt::Debug;
     type Batch: BatchLike;
-    fn write(&self, batch: Self::Batch) -> Result<(), Self::Error>;
+    fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error>;
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error>;
     fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error>

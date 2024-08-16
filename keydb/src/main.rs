@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio;
 use tokio::time::{sleep, Duration};
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -31,11 +32,17 @@ struct Args {
     auth: Option<String>,
 }
 
-pub struct RedisRuntimeAdapter(pub String);
+pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>);
 
 impl RedisRuntimeAdapter {
   pub fn connect(&self) -> Result<redis::Connection> {
     Ok(redis::Client::open(self.0.clone())?.get_connection()?)
+  }
+  pub fn open(redis_uri: String) -> Result<RedisRuntimeAdapter> {
+    Ok(RedisRuntimeAdapter(redis_uri.clone(), Arc::new(Mutex::new(redis::Client::open(redis_uri.clone())?.get_connection()?))))
+  }
+  pub fn reset_connection(&mut self) {
+    self.1 = Arc::new(Mutex::new(self.connect().unwrap()));
   }
 }
 
@@ -68,22 +75,23 @@ impl BatchLike for RedisBatch {
 
 impl Clone for RedisRuntimeAdapter {
     fn clone(&self) -> Self {
-        return Self(self.0.clone());
+        return Self(self.0.clone(), self.1.clone());
     }
 }
 
 impl KeyValueStoreLike for RedisRuntimeAdapter {
     type Batch = RedisBatch;
     type Error = redis::RedisError;
-    fn write(&self, batch: RedisBatch) -> Result<(), Self::Error> {
+    fn write(&mut self, batch: RedisBatch) -> Result<(), Self::Error> {
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
         let height_bytes: Vec<u8> = (unsafe { _HEIGHT }).to_le_bytes().to_vec();
         let mut connection = self.connect().unwrap();
         let _ok: bool = connection.set(to_redis_args(&key_bytes), to_redis_args(&height_bytes)).unwrap();
+        self.reset_connection();
         batch.0.query(&mut connection)
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.connect().unwrap().get(to_redis_args(key))
+        self.1.lock().unwrap().get(to_redis_args(key))
     }
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
         self.connect().unwrap().del(to_redis_args(key))
@@ -347,7 +355,7 @@ async fn main() {
     let mut sync = MetashrewKeyDBSync {
         runtime: MetashrewRuntime::load(
             indexer,
-            RedisRuntimeAdapter(redis_uri)
+            RedisRuntimeAdapter::open(redis_uri).unwrap()
         )
         .unwrap(),
         args,

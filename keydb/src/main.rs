@@ -234,7 +234,10 @@ impl MetashrewKeyDBSync {
     pub async fn query_height(&self) -> Result<u32> {
         let mut connection = self.poll_connection().await;
 
-        let bytes: Vec<u8> = connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec())?;
+        let bytes: Vec<u8> = match connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
+          Ok(v) => v,
+          Err(_) => { return Ok(self.start_block); }
+        };
         let bytes_ref: &[u8] = &bytes;
         Ok(u32::from_le_bytes(bytes_ref.try_into().unwrap()))
     }

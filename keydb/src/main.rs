@@ -217,15 +217,29 @@ impl MetashrewKeyDBSync {
 
     pub async fn poll_connection(&self) -> redis::Connection {
         loop {
-            let connected: Option<redis::Connection> =
-                match self.runtime.context.lock().unwrap().db.connect() {
-                    Err(_) => {
-                        debug!("KeyDB connection failure -- retrying in 3s ...");
-                        sleep(Duration::from_millis(3000)).await;
-                        None
-                    }
-                    Ok(v) => Some(v),
-                };
+            let connected: Option<redis::Connection> = match self
+                .runtime
+                .context
+                .lock()
+                .unwrap()
+                .db
+                .connect()
+            {
+                Err(_) => {
+                    debug!("KeyDB connection failure -- retrying in 3s ...");
+                    sleep(Duration::from_millis(3000)).await;
+                    None
+                }
+                Ok(mut v) => match v.get::<Vec<u8>, Vec<u8>>("POLL".into()) {
+                  Ok(_) => Some(v),
+                  Err(_) => {
+                    debug!("KeyDB connection failure -- retrying in 3s ...");
+                    sleep(Duration::from_millis(3000)).await;
+                    None
+                  }
+                }
+            };
+
             if let Some(v) = connected {
                 return v;
             }
@@ -235,9 +249,14 @@ impl MetashrewKeyDBSync {
         let mut connection = self.poll_connection().await;
 
         let bytes: Vec<u8> = match connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
-          Ok(v) => v,
-          Err(_) => { return Ok(self.start_block); }
+            Ok(v) => v,
+            Err(_) => {
+                return Ok(self.start_block);
+            }
         };
+        if bytes.len() == 0 {
+          return Ok(self.start_block);
+        }
         let bytes_ref: &[u8] = &bytes;
         Ok(u32::from_le_bytes(bytes_ref.try_into().unwrap()))
     }
@@ -311,6 +330,7 @@ impl MetashrewKeyDBSync {
             }
         }
         let blockhash = self.fetch_blockhash(block_number).await.unwrap();
+        self.poll_connection().await;
         self.runtime
             .context
             .lock()

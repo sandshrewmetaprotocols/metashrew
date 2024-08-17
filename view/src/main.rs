@@ -50,7 +50,7 @@ impl BatchLike for RocksDBBatch {
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
-    fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
+    fn write(&mut self, batch: RocksDBBatch) -> Result<(), Self::Error> {
         let _ = self.0.write(batch.0);
         Ok(())
     }

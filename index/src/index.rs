@@ -122,7 +122,7 @@ pub fn get_db() -> &'static rocksdb::DB {
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
-    fn write(&self, batch: RocksDBBatch) -> Result<(), Self::Error> {
+    fn write(&mut self, batch: RocksDBBatch) -> Result<(), Self::Error> {
         let opts = rocksdb::WriteOptions::default();
         match self.0.write_opt(batch.0, &opts) {
             Ok(_) => Ok(()),

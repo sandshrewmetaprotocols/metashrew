@@ -87,8 +87,9 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
         let height_bytes: Vec<u8> = (unsafe { _HEIGHT }).to_le_bytes().to_vec();
         let mut connection = self.connect().unwrap();
         let _ok: bool = connection.set(to_redis_args(&key_bytes), to_redis_args(&height_bytes)).unwrap();
+        let result = batch.0.query(&mut connection);
         self.reset_connection();
-        batch.0.query(&mut connection)
+        result
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         self.1.lock().unwrap().get(to_redis_args(key))
@@ -97,8 +98,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
         self.connect().unwrap().del(to_redis_args(key))
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
-        self.connect().unwrap()
-            .set(to_redis_args(key), to_redis_args(value))
+        self.1.lock().unwrap().set(to_redis_args(key), to_redis_args(value))
     }
 }
 

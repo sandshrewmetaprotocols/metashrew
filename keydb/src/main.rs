@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use clap::{command, Parser};
 use env_logger;
-use futures_util::FutureExt;
 use hex;
 use itertools::Itertools;
 use log::debug;
@@ -13,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::{Number, Value};
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio;
@@ -236,7 +234,7 @@ impl MetashrewKeyDBSync {
     pub async fn query_height(&self) -> Result<u32> {
         let mut connection = self.poll_connection().await;
 
-        let bytes: Vec<u8> = connection.get((&TIP_HEIGHT_KEY.as_bytes().to_vec()))?;
+        let bytes: Vec<u8> = connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec())?;
         let bytes_ref: &[u8] = &bytes;
         Ok(u32::from_le_bytes(bytes_ref.try_into().unwrap()))
     }

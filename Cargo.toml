@@ -6,4 +6,5 @@ members = [
   "runtime",
   "sync",
   "keydb"
-]
+, "keydb-runtime",
+  "keydb-view"]

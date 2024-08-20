@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-keydb-view"
-version = "8.0.4"
+version = "8.0.5"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -15,8 +15,8 @@ serde = { version = "1.0.197", features = ["derive"] }
 substring = "1.4.5"
 tiny-keccak = {version = "2.0.2", features = ["sha3"]}
 wasmtime = "18.0.3"
+metashrew-keydb-runtime = { path = "../keydb-runtime" }
 metashrew-runtime = { path = "../runtime" }
-metashrew-keydb = { path = "../keydb" }
 redis = "0.26.1"
 bitcoin = "0.32.1"
 anyhow = "1.0.86"

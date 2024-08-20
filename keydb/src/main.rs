@@ -4,7 +4,9 @@ use env_logger;
 use hex;
 use itertools::Itertools;
 use log::debug;
-use metashrew_runtime::{BatchLike, KeyValueStoreLike, MetashrewRuntime};
+use metashrew_keydb_runtime::{query_height, RedisRuntimeAdapter};
+use metashrew_runtime::KeyValueStoreLike;
+use metashrew_runtime::MetashrewRuntime;
 use redis;
 use redis::Commands;
 use reqwest::{Response, Url};
@@ -12,7 +14,6 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::{Number, Value};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio;
 use tokio::time::{sleep, Duration};
@@ -32,87 +33,6 @@ struct Args {
     auth: Option<String>,
 }
 
-pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>);
-
-impl RedisRuntimeAdapter {
-    pub fn connect(&self) -> Result<redis::Connection> {
-        Ok(redis::Client::open(self.0.clone())?.get_connection()?)
-    }
-    pub fn open(redis_uri: String) -> Result<RedisRuntimeAdapter> {
-        Ok(RedisRuntimeAdapter(
-            redis_uri.clone(),
-            Arc::new(Mutex::new(
-                redis::Client::open(redis_uri.clone())?.get_connection()?,
-            )),
-        ))
-    }
-    pub fn reset_connection(&mut self) {
-        self.1 = Arc::new(Mutex::new(self.connect().unwrap()));
-    }
-}
-
-pub struct RedisBatch(pub redis::Pipeline);
-
-/*
-impl ToRedisArgs for Vec<u8> {
-  fn write_redis_args<W: ?Sized + RedisWrite>(&self, out: &mut W) {
-    out.write_arg(self);
-  }
-}
-*/
-
-fn to_redis_args<T: AsRef<[u8]>>(v: T) -> Vec<Vec<u8>> {
-    return vec![v.as_ref().try_into().unwrap()];
-}
-
-impl BatchLike for RedisBatch {
-    fn default() -> Self {
-        Self(redis::pipe())
-    }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-        self.0
-            .cmd("SET")
-            .arg(to_redis_args(k))
-            .arg(to_redis_args(v))
-            .ignore();
-    }
-}
-
-impl Clone for RedisRuntimeAdapter {
-    fn clone(&self) -> Self {
-        return Self(self.0.clone(), self.1.clone());
-    }
-}
-
-impl KeyValueStoreLike for RedisRuntimeAdapter {
-    type Batch = RedisBatch;
-    type Error = redis::RedisError;
-    fn write(&mut self, batch: RedisBatch) -> Result<(), Self::Error> {
-        let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
-        let height_bytes: Vec<u8> = (unsafe { _HEIGHT }).to_le_bytes().to_vec();
-        let mut connection = self.connect().unwrap();
-        let _ok: bool = connection
-            .set(to_redis_args(&key_bytes), to_redis_args(&height_bytes))
-            .unwrap();
-        let result = batch.0.query(&mut connection);
-        self.reset_connection();
-        result
-    }
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.1.lock().unwrap().get(to_redis_args(key))
-    }
-    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
-        self.connect().unwrap().del(to_redis_args(key))
-    }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
-        self.1
-            .lock()
-            .unwrap()
-            .set(to_redis_args(key), to_redis_args(value))
-    }
-}
-
-const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
 
 static mut _HEIGHT: u32 = 0;
@@ -217,28 +137,22 @@ impl MetashrewKeyDBSync {
 
     pub async fn poll_connection(&self) -> redis::Connection {
         loop {
-            let connected: Option<redis::Connection> = match self
-                .runtime
-                .context
-                .lock()
-                .unwrap()
-                .db
-                .connect()
-            {
-                Err(_) => {
-                    debug!("KeyDB connection failure -- retrying in 3s ...");
-                    sleep(Duration::from_millis(3000)).await;
-                    None
-                }
-                Ok(mut v) => match v.get::<Vec<u8>, Vec<u8>>("POLL".into()) {
-                  Ok(_) => Some(v),
-                  Err(_) => {
-                    debug!("KeyDB connection failure -- retrying in 3s ...");
-                    sleep(Duration::from_millis(3000)).await;
-                    None
-                  }
-                }
-            };
+            let connected: Option<redis::Connection> =
+                match self.runtime.context.lock().unwrap().db.connect() {
+                    Err(_) => {
+                        debug!("KeyDB connection failure -- retrying in 3s ...");
+                        sleep(Duration::from_millis(3000)).await;
+                        None
+                    }
+                    Ok(mut v) => match v.get::<Vec<u8>, Vec<u8>>("POLL".into()) {
+                        Ok(_) => Some(v),
+                        Err(_) => {
+                            debug!("KeyDB connection failure -- retrying in 3s ...");
+                            sleep(Duration::from_millis(3000)).await;
+                            None
+                        }
+                    },
+                };
 
             if let Some(v) = connected {
                 return v;
@@ -246,19 +160,7 @@ impl MetashrewKeyDBSync {
         }
     }
     pub async fn query_height(&self) -> Result<u32> {
-        let mut connection = self.poll_connection().await;
-
-        let bytes: Vec<u8> = match connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
-            Ok(v) => v,
-            Err(_) => {
-                return Ok(self.start_block);
-            }
-        };
-        if bytes.len() == 0 {
-          return Ok(self.start_block);
-        }
-        let bytes_ref: &[u8] = &bytes;
-        Ok(u32::from_le_bytes(bytes_ref.try_into().unwrap()))
+        query_height(&mut self.poll_connection().await, self.start_block).await
     }
     async fn best_height(&self, block_number: u32) -> Result<u32> {
         let mut best: u32 = block_number;

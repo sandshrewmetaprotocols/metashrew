@@ -1,28 +1,57 @@
+use actix_web::error;
+use actix_web::http::{header::ContentType, StatusCode};
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
-use metashrew_keydb::{RedisRuntimeAdapter, query_height};
+use metashrew_keydb_runtime::{query_height, RedisRuntimeAdapter};
 use metashrew_runtime::{MetashrewRuntime};
+use std::fmt;
 //use rlp::Rlp;
-use serde::{Deserialize, Serialize};
-use serde_json;
-//use std::collections::HashSet;
 use anyhow;
 use log::{debug, info};
+use serde::{Deserialize, Serialize};
+use serde_json;
 use std::env;
-use std::ffi::OsString;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
-use std::process::id;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
-/*
-use wasmtime::{
-    Caller, Config, Engine, Extern, Global, GlobalType, Instance, Linker, Memory, MemoryType,
-    Module, Mutability, SharedMemory, Store, Val, ValType,
-};
-*/
+
+struct MetashrewViewError(pub anyhow::Error);
+
+impl From<anyhow::Error> for MetashrewViewError {
+    fn from(v: anyhow::Error) -> Self {
+        Self(v)
+    }
+}
+
+impl fmt::Display for MetashrewViewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        <anyhow::Error as fmt::Display>::fmt(&self.0, f)
+    }
+}
+
+impl std::fmt::Debug for MetashrewViewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        <anyhow::Error as std::fmt::Debug>::fmt(&self.0, f)
+    }
+}
+
+impl error::ResponseError for MetashrewViewError {
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::build(self.status_code())
+            .insert_header(ContentType::html())
+            .body(String::from("Internal server error"))
+    }
+    fn status_code(&self) -> StatusCode {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+fn from_anyhow(v: anyhow::Error) -> MetashrewViewError {
+    v.into()
+}
 
 use env_logger;
 
@@ -52,7 +81,7 @@ struct Context {
     hash: [u8; 32],
     #[allow(dead_code)]
     program: Vec<u8>,
-    runtime: MetashrewRuntime<RedisRuntimeAdapter>
+    runtime: MetashrewRuntime<RedisRuntimeAdapter>,
 }
 
 static mut _HEIGHT: u32 = 0;
@@ -68,11 +97,11 @@ pub fn set_height(h: u32) -> u32 {
     }
 }
 
-pub fn fetch_and_set_height(internal_db: &RedisRuntimeAdapter) -> u32 {
-    unsafe {
-        let height = query_height(internal_db, 0);
-        set_height(height)
-    }
+pub async fn fetch_and_set_height(internal_db: &RedisRuntimeAdapter) -> Result<u32> {
+        let height = query_height(&mut internal_db.connect().map_err(|e| from_anyhow(e))?, 0)
+            .await
+            .map_err(|e| from_anyhow(e))?;
+        Ok(set_height(height))
 }
 
 #[post("/")]
@@ -92,11 +121,11 @@ async fn view(
         return Ok(HttpResponse::Ok().json(resp));
     } else {
         let height: u32 = if body.params[2] == "latest" {
-            fetch_and_set_height(&context.runtime.context.lock().unwrap().db)
+            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
         } else {
             let h = body.params[2].parse::<u32>().unwrap();
             if h > height() {
-                fetch_and_set_height(&context.runtime.context.lock().unwrap().db);
+                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
             }
             h
         };
@@ -147,15 +176,28 @@ async fn main() -> std::io::Result<()> {
     hasher.finalize(&mut output);
     info!("program hash: 0x{}", hex::encode(output));
     let path_clone: PathBuf = path.into();
+    let redis_uri: String = match env::var("REDIS_URI") {
+        Ok(v) => v,
+        Err(_) => "redis://127.0.0.1:6379".into(),
+    };
 
     HttpServer::new(move || {
         App::new()
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                runtime: MetashrewRuntime::load(path_clone.clone(), unsafe {
-                    RedisRuntimeAdapter(Arc::new(Mutex::new(redis::Client::open(match env::var("REDIS_URI") { Some(v) => v, None => "redis://127.0.0.1:6379" }).unwrap().get_connection().unwrap())))
-                })
+                runtime: MetashrewRuntime::load(
+                    path_clone.clone(),
+                    RedisRuntimeAdapter(
+                        redis_uri.clone(),
+                        Arc::new(Mutex::new(
+                            redis::Client::open(redis_uri.clone())
+                                .unwrap()
+                                .get_connection()
+                                .unwrap(),
+                        )),
+                    ),
+                )
                 .unwrap(),
             }))
             .service(view)

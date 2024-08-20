@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-indexer"
-version = "8.0.4"
+version = "8.0.5"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2216,6 +2216,7 @@ dependencies = [
  "http 1.1.0",
  "itertools 0.13.0",
  "log",
+ "metashrew-keydb-runtime",
  "metashrew-runtime",
  "redis",
  "reqwest",
@@ -2226,8 +2227,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "metashrew-keydb-runtime"
+version = "8.0.5"
+dependencies = [
+ "anyhow",
+ "metashrew-runtime",
+ "redis",
+]
+
+[[package]]
+name = "metashrew-keydb-view"
+version = "8.0.5"
+dependencies = [
+ "actix-web",
+ "anyhow",
+ "bitcoin 0.32.1",
+ "env_logger 0.11.5",
+ "hex",
+ "itertools 0.12.1",
+ "log",
+ "metashrew-keydb-runtime",
+ "metashrew-runtime",
+ "redis",
+ "rlp",
+ "serde",
+ "serde_json",
+ "substring",
+ "tiny-keccak",
+ "wasmtime 18.0.4",
+]
+
+[[package]]
 name = "metashrew-runtime"
-version = "8.0.4"
+version = "8.0.5"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2252,7 +2284,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-view"
-version = "8.0.4"
+version = "8.0.5"
 dependencies = [
  "actix-web",
  "anyhow",

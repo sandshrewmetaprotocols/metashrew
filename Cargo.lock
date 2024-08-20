@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-keydb"
-version = "8.0.4"
+version = "8.0.5"
 dependencies = [
  "anyhow",
  "clap",

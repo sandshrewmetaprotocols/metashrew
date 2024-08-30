@@ -4,9 +4,8 @@ use redis::Commands;
 use std::sync::{Arc, Mutex};
 
 const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
-static mut _HEIGHT: u32 = 0;
 
-pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>);
+pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>, pub u32);
 
 pub async fn query_height(connection: &mut redis::Connection, start_block: u32) -> Result<u32> {
     let bytes: Vec<u8> = match connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
@@ -32,6 +31,7 @@ impl RedisRuntimeAdapter {
             Arc::new(Mutex::new(
                 redis::Client::open(redis_uri.clone())?.get_connection()?,
             )),
+            0
         ))
     }
     pub fn reset_connection(&mut self) {
@@ -60,7 +60,7 @@ impl BatchLike for RedisBatch {
 
 impl Clone for RedisRuntimeAdapter {
     fn clone(&self) -> Self {
-        return Self(self.0.clone(), self.1.clone());
+        return Self(self.0.clone(), self.1.clone(), self.2);
     }
 }
 
@@ -69,7 +69,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     type Error = redis::RedisError;
     fn write(&mut self, batch: RedisBatch) -> Result<(), Self::Error> {
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
-        let height_bytes: Vec<u8> = (unsafe { _HEIGHT }).to_le_bytes().to_vec();
+        let height_bytes: Vec<u8> = self.2.to_le_bytes().to_vec();
         let mut connection = self.connect().unwrap();
         let _ok: bool = connection
             .set(to_redis_args(&key_bytes), to_redis_args(&height_bytes))

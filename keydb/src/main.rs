@@ -271,6 +271,7 @@ impl MetashrewKeyDBSync {
             };
             self.runtime.context.lock().unwrap().block = self.pull_block(best).await.unwrap();
             self.runtime.context.lock().unwrap().height = best;
+            self.runtime.context.lock().unwrap().db.2 = best;
             if let Err(_) = self.runtime.run() {
                 debug!("respawn cache");
                 self.runtime.refresh_memory();

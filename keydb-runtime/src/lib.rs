@@ -67,13 +67,16 @@ impl Clone for RedisRuntimeAdapter {
 impl KeyValueStoreLike for RedisRuntimeAdapter {
     type Batch = RedisBatch;
     type Error = redis::RedisError;
-    fn write(&mut self, batch: RedisBatch) -> Result<(), Self::Error> {
+    fn write(&mut self, mut batch: RedisBatch) -> Result<(), Self::Error> {
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
         let height_bytes: Vec<u8> = self.2.to_le_bytes().to_vec();
         let mut connection = self.connect().unwrap();
+        /*
         let _ok: bool = connection
             .set(to_redis_args(&key_bytes), to_redis_args(&height_bytes))
             .unwrap();
+            */
+        batch.put(&key_bytes, &height_bytes);
         let result = batch.0.query(&mut connection);
         self.reset_connection();
         result

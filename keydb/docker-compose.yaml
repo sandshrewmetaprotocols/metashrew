@@ -3,7 +3,7 @@ services:
   keydb:
     image: eqalpha/keydb
     restart: always
-    command: ["keydb-server", "/etc/keydb/keydb.conf", "--appendonly", "yes", "--maxmemory", "32gb", "--maxmemory-policy", "allkeys-lru", "--unixsocket", "/data/keydb.sock", "--unixsocketperm", "777"]
+    command: ["keydb-server", "/etc/keydb/keydb.conf", "--storage-provider", "flash", "/data/flash", "--appendonly", "yes", "--maxmemory", "32gb", "--maxmemory-policy", "allkeys-lru", "--unixsocket", "/data/keydb.sock", "--unixsocketperm", "777"]
     volumes:
       - ${KEYDB_DATA:-./keydb}:/data
 

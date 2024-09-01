@@ -2,7 +2,7 @@ use actix_web::error;
 use actix_web::http::{header::ContentType, StatusCode};
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
-use metashrew_keydb_runtime::{query_height, RedisRuntimeAdapter};
+use metashrew_keydb_runtime::{set_label, query_height, RedisRuntimeAdapter};
 use metashrew_runtime::{MetashrewRuntime};
 use std::fmt;
 //use rlp::Rlp;
@@ -176,6 +176,9 @@ async fn main() -> std::io::Result<()> {
     hasher.finalize(&mut output);
     info!("program hash: 0x{}", hex::encode(output));
     let path_clone: PathBuf = path.into();
+    if let Ok(label) = env::var("REDIS_LABEL") {
+      set_label(label.clone());
+    }
     let redis_uri: String = match env::var("REDIS_URI") {
         Ok(v) => v,
         Err(_) => "redis://127.0.0.1:6379".into(),

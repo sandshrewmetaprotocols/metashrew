@@ -4,7 +4,7 @@ use env_logger;
 use hex;
 use itertools::Itertools;
 use log::debug;
-use metashrew_keydb_runtime::{query_height, RedisRuntimeAdapter};
+use metashrew_keydb_runtime::{set_label, query_height, RedisRuntimeAdapter};
 use metashrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::MetashrewRuntime;
 use redis;
@@ -31,6 +31,8 @@ struct Args {
     start_block: Option<u32>,
     #[arg(long)]
     auth: Option<String>,
+    #[arg(long)]
+    label: Option<String>
 }
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
@@ -291,6 +293,9 @@ impl MetashrewKeyDBSync {
 async fn main() {
     env_logger::init();
     let args = Args::parse();
+    if let Some(ref label) = args.label {
+      set_label(label.clone());
+    }
     let start_block = args.start_block.unwrap_or_else(|| 0);
     let indexer: PathBuf = args.indexer.clone().into();
     let redis_uri: String = args.redis.clone();

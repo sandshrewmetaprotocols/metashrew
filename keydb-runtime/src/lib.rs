@@ -7,6 +7,26 @@ const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 
 pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>, pub u32);
 
+static mut _LABEL: Option<String> = None;
+
+pub fn set_label(s: String) -> () {
+  unsafe {
+    _LABEL = Some(s);
+  }
+}
+
+pub fn get_label() -> &'static String {
+  unsafe {
+    _LABEL.as_ref().unwrap()
+  }
+}
+
+pub fn has_label() -> bool {
+  unsafe {
+    _LABEL.is_some()
+  }
+}
+
 pub async fn query_height(connection: &mut redis::Connection, start_block: u32) -> Result<u32> {
     let bytes: Vec<u8> = match connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
         Ok(v) => v,
@@ -41,6 +61,16 @@ impl RedisRuntimeAdapter {
 
 pub struct RedisBatch(pub redis::Pipeline);
 
+fn to_redis_key<T: AsRef<[u8]>>(v: T) -> Vec<Vec<u8>> {
+    if has_label() {
+      let mut data: Vec<u8> = get_label().as_str().as_bytes().to_vec();
+      let key: &[u8] = v.as_ref().try_into().unwrap();
+      data.extend(key);
+      vec![data]
+    } else {
+      to_redis_args(v)
+    }
+}
 fn to_redis_args<T: AsRef<[u8]>>(v: T) -> Vec<Vec<u8>> {
     return vec![v.as_ref().try_into().unwrap()];
 }
@@ -52,7 +82,7 @@ impl BatchLike for RedisBatch {
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
         self.0
             .cmd("SET")
-            .arg(to_redis_args(k))
+            .arg(to_redis_key(k))
             .arg(to_redis_args(v))
             .ignore();
     }
@@ -91,6 +121,6 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
         self.1
             .lock()
             .unwrap()
-            .set(to_redis_args(key), to_redis_args(value))
+            .set(to_redis_key(key), to_redis_args(value))
     }
 }

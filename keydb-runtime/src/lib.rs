@@ -11,7 +11,7 @@ static mut _LABEL: Option<String> = None;
 
 pub fn set_label(s: String) -> () {
   unsafe {
-    _LABEL = Some(s);
+    _LABEL = Some(s + "://");
   }
 }
 

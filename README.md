@@ -56,6 +56,24 @@ The `--start-block <block height>` flag is only honored during an indexer first 
 
 The `--auth` flag refers to the authentication string needed for RPC access, and is optional.
 
+#### HINT: clearing indexes built under a label
+
+You can use the redis API to run LUA scripts the same as on the canonical version of redis.
+
+Use this command to clear a subset of the k/v cache which is labeled with mainnet-runes, while keeping other indexes intact.
+
+```sh
+cd metashrew/keydb
+docker-compose exec keydb redis-cli
+# drops to a redis shell
+EVAL "local cursor = 0 local calls = 0 local dels = 0 repeat    local result = redis.call('SCAN', cursor, 'MATCH', ARGV[1])     calls = calls + 1   for _,key in ipairs(result[2]) do       redis.call('DEL', key)      dels = dels + 1     end     cursor = tonumber(result[1]) until cursor == 0 return 'Calls ' .. calls .. ' Dels ' .. dels" 0 mainnet-runes://*:1
+```
+
+Be sure you stop indexer processes before running this since connections will break during atomic execution of the script.
+
+Credits for this LUA to Stackoverflow answer here: [https://stackoverflow.com/questions/61366419/how-to-atomically-delete-millions-of-keys-matching-a-pattern-using-pure-redis](https://stackoverflow.com/questions/61366419/how-to-atomically-delete-millions-of-keys-matching-a-pattern-using-pure-redis)
+
+
 ### metashrew-keydb-view
 
 The metashrew indexer process runs separately from the `view` process. The metashrew-keydb-view process provides RPC access to view function exports of the loaded WASM binary, where functions can be called that do not effect state changes on the index. Any state changes during the execution of a view function only persist for the duration of the function call, sandboxed within the context of the function. Any exported function of the WASM program can be invoked via the RPC.

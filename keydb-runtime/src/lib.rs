@@ -27,8 +27,20 @@ pub fn has_label() -> bool {
   }
 }
 
+pub fn to_labeled_key(key: &Vec<u8>) -> Vec<u8> {
+  if has_label() {
+    let mut result: Vec<u8> = vec![];
+    result.extend(get_label().as_str().as_bytes());
+    result.extend(key);
+    result
+  } else {
+    key.clone()
+  }
+}
+
 pub async fn query_height(connection: &mut redis::Connection, start_block: u32) -> Result<u32> {
-    let bytes: Vec<u8> = match connection.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
+    let height_key = TIP_HEIGHT_KEY.as_bytes().to_vec();
+    let bytes: Vec<u8> = match connection.get(&to_labeled_key(&height_key)) {
         Ok(v) => v,
         Err(_) => {
             return Ok(start_block);

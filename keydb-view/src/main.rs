@@ -183,15 +183,7 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .wrap(
-                Cors::default().allowed_origin_fn(|origin, _| {
-                    if let Ok(origin_str) = origin.to_str() {
-                        origin_str.starts_with("http://localhost:")
-                    } else {
-                        false
-                    }
-                })
-            )
+            .wrap(Cors::permissive())
             .app_data(
                 web::Data::new(Context {
                     hash: output,

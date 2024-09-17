@@ -186,9 +186,9 @@ dependencies = [
 
 [[package]]
 name = "actix-web-codegen"
-version = "4.2.2"
+version = "4.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb1f50ebbb30eca122b188319a4398b3f7bb4a8cdf50ecfb73bfc6a3c3ce54f5"
+checksum = "f591380e2e68490b5dfaf1dd1aa0ebe78d84ba7067078512b4ea6e4492d622b8"
 dependencies = [
  "actix-router",
  "proc-macro2",
@@ -2256,6 +2256,7 @@ version = "8.0.5"
 dependencies = [
  "actix-cors",
  "actix-web",
+ "actix-web-codegen",
  "anyhow",
  "bitcoin 0.32.1",
  "env_logger 0.11.5",

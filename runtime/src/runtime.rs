@@ -7,20 +7,9 @@ use protobuf::Message;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
+
 use crate::wasmi::{
-  __wasmi_caller_memory,
-  __wasmi_caller_context,
-  __wasmi_engine_new,
-  __wasmi_engine_free,
-  __wasmi_store_new,
-  __wasmi_instance_memory,
-  __wasmi_store_free,
-  __wasmi_module_new,
-  __wasmi_linker_new,
-  __wasmi_func_wrap,
-  __wasmi_linker_instantiate,
-  __wasmi_store_set_fuel,
-  __wasmi_instance_call
+  State as WasmiState, __wasmi_caller_context, __wasmi_caller_memory, __wasmi_engine_free, __wasmi_engine_new, __wasmi_func_wrap, __wasmi_instance_call, __wasmi_instance_memory, __wasmi_linker_instantiate, __wasmi_linker_new, __wasmi_module_new, __wasmi_store_free, __wasmi_store_new, __wasmi_store_set_fuel, from_ptr, to_ptr
 };
 
 use crate::proto::metashrew::KeyValueFlush;
@@ -452,13 +441,13 @@ where
     }
     pub fn setup_linker_wasmi(linker: &mut Linker<State>) {
       linker.func_wrap("env", "__wasmi_caller_memory", |mut _caller: Caller<'_, State>, wasmi_caller: u64| -> u64 {
-        return __wasmi_caller_memory(from_ptr<wasmi::Caller<'static, WasmiState>>(wasmi_caller));
+          return to_ptr(__wasmi_caller_memory(from_ptr::<wasmi::Caller<'static, WasmiState>>(wasmi_caller)));
       });
       linker.func_wrap("env", "__wasmi_caller_context", |mut _caller: Caller<'_, State>, wasmi_caller: u64| -> u64 {
-        return to_ptr(__wasmi_caller_context(from_ptr<wasmi::Caller<'static, WasmiState>>(wasmi_caller)))
+        return to_ptr(__wasmi_caller_context(from_ptr::<wasmi::Caller<'static, WasmiState>>(wasmi_caller)))
       });
       linker.func_wrap("env", "__wasmi_engine_new", |mut _caller: Caller<'_, State>| -> u64 {
-        return to_ptr(__wasmi_enigne_new());
+        to_ptr(__wasmi_engine_new())
       });
       linker.func_wrap("env", "__wasmi_engine_free", |mut _caller: Caller<'_, State>, wasmi_engine: u64| {
         return __wasmi_engine_free(from_ptr<wasmi::Engine>(wasmi_engine));
@@ -466,10 +455,11 @@ where
       linker.func_wrap("env", "__wasmi_caller_free", |mut _caller: Caller<'_, State>| {
       });
       linker.func_wrap("env", "__wasmi_store_new", |mut _caller: Caller<'_, State>, wasmi_engine: u64, context: u64, memory_limit: i32, fuel_limit: u64| -> u64 {
-        return to_ptr(__wasmi_store_new(from_ptr<wasmi::Engine>(wasmi_engine), context, memory_limit, fuel_limit));
+        return to_ptr(__wasmi_store_new(from_ptr::<wasmi::Engine>(wasmi_engine), from_ptr(context), memory_limit as usize, fuel_limit));
       });
       linker.func_wrap("env", "__wasmi_store_free", |mut _caller: Caller<'_, State>, wasmi_store: u64| -> i32 {
-        __wasmi_store_free(from_ptr<wasmi::Store<WasmiState>>(wasmi_store));
+        __wasmi_store_free(from_ptr::<wasmi::Store<WasmiState>>(wasmi_store));
+        0
       });
       linker.func_wrap("env", "__wasmi_instance_memory", |mut _caller: Caller<'_, State>| -> i32 {
       });

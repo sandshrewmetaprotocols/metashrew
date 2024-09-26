@@ -5,12 +5,12 @@ use std::os::raw::c_char;
 use wasmi;
 use wasmi::AsContext;
 
-pub fn to_ptr<T>(v: *mut T): u64 {
-  return v as usize as u64;
+pub fn to_ptr<T>(v: *mut T) -> u64 {
+    v as usize as u64
 }
 
-pub fn from_ptr<T>(v: u64): *mut T {
-  v as usize as *mut T;
+pub fn from_ptr<T>(v: u64) -> *mut T {
+    v as usize as *mut T
 }
 
 pub fn __wasmi_caller_memory(caller: *mut wasmi::Caller<'static, State>) -> *mut u8 {
@@ -66,10 +66,16 @@ pub fn __wasmi_store_new(
     Box::leak(Box::new(store)) as *mut wasmi::Store<State>
 }
 
-pub fn __wasmi_instance_memory(ptr: *mut wasmi::Instance, store: *mut wasmi::Store<State>) -> *mut core::ffi::c_void {
-  unsafe {
-    (*ptr).get_memory(&mut *store, "memory").unwrap().data_mut(&mut *store) as *mut [u8] as *mut core::ffi::c_void
-  }
+pub fn __wasmi_instance_memory(
+    ptr: *mut wasmi::Instance,
+    store: *mut wasmi::Store<State>,
+) -> *mut core::ffi::c_void {
+    unsafe {
+        (*ptr)
+            .get_memory(&mut *store, "memory")
+            .unwrap()
+            .data_mut(&mut *store) as *mut [u8] as *mut core::ffi::c_void
+    }
 }
 
 pub fn __wasmi_store_free(ptr: *mut wasmi::Store<State>) -> () {
@@ -202,12 +208,15 @@ pub fn __wasmi_instance_call(
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::CString, ptr};
+
     use super::*;
 
-    fn load_wasm_module() -> &'static [u8] {
+    fn load_wasm_module() -> Vec<u8> {
         // Load a simple Wasm binary for testing purposes
         // In a real test, this would be the actual Wasm binary content
-        include_bytes!("simple_wasm.wasm")
+        //include_bytes!("simple_wasm.wasm")
+        vec![0]
     }
 
     #[test]

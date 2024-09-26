@@ -5,6 +5,13 @@ use std::os::raw::c_char;
 use wasmi;
 use wasmi::AsContext;
 
+pub fn to_ptr<T>(v: *mut T): u64 {
+  return v as usize as u64;
+}
+
+pub fn from_ptr<T>(v: u64): *mut T {
+  v as usize as *mut T;
+}
 
 pub fn __wasmi_caller_memory(caller: *mut wasmi::Caller<'static, State>) -> *mut u8 {
     let caller = unsafe { &mut *caller };

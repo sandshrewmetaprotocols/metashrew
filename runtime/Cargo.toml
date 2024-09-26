@@ -24,6 +24,7 @@ tempdir = "0.3.7"
 wasmtime-environ = "20.0.2"
 hex = "0.4.3"
 protobuf = "3"
+wasmi = "0.36.1"
 
 [build-dependencies]
 protobuf-codegen = "3.4.0"

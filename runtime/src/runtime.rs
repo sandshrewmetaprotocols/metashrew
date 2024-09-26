@@ -7,6 +7,7 @@ use protobuf::Message;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
+use crate::wasmi::{__wasmi_instance_call};
 
 use crate::proto::metashrew::KeyValueFlush;
 

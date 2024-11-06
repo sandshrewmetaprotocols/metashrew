@@ -1,4 +1,4 @@
-use anyhow::{Result};
+use anyhow::Result;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 use redis::Commands;
 use std::sync::{Arc, Mutex};
@@ -10,32 +10,28 @@ pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>, pu
 static mut _LABEL: Option<String> = None;
 
 pub fn set_label(s: String) -> () {
-  unsafe {
-    _LABEL = Some(s + "://");
-  }
+    unsafe {
+        _LABEL = Some(s + "://");
+    }
 }
 
 pub fn get_label() -> &'static String {
-  unsafe {
-    _LABEL.as_ref().unwrap()
-  }
+    unsafe { _LABEL.as_ref().unwrap() }
 }
 
 pub fn has_label() -> bool {
-  unsafe {
-    _LABEL.is_some()
-  }
+    unsafe { _LABEL.is_some() }
 }
 
 pub fn to_labeled_key(key: &Vec<u8>) -> Vec<u8> {
-  if has_label() {
-    let mut result: Vec<u8> = vec![];
-    result.extend(get_label().as_str().as_bytes());
-    result.extend(key);
-    result
-  } else {
-    key.clone()
-  }
+    if has_label() {
+        let mut result: Vec<u8> = vec![];
+        result.extend(get_label().as_str().as_bytes());
+        result.extend(key);
+        result
+    } else {
+        key.clone()
+    }
 }
 
 pub async fn query_height(connection: &mut redis::Connection, start_block: u32) -> Result<u32> {
@@ -63,28 +59,28 @@ impl RedisRuntimeAdapter {
             Arc::new(Mutex::new(
                 redis::Client::open(redis_uri.clone())?.get_connection()?,
             )),
-            0
+            0,
         ))
     }
     pub fn connect(&self) -> Result<redis::Connection> {
-      let mut count = 0;
-      let mut response: Option<redis::Connection> = None;
-      loop {
-        match self.connect_once() {
-          Ok(v) => {
-            response = Some(v);
-            break;
-          },
-          Err(e) => {
-            if count > 10 {
-              return Err(e.into());
-            } else {
-              count = count + 1;
+        let mut count = 0;
+        let mut response: Option<redis::Connection> = None;
+        loop {
+            match self.connect_once() {
+                Ok(v) => {
+                    response = Some(v);
+                    break;
+                }
+                Err(e) => {
+                    if count > 10 {
+                        return Err(e.into());
+                    } else {
+                        count = count + 1;
+                    }
+                }
             }
-          }
         }
-      }
-      Ok(response.unwrap())
+        Ok(response.unwrap())
     }
     pub fn reset_connection(&mut self) {
         self.1 = Arc::new(Mutex::new(self.connect().unwrap()));
@@ -95,12 +91,12 @@ pub struct RedisBatch(pub redis::Pipeline);
 
 fn to_redis_key<T: AsRef<[u8]>>(v: T) -> Vec<Vec<u8>> {
     if has_label() {
-      let mut data: Vec<u8> = get_label().as_str().as_bytes().to_vec();
-      let key: &[u8] = v.as_ref().try_into().unwrap();
-      data.extend(key);
-      vec![data]
+        let mut data: Vec<u8> = get_label().as_str().as_bytes().to_vec();
+        let key: &[u8] = v.as_ref().try_into().unwrap();
+        data.extend(key);
+        vec![data]
     } else {
-      to_redis_args(v)
+        to_redis_args(v)
     }
 }
 fn to_redis_args<T: AsRef<[u8]>>(v: T) -> Vec<Vec<u8>> {

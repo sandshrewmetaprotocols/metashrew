@@ -1,23 +1,23 @@
-use actix_web::error;
-use actix_web::http::{ header::ContentType, StatusCode };
-use actix_web::{ post, web, App, HttpResponse, HttpServer, Responder, Result };
 use actix_cors::Cors;
+use actix_web::error;
+use actix_web::http::{header::ContentType, StatusCode};
+use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 //use itertools::Itertools;
-use metashrew_keydb_runtime::{ set_label, query_height, RedisRuntimeAdapter };
-use metashrew_runtime::{ MetashrewRuntime };
+use metashrew_keydb_runtime::{query_height, set_label, RedisRuntimeAdapter};
+use metashrew_runtime::MetashrewRuntime;
 use std::fmt;
 //use rlp::Rlp;
 use anyhow;
-use log::{ debug, info };
-use serde::{ Deserialize, Serialize };
+use log::{debug, info};
+use serde::{Deserialize, Serialize};
 use serde_json;
 use std::env;
 use std::fs::File;
-use std::io::{ prelude::*, BufReader };
+use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
-use std::sync::{ Arc, Mutex };
+use std::sync::{Arc, Mutex};
 use substring::Substring;
-use tiny_keccak::{ Hasher, Sha3 };
+use tiny_keccak::{Hasher, Sha3};
 
 struct MetashrewViewError(pub anyhow::Error);
 
@@ -99,17 +99,16 @@ pub fn set_height(h: u32) -> u32 {
 }
 
 pub async fn fetch_and_set_height(internal_db: &RedisRuntimeAdapter) -> Result<u32> {
-    let height = query_height(
-        &mut internal_db.connect().map_err(|e| from_anyhow(e))?,
-        0
-    ).await.map_err(|e| from_anyhow(e))?;
+    let height = query_height(&mut internal_db.connect().map_err(|e| from_anyhow(e))?, 0)
+        .await
+        .map_err(|e| from_anyhow(e))?;
     Ok(set_height(height))
 }
 
 #[post("/")]
 async fn view(
     body: web::Json<JsonRpcRequest>,
-    context: web::Data<Context>
+    context: web::Data<Context>,
 ) -> Result<impl Responder> {
     {
         debug!("{}", serde_json::to_string(&body).unwrap());
@@ -133,20 +132,21 @@ async fn view(
         };
         let result = JsonRpcResult {
             id: body.id,
-            result: String::from("0x") +
-            hex
-                ::encode(
-                    context.runtime
+            result: String::from("0x")
+                + hex::encode(
+                    context
+                        .runtime
                         .view(
                             body.params[0].clone(),
-                            &hex
-                                ::decode(
-                                    body.params[1].to_string().substring(2, body.params[1].len())
-                                )
-                                .unwrap(),
-                            height
+                            &hex::decode(
+                                body.params[1]
+                                    .to_string()
+                                    .substring(2, body.params[1].len()),
+                            )
+                            .unwrap(),
+                            height,
                         )
-                        .unwrap()
+                        .unwrap(),
                 )
                 .as_str(),
             jsonrpc: "2.0".to_string(),
@@ -161,7 +161,11 @@ async fn main() -> std::io::Result<()> {
     // get the
     let path = match env::var("PROGRAM_PATH") {
         Ok(val) => val,
-        Err(_e) => PathBuf::from("/mnt/volume/indexer.wasm").to_str().unwrap().try_into().unwrap(),
+        Err(_e) => PathBuf::from("/mnt/volume/indexer.wasm")
+            .to_str()
+            .unwrap()
+            .try_into()
+            .unwrap(),
     };
     let program = File::open(path.clone()).expect("msg");
     let mut buf = BufReader::new(program);
@@ -183,48 +187,43 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         App::new()
-            .wrap(
-                Cors::default().allowed_origin_fn(|origin, _| {
-                    if let Ok(origin_str) = origin.to_str() {
-                        origin_str.starts_with("http://localhost:")
-                    } else {
-                        false
-                    }
-                })
-            )
-            .app_data(
-                web::Data::new(Context {
-                    hash: output,
-                    program: bytes.clone(),
-                    runtime: MetashrewRuntime::load(
-                        path_clone.clone(),
-                        RedisRuntimeAdapter(
-                            redis_uri.clone(),
-                            Arc::new(
-                                Mutex::new(
-                                    redis::Client
-                                        ::open(redis_uri.clone())
-                                        .unwrap()
-                                        .get_connection()
-                                        .unwrap()
-                                )
-                            ),
-                            0
-                        )
-                    ).unwrap(),
-                })
-            )
+            .wrap(Cors::default().allowed_origin_fn(|origin, _| {
+                if let Ok(origin_str) = origin.to_str() {
+                    origin_str.starts_with("http://localhost:")
+                } else {
+                    false
+                }
+            }))
+            .app_data(web::Data::new(Context {
+                hash: output,
+                program: bytes.clone(),
+                runtime: MetashrewRuntime::load(
+                    path_clone.clone(),
+                    RedisRuntimeAdapter(
+                        redis_uri.clone(),
+                        Arc::new(Mutex::new(
+                            redis::Client::open(redis_uri.clone())
+                                .unwrap()
+                                .get_connection()
+                                .unwrap(),
+                        )),
+                        0,
+                    ),
+                )
+                .unwrap(),
+            }))
             .service(view)
     })
-        .bind((
-            match env::var("HOST") {
-                Ok(val) => val,
-                Err(_e) => String::from("127.0.0.1"),
-            },
-            match env::var("PORT") {
-                Ok(val) => val.parse::<u16>().unwrap(),
-                Err(_e) => 8080,
-            },
-        ))?
-        .run().await
+    .bind((
+        match env::var("HOST") {
+            Ok(val) => val,
+            Err(_e) => String::from("127.0.0.1"),
+        },
+        match env::var("PORT") {
+            Ok(val) => val.parse::<u16>().unwrap(),
+            Err(_e) => 8080,
+        },
+    ))?
+    .run()
+    .await
 }

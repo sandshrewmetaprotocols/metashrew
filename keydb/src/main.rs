@@ -1,24 +1,24 @@
-use anyhow::{ anyhow, Result };
-use clap::{ command, Parser };
+use anyhow::{anyhow, Result};
+use clap::{command, Parser};
 use env_logger;
 use hex;
 use itertools::Itertools;
 use log::debug;
-use metashrew_keydb_runtime::{ set_label, query_height, RedisRuntimeAdapter };
+use metashrew_keydb_runtime::{query_height, set_label, RedisRuntimeAdapter};
 use metashrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::MetashrewRuntime;
 use redis;
 use redis::Commands;
-use reqwest::{ Response, Url };
-use serde::{ Deserialize, Serialize };
+use reqwest::{Response, Url};
+use retry::{delay::Fixed, retry, OperationResult};
+use serde::{Deserialize, Serialize};
 use serde_json;
-use serde_json::{ Number, Value };
+use serde_json::{Number, Value};
 use std::path::PathBuf;
-use std::time::{ SystemTime, UNIX_EPOCH };
-use tokio;
-use tokio::time::{ sleep, Duration };
-use retry::{OperationResult, retry, delay::{Fixed}};
+use std::time::{SystemTime, UNIX_EPOCH};
 use task;
+use tokio;
+use tokio::time::{sleep, Duration};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -71,8 +71,7 @@ pub struct MetashrewKeyDBSync {
 
 impl MetashrewKeyDBSync {
     async fn post_once(&self, body: String) -> Result<Response, reqwest::Error> {
-        let response = reqwest::Client
-            ::new()
+        let response = reqwest::Client::new()
             .post(match self.args.auth.clone() {
                 Some(v) => {
                     let mut url = Url::parse(self.args.daemon_rpc_url.as_str()).unwrap();
@@ -85,30 +84,31 @@ impl MetashrewKeyDBSync {
             })
             .header("Content-Type", "application/json")
             .body(body)
-            .send().await;
+            .send()
+            .await;
         return response;
     }
     async fn post(&self, body: String) -> Result<Response> {
-      let mut count = 0;
-      let mut response: Option<Response> = None;
-      loop {
-        match self.post_once(body.clone()).await {
-          Ok(v) => {
-            response = Some(v);
-            break;
-          },
-          Err(e) => {
-            if count > 10 {
-              return Err(e.into());
-            } else {
-              count = count + 1;
+        let mut count = 0;
+        let mut response: Option<Response> = None;
+        loop {
+            match self.post_once(body.clone()).await {
+                Ok(v) => {
+                    response = Some(v);
+                    break;
+                }
+                Err(e) => {
+                    if count > 10 {
+                        return Err(e.into());
+                    } else {
+                        count = count + 1;
+                    }
+                    debug!("err: retrying POST");
+                    sleep(Duration::from_millis(3000)).await;
+                }
             }
-            debug!("err: retrying POST");
-            sleep(Duration::from_millis(3000)).await;
-          }
         }
-      }
-      Ok(response.unwrap())
+        Ok(response.unwrap())
     }
     /*
     async fn post_get_text(&self, body: String) -> Result<String, reqwest::Error> {
@@ -147,40 +147,41 @@ impl MetashrewKeyDBSync {
     }
     */
     async fn fetch_blockcount(&self) -> Result<u32> {
-        let response = self.post(
-            serde_json::to_string(
+        let response = self
+            .post(serde_json::to_string(
                 &(JsonRpcRequest::<u32> {
-                    id: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().try_into()?,
+                    id: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)?
+                        .as_secs()
+                        .try_into()?,
                     jsonrpc: String::from("2.0"),
                     method: String::from("getblockcount"),
                     params: vec![],
-                })
-            )?
-        ).await?;
+                }),
+            )?)
+            .await?;
 
         Ok(response.json::<BlockCountResponse>().await?.result)
     }
 
     pub async fn poll_connection(&self) -> redis::Connection {
         loop {
-            let connected: Option<redis::Connection> = match
-                self.runtime.context.lock().unwrap().db.connect()
-            {
-                Err(_) => {
-                    debug!("KeyDB connection failure -- retrying in 3s ...");
-                    sleep(Duration::from_millis(3000)).await;
-                    None
-                }
-                Ok(mut v) =>
-                    match v.get::<Vec<u8>, Vec<u8>>("POLL".into()) {
+            let connected: Option<redis::Connection> =
+                match self.runtime.context.lock().unwrap().db.connect() {
+                    Err(_) => {
+                        debug!("KeyDB connection failure -- retrying in 3s ...");
+                        sleep(Duration::from_millis(3000)).await;
+                        None
+                    }
+                    Ok(mut v) => match v.get::<Vec<u8>, Vec<u8>>("POLL".into()) {
                         Ok(_) => Some(v),
                         Err(_) => {
                             debug!("KeyDB connection failure -- retrying in 3s ...");
                             sleep(Duration::from_millis(3000)).await;
                             None
                         }
-                    }
-            };
+                    },
+                };
 
             if let Some(v) = connected {
                 return v;
@@ -192,16 +193,19 @@ impl MetashrewKeyDBSync {
     }
     async fn best_height(&self, block_number: u32) -> Result<u32> {
         let mut best: u32 = block_number;
-        let response = self.post(
-            serde_json::to_string(
+        let response = self
+            .post(serde_json::to_string(
                 &(JsonRpcRequest::<u32> {
-                    id: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().try_into()?,
+                    id: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)?
+                        .as_secs()
+                        .try_into()?,
                     jsonrpc: String::from("2.0"),
                     method: String::from("getblockcount"),
                     params: vec![],
-                })
-            )?
-        ).await?;
+                }),
+            )?)
+            .await?;
         let tip = response.json::<BlockCountResponse>().await?.result;
         if best >= tip - 6 {
             loop {
@@ -209,7 +213,8 @@ impl MetashrewKeyDBSync {
                     break;
                 }
                 let blockhash = self
-                    .get_blockhash(best).await
+                    .get_blockhash(best)
+                    .await
                     .ok_or(anyhow!("failed to retrieve blockhash"))?;
                 let remote_blockhash = self.fetch_blockhash(best).await?;
                 if blockhash == remote_blockhash {
@@ -221,28 +226,85 @@ impl MetashrewKeyDBSync {
         }
         return Ok(best);
     }
-
-    async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
-        self.runtime.context
+    fn get_once(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+        self.runtime
+            .context
             .lock()
             .unwrap()
-            .db.get(&(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes())
+            .db
+            .get(key)
+            .map_err(|_| anyhow!("GET error against redis socket"))
+    }
+    fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let mut count = 0;
+        let mut response: Option<Option<Vec<u8>>> = None;
+        loop {
+            match self.get_once(key) {
+                Ok(v) => {
+                    response = Some(v);
+                    break;
+                }
+                Err(e) => {
+                    if count > 100 {
+                        return Err(e.into());
+                    } else {
+                        count = count + 1;
+                    }
+                    debug!("err: retrying GET");
+                }
+            }
+        }
+        Ok(response.unwrap())
+    }
+
+    async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
+        self.get(&(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes())
             .unwrap()
     }
 
     async fn fetch_blockhash(&self, block_number: u32) -> Result<Vec<u8>, anyhow::Error> {
-        let response = self.post(
-            serde_json::to_string(
+        let response = self
+            .post(serde_json::to_string(
                 &(JsonRpcRequest::<u32> {
-                    id: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs().try_into()?,
+                    id: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)?
+                        .as_secs()
+                        .try_into()?,
                     jsonrpc: String::from("2.0"),
                     method: String::from("getblockhash"),
                     params: vec![block_number],
-                })
-            )?
-        ).await?;
+                }),
+            )?)
+            .await?;
         let blockhash = response.json::<JsonRpcResponse>().await?.result;
         Ok(hex::decode(&blockhash)?)
+    }
+    fn put_once(&self, k: &Vec<u8>, v: &Vec<u8>) -> Result<()> {
+        self.runtime
+            .context
+            .lock()
+            .unwrap()
+            .db
+            .put(k, v)
+            .map_err(|_| anyhow!("PUT error against socket"))
+    }
+    fn put(&self, key: &Vec<u8>, val: &Vec<u8>) -> Result<()> {
+        let mut count = 0;
+        loop {
+            match self.put_once(key, val) {
+                Ok(v) => {
+                    return Ok(v);
+                }
+                Err(e) => {
+                    if count > 100 {
+                        return Err(e.into());
+                    } else {
+                        count = count + 1;
+                    }
+                    debug!("err: retrying GET");
+                }
+            }
+        }
     }
 
     async fn pull_block(&self, block_number: u32) -> Result<Vec<u8>, anyhow::Error> {
@@ -256,37 +318,31 @@ impl MetashrewKeyDBSync {
         }
         let blockhash = self.fetch_blockhash(block_number).await.unwrap();
         self.poll_connection().await;
-        self.runtime.context
-            .lock()
-            .unwrap()
-            .db.put(
-                &(String::from(HEIGHT_TO_HASH) + block_number.to_string().as_str()).into_bytes(),
-                &blockhash
-            )
-            .unwrap();
-        Ok(
-            hex::decode(
-                self
-                    .post(
-                        serde_json::to_string(
-                            &(JsonRpcRequest::<Value> {
-                                id: (
-                                    <u64 as TryInto<i32>>::try_into(
-                                        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()
-                                    )? + 1
-                                ).try_into()?,
-                                jsonrpc: String::from("2.0"),
-                                method: String::from("getblock"),
-                                params: vec![
-                                    Value::String(hex::encode(&blockhash)),
-                                    Value::Number(Number::from(0))
-                                ],
-                            })
-                        )?
-                    ).await?
-                    .json::<JsonRpcResponse>().await?.result
-            )?
+        self.put(
+            &(String::from(HEIGHT_TO_HASH) + block_number.to_string().as_str()).into_bytes(),
+            &blockhash,
         )
+        .unwrap();
+        Ok(hex::decode(
+            self.post(serde_json::to_string(
+                &(JsonRpcRequest::<Value> {
+                    id: (<u64 as TryInto<i32>>::try_into(
+                        SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
+                    )? + 1)
+                        .try_into()?,
+                    jsonrpc: String::from("2.0"),
+                    method: String::from("getblock"),
+                    params: vec![
+                        Value::String(hex::encode(&blockhash)),
+                        Value::Number(Number::from(0)),
+                    ],
+                }),
+            )?)
+            .await?
+            .json::<JsonRpcResponse>()
+            .await?
+            .result,
+        )?)
     }
     async fn run(&mut self) -> Result<()> {
         let mut i: u32 = self.query_height().await?;
@@ -324,10 +380,8 @@ async fn main() {
     let indexer: PathBuf = args.indexer.clone().into();
     let redis_uri: String = args.redis.clone();
     let mut sync = MetashrewKeyDBSync {
-        runtime: MetashrewRuntime::load(
-            indexer,
-            RedisRuntimeAdapter::open(redis_uri).unwrap()
-        ).unwrap(),
+        runtime: MetashrewRuntime::load(indexer, RedisRuntimeAdapter::open(redis_uri).unwrap())
+            .unwrap(),
         args,
         start_block,
     };

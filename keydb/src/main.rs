@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::time::{ SystemTime, UNIX_EPOCH };
 use tokio;
 use tokio::time::{ sleep, Duration };
+use retry::{OperationResult, retry, delay::{Fixed}};
+use task;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -68,7 +70,7 @@ pub struct MetashrewKeyDBSync {
 }
 
 impl MetashrewKeyDBSync {
-    async fn post(&self, body: String) -> Result<Response, reqwest::Error> {
+    async fn post_once(&self, body: String) -> Result<Response, reqwest::Error> {
         let response = reqwest::Client
             ::new()
             .post(match self.args.auth.clone() {
@@ -85,6 +87,28 @@ impl MetashrewKeyDBSync {
             .body(body)
             .send().await;
         return response;
+    }
+    async fn post(&self, body: String) -> Result<Response> {
+      let mut count = 0;
+      let mut response: Option<Response> = None;
+      loop {
+        match self.post_once(body.clone()).await {
+          Ok(v) => {
+            response = Some(v);
+            break;
+          },
+          Err(e) => {
+            if count > 10 {
+              return Err(e.into());
+            } else {
+              count = count + 1;
+            }
+            debug!("err: retrying POST");
+            sleep(Duration::from_millis(3000)).await;
+          }
+        }
+      }
+      Ok(response.unwrap())
     }
     /*
     async fn post_get_text(&self, body: String) -> Result<String, reqwest::Error> {

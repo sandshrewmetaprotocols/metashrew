@@ -54,7 +54,7 @@ pub async fn query_height(connection: &mut redis::Connection, start_block: u32) 
 }
 
 impl RedisRuntimeAdapter {
-    pub fn connect(&self) -> Result<redis::Connection> {
+    pub fn connect_once(&self) -> Result<redis::Connection> {
         Ok(redis::Client::open(self.0.clone())?.get_connection()?)
     }
     pub fn open(redis_uri: String) -> Result<RedisRuntimeAdapter> {
@@ -65,6 +65,26 @@ impl RedisRuntimeAdapter {
             )),
             0
         ))
+    }
+    pub fn connect(&self) -> Result<redis::Connection> {
+      let mut count = 0;
+      let mut response: Option<redis::Connection> = None;
+      loop {
+        match self.connect_once() {
+          Ok(v) => {
+            response = Some(v);
+            break;
+          },
+          Err(e) => {
+            if count > 10 {
+              return Err(e.into());
+            } else {
+              count = count + 1;
+            }
+          }
+        }
+      }
+      Ok(response.unwrap())
     }
     pub fn reset_connection(&mut self) {
         self.1 = Arc::new(Mutex::new(self.connect().unwrap()));

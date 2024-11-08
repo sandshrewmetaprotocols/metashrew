@@ -72,7 +72,7 @@ impl RedisRuntimeAdapter {
                     break;
                 }
                 Err(e) => {
-                    if count > 10 {
+                    if count > u32::MAX {
                         return Err(e.into());
                     } else {
                         count = count + 1;

@@ -135,26 +135,15 @@ pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v:
     return match <T as TryInto<i32>>::try_into(v) {
         Ok(v) => v,
         Err(_) => {
-            trap_abort(caller);
             return i32::MAX;
         }
     };
-}
-
-pub fn trap_abort<'a>(caller: &mut Caller<'_, State>) {
-    let _ = caller
-        .get_export("trap")
-        .unwrap()
-        .into_func()
-        .unwrap()
-        .call(caller, &mut [], &mut []);
 }
 
 pub fn to_usize_or_trap<'a, T: TryInto<usize>>(caller: &mut Caller<'_, State>, v: T) -> usize {
     return match <T as TryInto<usize>>::try_into(v) {
         Ok(v) => v,
         Err(_) => {
-            trap_abort(caller);
             return usize::MAX;
         }
     };
@@ -480,7 +469,6 @@ where
                     let bytes = match try_read_arraybuffer_as_vec(data, data_start) {
                         Ok(v) => v,
                         Err(_) => {
-                            trap_abort(&mut caller);
                             return;
                         }
                     };
@@ -493,7 +481,6 @@ where
                 "env",
                 "abort",
                 |mut caller: Caller<'_, State>, _: i32, _: i32, _: i32, _: i32| {
-                    trap_abort(&mut caller);
                     return;
                 },
             )
@@ -615,7 +602,6 @@ where
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                         Ok(v) => v,
                         Err(_) => {
-                            trap_abort(&mut caller);
                             return;
                         }
                     };

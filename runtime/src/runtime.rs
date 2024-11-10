@@ -32,6 +32,7 @@ pub trait KeyValueStoreLike {
 
 pub struct State {
     limits: StoreLimits,
+    had_failure: bool
 }
 
 pub struct MetashrewRuntimeContext<T: KeyValueStoreLike + Clone> {
@@ -80,6 +81,7 @@ impl State {
                 .tables(usize::MAX)
                 .instances(usize::MAX)
                 .build(),
+            had_failure: false
         }
     }
 }
@@ -245,7 +247,7 @@ where
         self.handle_reorg();
         match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
-                if self.context.lock().unwrap().state != 1 {
+                if self.context.lock().unwrap().state != 1 && !self.wasmstore.data().had_failure {
                     return Err(anyhow!("indexer exited unexpectedly"));
                 }
                 return Ok(());
@@ -455,6 +457,9 @@ where
                         <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
                     input_clone.extend(input.clone());
                     let sz: usize = to_usize_or_trap(&mut caller, data_start);
+                    if sz == usize::MAX {
+                      caller.data_mut().had_failure = true;
+                    }
                     let _ = mem.write(&mut caller, sz, input_clone.as_slice());
                 },
             )
@@ -481,6 +486,7 @@ where
                 "env",
                 "abort",
                 |mut caller: Caller<'_, State>, _: i32, _: i32, _: i32, _: i32| {
+                    caller.data_mut().had_failure = true;
                     return;
                 },
             )
@@ -576,7 +582,11 @@ where
                         Err(_) => return i32::MAX,
                     };
                     let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
-                    return to_signed_or_trap(&mut caller, value.len());
+                    let signed = to_signed_or_trap(&mut caller, value.len());
+                    if signed == i32::MAX {
+                      caller.data_mut().had_failure = true;
+                    }
+                    signed
                 },
             )
             .unwrap();

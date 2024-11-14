@@ -122,6 +122,7 @@ impl Clone for RedisRuntimeAdapter {
     }
 }
 
+
 impl KeyValueStoreLike for RedisRuntimeAdapter {
     type Batch = RedisBatch;
     type Error = redis::RedisError;
@@ -135,20 +136,43 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
             .unwrap();
             */
         batch.put(&key_bytes, &height_bytes);
+        let mut result = Result::<(), Self::Error>::Ok(());
+        loop {
+          let _result = batch.0.query(&mut connection);
+          if let Ok(v) = _result {
+            result = Ok(v);
+            break;
+          }
+        }
         let result = batch.0.query(&mut connection);
         self.reset_connection();
         result
     }
     fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.1.lock().unwrap().get(to_redis_args(key))
+        loop {
+          if let Ok(v) = self.1.lock().unwrap().get(to_redis_args(key.as_ref())) {
+            return Ok(v);
+
+          }
+        }
     }
     fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
-        self.connect().unwrap().del(to_redis_args(key))
+        loop {
+          if let Ok(_) = self.connect().unwrap().del(to_redis_args(key.as_ref())) {
+            return Ok(());
+
+          }
+        }
     }
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
-        self.1
+        loop {
+          if let Ok(_) = self.1
             .lock()
             .unwrap()
-            .set(to_redis_key(key), to_redis_args(value))
+            .set(to_redis_key(key.as_ref()), to_redis_args(value.as_ref())) {
+            return Ok(());
+
+          }
+        }
     }
 }

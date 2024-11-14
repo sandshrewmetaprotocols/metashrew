@@ -296,7 +296,7 @@ impl MetashrewKeyDBSync {
                     return Ok(v);
                 }
                 Err(e) => {
-                    if count > 100 {
+                    if count > i32::MAX {
                         return Err(e.into());
                     } else {
                         count = count + 1;

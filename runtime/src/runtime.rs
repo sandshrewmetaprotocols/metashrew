@@ -19,9 +19,9 @@ pub trait KeyValueStoreLike {
     type Error: std::fmt::Debug;
     type Batch: BatchLike;
     fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error>;
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
-    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error>;
-    fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error>
+    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error>;
+    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>;
@@ -32,7 +32,7 @@ pub trait KeyValueStoreLike {
 
 pub struct State {
     limits: StoreLimits,
-    had_failure: bool
+    had_failure: bool,
 }
 
 pub struct MetashrewRuntimeContext<T: KeyValueStoreLike + Clone> {
@@ -81,7 +81,7 @@ impl State {
                 .tables(usize::MAX)
                 .instances(usize::MAX)
                 .build(),
-            had_failure: false
+            had_failure: false,
         }
     }
 }
@@ -458,7 +458,7 @@ where
                     input_clone.extend(input.clone());
                     let sz: usize = to_usize_or_trap(&mut caller, data_start);
                     if sz == usize::MAX {
-                      caller.data_mut().had_failure = true;
+                        caller.data_mut().had_failure = true;
                     }
                     let _ = mem.write(&mut caller, sz, input_clone.as_slice());
                 },
@@ -584,7 +584,7 @@ where
                     let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
                     let signed = to_signed_or_trap(&mut caller, value.len());
                     if signed == i32::MAX {
-                      caller.data_mut().had_failure = true;
+                        caller.data_mut().had_failure = true;
                     }
                     signed
                 },

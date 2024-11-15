@@ -129,14 +129,14 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
             Err(e) => Err(e),
         }
     }
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         self.0.get_cf(index_cf(self.0), key)
     }
-    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
         let _ = self.0.delete_cf(index_cf(self.0), key);
         Ok(())
     }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
         self.0.put_cf(index_cf(self.0), key, value)
     }
 }

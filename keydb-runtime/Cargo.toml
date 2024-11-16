@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+env_logger = "0.11.5"
 metashrew-runtime = { path = "../runtime" }
 redis = "0.26.1"

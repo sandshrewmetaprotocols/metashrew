@@ -9,6 +9,14 @@ pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>, pu
 
 static mut _LABEL: Option<String> = None;
 
+const TIMEOUT: u64 = 1500;
+
+use std::{thread, time};
+
+pub fn wait_timeout() {
+    thread::sleep(time::Duration::from_millis(TIMEOUT));
+}
+
 pub fn set_label(s: String) -> () {
     unsafe {
         _LABEL = Some(s + "://");
@@ -83,6 +91,8 @@ impl RedisRuntimeAdapter {
         Ok(response.unwrap())
     }
     pub fn reset_connection(&mut self) {
+        println!("KeyDB reset -- wait 1.5s");
+        wait_timeout();
         self.1 = Arc::new(Mutex::new(self.connect().unwrap()));
     }
 }
@@ -128,24 +138,20 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     fn write(&mut self, mut batch: RedisBatch) -> Result<(), Self::Error> {
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
         let height_bytes: Vec<u8> = (self.2 + 1).to_le_bytes().to_vec();
-        let mut connection = self.connect().unwrap();
         /*
         let _ok: bool = connection
             .set(to_redis_args(&key_bytes), to_redis_args(&height_bytes))
             .unwrap();
             */
         batch.put(&key_bytes, &height_bytes);
-        let mut result = Result::<(), Self::Error>::Ok(());
         loop {
-            let _result = batch.0.query(&mut connection);
-            if let Ok(v) = _result {
-                result = Ok(v);
-                break;
-            } else {
-                self.reset_connection();
+            {
+                if let Ok(v) = batch.0.query(&mut self.1.lock().unwrap()) {
+                    return Ok(());
+                }
             }
+            self.reset_connection();
         }
-        result
     }
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         loop {
@@ -160,7 +166,11 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
         loop {
             {
-                if let Ok(_) = self.connect().unwrap().del(to_redis_args(key.as_ref())) {
+                if let Ok(_) = self
+                    .connect()
+                    .unwrap()
+                    .del::<Vec<Vec<u8>>, ()>(to_redis_args(key.as_ref()))
+                {
                     return Ok(());
                 }
             }
@@ -174,7 +184,10 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
                     .1
                     .lock()
                     .unwrap()
-                    .set(to_redis_key(key.as_ref()), to_redis_args(value.as_ref()))
+                    .set::<Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<u8>>(
+                        to_redis_key(key.as_ref()),
+                        to_redis_args(value.as_ref()),
+                    )
                 {
                     return Ok(());
                 }

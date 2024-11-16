@@ -146,8 +146,9 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
         batch.put(&key_bytes, &height_bytes);
         loop {
             {
-                if let Ok(v) = batch.0.query(&mut self.1.lock().unwrap()) {
-                    return Ok(());
+                match batch.0.query::<()>(&mut self.1.lock().unwrap()) {
+                  Ok(_) => { return Ok(()); }
+                  Err(e) => { eprintln!("{:?}", e); }
                 }
             }
             self.reset_connection();
@@ -156,8 +157,9 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         loop {
             {
-                if let Ok(v) = self.1.lock().unwrap().get(to_redis_args(key.as_ref())) {
-                    return Ok(v);
+                match self.1.lock().unwrap().get::<Vec<Vec<u8>>, Option<Vec<u8>>>(to_redis_args(key.as_ref())) {
+                  Ok(v) => { return Ok(v) }
+                  Err(e) => { eprintln!("{:?}", e); }
                 }
             }
             self.reset_connection();
@@ -166,12 +168,12 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
         loop {
             {
-                if let Ok(_) = self
-                    .connect()
+                match self.1.lock()
                     .unwrap()
                     .del::<Vec<Vec<u8>>, ()>(to_redis_args(key.as_ref()))
                 {
-                    return Ok(());
+                    Ok(_) => { return Ok(()); }
+                    Err(e) => { eprintln!("{:?}", e); }
                 }
             }
             self.reset_connection();
@@ -180,16 +182,17 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
         loop {
             {
-                if let Ok(_) = self
+                match self
                     .1
                     .lock()
                     .unwrap()
-                    .set::<Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<u8>>(
+                    .set::<Vec<Vec<u8>>, Vec<Vec<u8>>, ()>(
                         to_redis_key(key.as_ref()),
                         to_redis_args(value.as_ref()),
                     )
                 {
-                    return Ok(());
+                    Ok(v) => { return Ok(()); }
+                    Err(e) => { eprintln!("{:?}", e); }
                 }
             }
             self.reset_connection();

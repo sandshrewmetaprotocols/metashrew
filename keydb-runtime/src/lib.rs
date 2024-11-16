@@ -71,24 +71,18 @@ impl RedisRuntimeAdapter {
         ))
     }
     pub fn connect(&self) -> Result<redis::Connection> {
-        let mut count = 0;
-        let mut response: Option<redis::Connection> = None;
         loop {
             match self.connect_once() {
                 Ok(v) => {
-                    response = Some(v);
-                    break;
+                    return Ok(v);
                 }
                 Err(e) => {
-                    if count > u32::MAX {
-                        return Err(e.into());
-                    } else {
-                        count = count + 1;
-                    }
+                    eprintln!("{:?}", e);
+                    println!("KeyDB reset -- wait 1.5s");
+                    wait_timeout();
                 }
             }
         }
-        Ok(response.unwrap())
     }
     pub fn reset_connection(&mut self) {
         println!("KeyDB reset -- wait 1.5s");

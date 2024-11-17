@@ -2,6 +2,7 @@ use anyhow::Result;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 use redis::Commands;
 use std::sync::{Arc, Mutex};
+use log::{info, debug};
 
 const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 
@@ -77,15 +78,15 @@ impl RedisRuntimeAdapter {
                     return Ok(v);
                 }
                 Err(e) => {
-                    eprintln!("{:?}", e);
-                    println!("KeyDB reset -- wait 1.5s");
+                    debug!("{:?}", e);
+                    debug!("KeyDB reset -- wait 1.5s");
                     wait_timeout();
                 }
             }
         }
     }
     pub fn reset_connection(&mut self) {
-        println!("KeyDB reset -- wait 1.5s");
+        debug!("KeyDB reset -- wait 1.5s");
         wait_timeout();
         self.1 = Arc::new(Mutex::new(self.connect().unwrap()));
     }
@@ -142,7 +143,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
             {
                 match batch.0.query::<()>(&mut self.1.lock().unwrap()) {
                   Ok(_) => { return Ok(()); }
-                  Err(e) => { eprintln!("{:?}", e); }
+                  Err(e) => { debug!("{:?}", e); }
                 }
             }
             self.reset_connection();
@@ -153,7 +154,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
             {
                 match self.1.lock().unwrap().get::<Vec<Vec<u8>>, Option<Vec<u8>>>(to_redis_args(key.as_ref())) {
                   Ok(v) => { return Ok(v) }
-                  Err(e) => { eprintln!("{:?}", e); }
+                  Err(e) => { debug!("{:?}", e); }
                 }
             }
             self.reset_connection();
@@ -167,7 +168,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
                     .del::<Vec<Vec<u8>>, ()>(to_redis_args(key.as_ref()))
                 {
                     Ok(_) => { return Ok(()); }
-                    Err(e) => { eprintln!("{:?}", e); }
+                    Err(e) => { debug!("{:?}", e); }
                 }
             }
             self.reset_connection();
@@ -186,7 +187,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
                     )
                 {
                     Ok(v) => { return Ok(()); }
-                    Err(e) => { eprintln!("{:?}", e); }
+                    Err(e) => { debug!("{:?}", e); }
                 }
             }
             self.reset_connection();

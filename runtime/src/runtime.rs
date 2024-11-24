@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use itertools::Itertools;
 //use rlp;
 use std::collections::HashSet;
-//use hex;
+use hex;
 use protobuf::Message;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -550,9 +550,9 @@ where
                         Ok(key_vec) => {
                             let lookup =
                                 Self::db_value_at_block(context_get.clone(), &key_vec, height);
-                            let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
+                            mem.write(&mut caller, value as usize, lookup.as_slice()).unwrap();
                         }
-                        Err(_) => {
+                        Err(e) => {
                             mem.write(
                                 &mut caller,
                                 (value - 4) as usize,
@@ -573,21 +573,22 @@ where
                 move |mut caller: Caller<'_, State>, key: i32| -> i32 {
                     let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                     let data = mem.data(&caller);
+                    let key_vec_result = try_read_arraybuffer_as_vec(data, key);
                     let height = {
                         let val = context_get_len.clone().lock().unwrap().height;
                         val
                     };
-                    let key_vec = match try_read_arraybuffer_as_vec(data, key) {
-                        Ok(v) => v,
-                        Err(_) => return i32::MAX,
+                    match key_vec_result {
+                        Ok(key_vec) => {
+                            let value =
+                                Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
+                            return value.len() as i32;
+                        }
+                        Err(_) => {
+                            return i32::MAX;
+                        }
                     };
-                    let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
-                    let signed = to_signed_or_trap(&mut caller, value.len());
-                    if signed == i32::MAX {
-                        caller.data_mut().had_failure = true;
-                    }
-                    signed
-                },
+                }
             )
             .unwrap();
     }
@@ -663,7 +664,8 @@ where
                                 Self::db_value_at_block(context_get.clone(), &key_vec, height);
                             let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
                         }
-                        Err(_) => {
+                        Err(e) => {
+
                             mem.write(
                                 &mut caller,
                                 (value - 4) as usize,

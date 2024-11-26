@@ -75,6 +75,7 @@ struct JsonRpcResult {
     id: u32,
     result: String,
     jsonrpc: String,
+    error: String,
 }
 
 struct Context {
@@ -130,25 +131,26 @@ async fn view(
             }
             h
         };
+        let (res_string, err) = match context.runtime.view(
+            body.params[0].clone(),
+            &hex::decode(
+                body.params[1]
+                    .to_string()
+                    .substring(2, body.params[1].len()),
+            )
+            .unwrap(),
+            height,
+        ) {
+            Ok(str) => (str, "".to_string()),
+            Err(err) => {
+                println!("{:#?}", err);
+                (vec![], err.to_string())
+            }
+        };
         let result = JsonRpcResult {
             id: body.id,
-            result: String::from("0x")
-                + hex::encode(
-                    context
-                        .runtime
-                        .view(
-                            body.params[0].clone(),
-                            &hex::decode(
-                                body.params[1]
-                                    .to_string()
-                                    .substring(2, body.params[1].len()),
-                            )
-                            .unwrap(),
-                            height,
-                        )
-                        .unwrap(),
-                )
-                .as_str(),
+            result: String::from("0x") + hex::encode(res_string).as_str(),
+            error: err,
             jsonrpc: "2.0".to_string(),
         };
         return Ok(HttpResponse::Ok().json(result));
@@ -182,7 +184,7 @@ async fn main() -> std::io::Result<()> {
     }
     let redis_uri: String = match env::var("REDIS_URI") {
         Ok(v) => v,
-        Err(_) => "redis://127.0.0.1:6379".into(),
+        Err(_) => "redis://localhost:7777".into(),
     };
 
     HttpServer::new(move || {

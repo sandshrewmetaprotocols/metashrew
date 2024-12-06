@@ -53,14 +53,14 @@ pub struct JsonRpcRequest<T> {
 pub struct JsonRpcResponse {
     pub id: u32,
     pub result: String,
-    pub error: Value,
+    pub error: Option<Value>,
 }
 
 #[derive(Deserialize)]
 pub struct BlockCountResponse {
     pub id: u32,
     pub result: u32,
-    pub error: Value,
+    pub error: Option<Value>,
 }
 
 pub struct MetashrewKeyDBSync {

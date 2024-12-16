@@ -477,7 +477,7 @@ where
                             return;
                         }
                     };
-                    println!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
+                    print!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
                 },
             )
             .unwrap();

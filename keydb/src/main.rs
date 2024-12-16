@@ -207,7 +207,7 @@ impl MetashrewKeyDBSync {
             )?)
             .await?;
         let tip = response.json::<BlockCountResponse>().await?.result;
-        if best >= tip - 6 {
+        if best >= tip - std::cmp::min(6, tip) {
             loop {
                 if best == 0 {
                     break;

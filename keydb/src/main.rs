@@ -52,14 +52,14 @@ pub struct JsonRpcRequest<T> {
 #[derive(Deserialize)]
 pub struct JsonRpcResponse {
     pub id: u32,
-    pub result: String,
+    pub result: Option<String>,
     pub error: Option<Value>,
 }
 
 #[derive(Deserialize)]
 pub struct BlockCountResponse {
     pub id: u32,
-    pub result: u32,
+    pub result: Option<u32>,
     pub error: Option<Value>,
 }
 
@@ -78,9 +78,13 @@ impl MetashrewKeyDBSync {
                     let (username, password) = v.split(":").next_tuple().unwrap();
                     url.set_username(username).unwrap();
                     url.set_password(Some(password)).unwrap();
+                    println!("auth URL: {:?}", url);
                     url
                 }
-                None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
+                None => {
+                  println!("no auth URL: {:?}", Url::parse(self.args.daemon_rpc_url.as_str()).unwrap());
+                  Url::parse(self.args.daemon_rpc_url.as_str()).unwrap()
+                }
             })
             .header("Content-Type", "application/json")
             .body(body)
@@ -161,7 +165,7 @@ impl MetashrewKeyDBSync {
             )?)
             .await?;
 
-        Ok(response.json::<BlockCountResponse>().await?.result)
+        Ok(response.json::<BlockCountResponse>().await?.result.ok_or("").map_err(|_| anyhow!("missing result from JSON-RPC response"))?)
     }
 
     pub async fn poll_connection(&self) -> redis::Connection {
@@ -206,7 +210,7 @@ impl MetashrewKeyDBSync {
                 }),
             )?)
             .await?;
-        let tip = response.json::<BlockCountResponse>().await?.result;
+        let tip = response.json::<BlockCountResponse>().await?.result.ok_or("").map_err(|_| anyhow!("missing result from JSON-RPC response"))?;
         if best >= tip - std::cmp::min(6, tip) {
             loop {
                 if best == 0 {
@@ -276,7 +280,7 @@ impl MetashrewKeyDBSync {
                 }),
             )?)
             .await?;
-        let blockhash = response.json::<JsonRpcResponse>().await?.result;
+        let blockhash = response.json::<JsonRpcResponse>().await?.result.ok_or("").map_err(|_| anyhow!("missing result from JSON-RPC response"))?;
         Ok(hex::decode(&blockhash)?)
     }
     fn put_once(&self, k: &Vec<u8>, v: &Vec<u8>) -> Result<()> {
@@ -341,7 +345,7 @@ impl MetashrewKeyDBSync {
             .await?
             .json::<JsonRpcResponse>()
             .await?
-            .result,
+            .result.ok_or("").map_err(|e| anyhow!("missing result from JSON-RPC response"))?,
         )?)
     }
     async fn run(&mut self) -> Result<()> {

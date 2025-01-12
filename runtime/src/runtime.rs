@@ -186,6 +186,77 @@ where
         });
     }
 
+    pub fn preview(
+        &self,
+        block: &Vec<u8>,
+        symbol: String,
+        input: &Vec<u8>,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        // Create new isolated runtime with cloned context
+        let mut preview_context = MetashrewRuntimeContext::new(
+            self.context.lock().unwrap().db.clone(),
+            height,
+            block.clone(),
+        );
+
+        let mut linker = Linker::<State>::new(&self.engine);
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(preview_context));
+
+        {
+            wasmstore.limiter(|state| &mut state.limits);
+        }
+
+        {
+            Self::setup_linker(context.clone(), &mut linker);
+            Self::setup_linker_indexer(context.clone(), &mut linker);
+            linker.define_unknown_imports_as_traps(&self.module)?;
+        }
+
+        let instance = linker.instantiate(&mut wasmstore, &self.module)?;
+
+        // Execute block via _start
+        let start = instance.get_typed_func::<(), ()>(&mut wasmstore, "_start")?;
+        match start.call(&mut wasmstore, ()) {
+            Ok(_) => {
+                if context.lock().unwrap().state != 1 && !wasmstore.data().had_failure {
+                    return Err(anyhow!("indexer exited unexpectedly during preview"));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Now set up for view call
+        let mut view_linker = Linker::<State>::new(&self.engine);
+        let mut view_store = Store::<State>::new(&self.engine, State::new());
+
+        {
+            view_store.limiter(|state| &mut state.limits);
+        }
+
+        {
+            Self::setup_linker(context.clone(), &mut view_linker);
+            Self::setup_linker_view(context.clone(), &mut view_linker);
+            view_linker.define_unknown_imports_as_traps(&self.module)?;
+        }
+
+        let view_instance = view_linker.instantiate(&mut view_store, &self.module)?;
+
+        // Execute view in same isolated context
+        context.lock().unwrap().block = input.clone();
+
+        let func = view_instance.get_typed_func::<(), i32>(&mut view_store, symbol.as_str())?;
+        let result = func.call(&mut view_store, ())?;
+
+        Ok(read_arraybuffer_as_vec(
+            view_instance
+                .get_memory(&mut view_store, "memory")
+                .unwrap()
+                .data(&mut view_store),
+            result,
+        ))
+    }
     pub fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
         let mut linker = Linker::<State>::new(&self.engine);
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());

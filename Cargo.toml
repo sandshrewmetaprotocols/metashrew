@@ -1,10 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-  "index",
-  "view",
   "runtime",
-  "sync",
-  "keydb"
-, "keydb-runtime",
-  "keydb-view"]
+  "keydb",
+  "keydb-runtime",
+  "keydb-view", "mempool"]

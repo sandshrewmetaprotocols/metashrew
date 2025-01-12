@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
 //use rlp;
-use std::collections::HashSet;
 use hex;
 use protobuf::Message;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
@@ -550,7 +550,8 @@ where
                         Ok(key_vec) => {
                             let lookup =
                                 Self::db_value_at_block(context_get.clone(), &key_vec, height);
-                            mem.write(&mut caller, value as usize, lookup.as_slice()).unwrap();
+                            mem.write(&mut caller, value as usize, lookup.as_slice())
+                                .unwrap();
                         }
                         Err(e) => {
                             mem.write(
@@ -588,7 +589,7 @@ where
                             return i32::MAX;
                         }
                     };
-                }
+                },
             )
             .unwrap();
     }
@@ -665,7 +666,6 @@ where
                             let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
                         }
                         Err(e) => {
-
                             mem.write(
                                 &mut caller,
                                 (value - 4) as usize,

@@ -1,7 +1,0 @@
-[package]
-name = "sync"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-bitcoin = "0.32.0"

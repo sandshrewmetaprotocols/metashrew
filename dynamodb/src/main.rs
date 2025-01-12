@@ -1,14 +1,15 @@
 use anyhow::{anyhow, Result};
+use aws_config::meta::region::RegionProviderChain;
+use aws_sdk_dynamodb::{Client, Region};
+use aws_sdk_dynamodb::model::{AttributeValue, PutRequest, WriteRequest};
 use clap::{command, Parser};
 use env_logger;
 use hex;
 use itertools::Itertools;
 use log::debug;
-use metashrew_keydb_runtime::{query_height, set_label, RedisRuntimeAdapter};
+use metashrew_dynamodb_runtime::{query_height, set_label, DynamoDBRuntimeAdapter}; 
 use metashrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::MetashrewRuntime;
-use redis;
-use redis::Commands;
 use reqwest::{Response, Url};
 use retry::{delay::Fixed, retry, OperationResult};
 use serde::{Deserialize, Serialize};

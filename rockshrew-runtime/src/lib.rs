@@ -1,11 +1,12 @@
 use anyhow::Result;
 use log::{debug, info};
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
-use rocksdb::{DB, Options, WriteBatch};
+use rocksdb::{DB, Options, WriteBatch, WriteBatchIterator};
 use std::sync::{Arc, Mutex};
 
 const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 
+#[derive(Clone)]
 pub struct RocksDBRuntimeAdapter {
     pub db: Arc<DB>,
     pub height: u32,
@@ -46,7 +47,7 @@ pub fn to_labeled_key(key: &Vec<u8>) -> Vec<u8> {
     }
 }
 
-pub async fn query_height(db: &DB, start_block: u32) -> Result<u32> {
+pub async fn query_height(db: Arc<DB>, start_block: u32) -> Result<u32> {
     let height_key = TIP_HEIGHT_KEY.as_bytes().to_vec();
     let bytes = match db.get(&to_labeled_key(&height_key))? {
         Some(v) => v,
@@ -98,6 +99,17 @@ impl BatchLike for RocksDBBatch {
     }
 }
 
+pub struct RocksDBBatchCloner<'a>(&'a mut WriteBatch);
+
+impl<'a> WriteBatchIterator for RocksDBBatchCloner<'a> {
+  fn put(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
+    self.0.put(key.as_ref().clone(), value.as_ref().clone());
+  }
+  fn delete(&mut self, key: Box<[u8]>) {
+    //no-op
+  }
+}
+
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
@@ -108,9 +120,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         
         let mut final_batch = WriteBatch::default();
         final_batch.put(&to_labeled_key(&key_bytes), &height_bytes);
-        for (k, v) in batch.0.iter() {
-            final_batch.put(k, v);
-        }
+        batch.0.iterate(&mut RocksDBBatchCloner(&mut final_batch));
         
         self.db.write(final_batch)
     }

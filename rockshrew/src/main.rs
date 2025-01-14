@@ -15,9 +15,9 @@ use serde_json;
 use serde_json::{Number, Value};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
-use task;
 use tokio;
 use tokio::time::{sleep, Duration};
+use std::sync::{Arc};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -141,25 +141,12 @@ impl MetashrewRocksDBSync {
             .map_err(|_| anyhow!("missing result from JSON-RPC response"))?)
     }
 
-    pub async fn poll_connection(&self) -> rocksdb::DB {
-        loop {
-            let connected: Option<rocksdb::DB> = match self.runtime.context.lock().unwrap().db.is_open() {
-                false => {
-                    debug!("RocksDB connection failure -- retrying in 3s ...");
-                    sleep(Duration::from_millis(3000)).await;
-                    None
-                }
-                true => Some(self.runtime.context.lock().unwrap().db.clone()),
-            };
-
-            if let Some(v) = connected {
-                return v;
-            }
-        }
+    pub async fn poll_connection<'a>(&'a self) -> Arc<rocksdb::DB> {
+        self.runtime.context.lock().unwrap().db.db.clone()
     }
 
     pub async fn query_height(&self) -> Result<u32> {
-        query_height(&self.poll_connection().await, self.start_block).await
+        query_height(self.poll_connection().await, self.start_block).await
     }
 
     async fn best_height(&self, block_number: u32) -> Result<u32> {

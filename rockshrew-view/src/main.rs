@@ -101,7 +101,7 @@ pub fn set_height(h: u32) -> u32 {
 }
 
 pub async fn fetch_and_set_height(internal_db: &RocksDBRuntimeAdapter) -> Result<u32> {
-    let height = query_height(&internal_db.db, 0)
+    let height = query_height(internal_db.db.clone(), 0)
         .await
         .map_err(|e| from_anyhow(e))?;
     Ok(set_height(height))

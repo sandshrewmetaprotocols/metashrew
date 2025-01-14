@@ -7,4 +7,7 @@ members = [
   "sync",
   "keydb"
 , "keydb-runtime",
-  "keydb-view"]
+  "keydb-view",
+  "dynamodb",
+  "dynamodb-view",
+  "dynamodb-runtime"]

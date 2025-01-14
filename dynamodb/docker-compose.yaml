@@ -1,0 +1,25 @@
+version: "3.3"
+services:
+  keydb:
+    ports:
+      - "6379:6379"
+    image: eqalpha/keydb
+    restart: always
+    command:
+      [
+        "keydb-server",
+        "/etc/keydb/keydb.conf",
+        "--storage-provider",
+        "flash",
+        "/data/flash",
+        "--appendonly",
+        "yes",
+        "--maxmemory-policy",
+        "allkeys-lru",
+        "--unixsocket",
+        "/data/keydb.sock",
+        "--unixsocketperm",
+        "777",
+      ]
+    volumes:
+      - ${KEYDB_DATA:-./keydb}:/data

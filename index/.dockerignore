@@ -1,9 +1,0 @@
-.*
-_*
-db*
-dist
-Dockerfile
-examples
-scripts
-target
-tests

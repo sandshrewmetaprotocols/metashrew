@@ -1,5 +1,9 @@
 [package]
+<<<<<<< HEAD
 name = "metashrew-dynamodb"
+=======
+name = "metashrew-keydb"
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36
 version = "8.0.5"
 edition = "2021"
 
@@ -8,10 +12,18 @@ anyhow = "1.0.86"
 clap = { version = "4.5.13", features = ["derive"] }
 hex = "0.4.3"
 http = "1.1.0"
+<<<<<<< HEAD
 reqwest = { version = "0.12.5", features = ["json"] }
 serde = { version = "1.0.205", features = ["derive"] }
 serde_json = "1.0.122"
 metashrew-dynamodb-runtime = { path = "../dynamodb-runtime" }
+=======
+redis = "0.26.1"
+reqwest = { version = "0.12.5", features = ["json"] }
+serde = { version = "1.0.205", features = ["derive"] }
+serde_json = "1.0.122"
+metashrew-keydb-runtime = { path = "../keydb-runtime" }
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36
 metashrew-runtime = { path = "../runtime" }
 tokio = { version = "1.39.2", features = ["full"] }
 tokio-macros = "2.4.0"
@@ -22,5 +34,8 @@ itertools = "0.13.0"
 futures-util = "0.3.30"
 retry = "2.0.0"
 task = "0.0.1"
+<<<<<<< HEAD
 aws-sdk-dynamodb = "1.59.0"
 aws-config = "1.5.13"
+=======
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36

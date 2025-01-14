@@ -1,4 +1,5 @@
 use actix_cors::Cors;
+<<<<<<< HEAD
 use actix_cors::Cors;
 use actix_web::error;
 use actix_web::http::{header::ContentType, StatusCode};
@@ -193,6 +194,11 @@ async fn main() -> std::io::Result<()> {
     let config = aws_config::from_env().region(region
 use actix_web::http::{header::ContentType, StatusCode};
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
+=======
+use actix_web::error;
+use actix_web::http::{header::ContentType, StatusCode};
+use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36
 //use itertools::Itertools;
 use metashrew_keydb_runtime::{query_height, set_label, RedisRuntimeAdapter};
 use metashrew_runtime::MetashrewRuntime;
@@ -266,6 +272,10 @@ struct JsonRpcResult {
     id: u32,
     result: String,
     jsonrpc: String,
+<<<<<<< HEAD
+=======
+    error: String,
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36
 }
 
 struct Context {
@@ -321,6 +331,7 @@ async fn view(
             }
             h
         };
+<<<<<<< HEAD
         let result = JsonRpcResult {
             id: body.id,
             result: String::from("0x")
@@ -340,6 +351,28 @@ async fn view(
                         .unwrap(),
                 )
                 .as_str(),
+=======
+        let (res_string, err) = match context.runtime.view(
+            body.params[0].clone(),
+            &hex::decode(
+                body.params[1]
+                    .to_string()
+                    .substring(2, body.params[1].len()),
+            )
+            .unwrap(),
+            height,
+        ) {
+            Ok(str) => (str, "".to_string()),
+            Err(err) => {
+                println!("{:#?}", err);
+                (vec![], err.to_string())
+            }
+        };
+        let result = JsonRpcResult {
+            id: body.id,
+            result: String::from("0x") + hex::encode(res_string).as_str(),
+            error: err,
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36
             jsonrpc: "2.0".to_string(),
         };
         return Ok(HttpResponse::Ok().json(result));
@@ -373,7 +406,11 @@ async fn main() -> std::io::Result<()> {
     }
     let redis_uri: String = match env::var("REDIS_URI") {
         Ok(v) => v,
+<<<<<<< HEAD
         Err(_) => "redis://127.0.0.1:6379".into(),
+=======
+        Err(_) => "redis://localhost:7777".into(),
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36
     };
 
     HttpServer::new(move || {

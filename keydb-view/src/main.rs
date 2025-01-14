@@ -75,6 +75,7 @@ struct JsonRpcResult {
     id: u32,
     result: String,
     jsonrpc: String,
+    error: String,
 }
 
 struct Context {
@@ -106,21 +107,14 @@ pub async fn fetch_and_set_height(internal_db: &RedisRuntimeAdapter) -> Result<u
 }
 
 #[post("/")]
-async fn view(
+async fn jsonrpc_call(
     body: web::Json<JsonRpcRequest>,
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
     {
         debug!("{}", serde_json::to_string(&body).unwrap());
     }
-    if body.method != "metashrew_view" {
-        let resp = JsonRpcError {
-            id: body.id,
-            error: "Unsupported method".to_string(),
-            jsonrpc: "2.0".to_string(),
-        };
-        return Ok(HttpResponse::Ok().json(resp));
-    } else {
+    if body.method == "metashrew_view" {
         let height: u32 = if body.params[2] == "latest" {
             fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
         } else {
@@ -130,25 +124,86 @@ async fn view(
             }
             h
         };
+        let (res_string, err) = match context.runtime.view(
+            body.params[0].clone(),
+            &hex::decode(
+                body.params[1]
+                    .to_string()
+                    .substring(2, body.params[1].len()),
+            )
+            .unwrap(),
+            height,
+        ) {
+            Ok(str) => (str, "".to_string()),
+            Err(err) => {
+                println!("{:#?}", err);
+                (vec![], err.to_string())
+            }
+        };
         let result = JsonRpcResult {
             id: body.id,
-            result: String::from("0x")
-                + hex::encode(
-                    context
-                        .runtime
-                        .view(
-                            body.params[0].clone(),
-                            &hex::decode(
-                                body.params[1]
-                                    .to_string()
-                                    .substring(2, body.params[1].len()),
-                            )
-                            .unwrap(),
-                            height,
-                        )
-                        .unwrap(),
-                )
-                .as_str(),
+            result: String::from("0x") + hex::encode(res_string).as_str(),
+            error: err,
+            jsonrpc: "2.0".to_string(),
+        };
+        return Ok(HttpResponse::Ok().json(result));
+    } else if body.method == "metashrew_height" {
+        let height = fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+        let result = JsonRpcResult {
+            id: body.id,
+            result: height.to_string(),
+            error: "".to_string(),
+            jsonrpc: "2.0".to_string(),
+        };
+        return Ok(HttpResponse::Ok().json(result));
+    } else if body.method == "metashrew_preview" {
+        let height: u32 = if body.params[3] == "latest" {
+            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+        } else {
+            let h = body.params[3].parse::<u32>().unwrap();
+            if h > height() {
+                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+            }
+            h
+        };
+
+        let block_hex = body.params[0].clone();
+        // Remove 0x prefix if present and decode hex
+        let block_data =
+            hex::decode(block_hex.trim_start_matches("0x")).map_err(|e| from_anyhow(e.into()))?;
+
+        // Use preview to execute block and view
+        let (res_string, err) = match context.runtime.preview(
+            &block_data,
+            body.params[1].clone(),
+            &hex::decode(
+                body.params[2]
+                    .to_string()
+                    .substring(2, body.params[2].len()),
+            )
+            .unwrap(),
+            height,
+        ) {
+            Ok(str) => (str, "".to_string()),
+            Err(err) => {
+                println!("{:#?}", err);
+                (vec![], err.to_string())
+            }
+        };
+
+        let result = JsonRpcResult {
+            id: body.id,
+            result: String::from("0x") + hex::encode(res_string).as_str(),
+            error: err,
+            jsonrpc: "2.0".to_string(),
+        };
+
+        return Ok(HttpResponse::Ok().json(result));
+    } else {
+        let result = JsonRpcResult {
+            id: body.id,
+            result: "".to_owned(),
+            error: format!("RPC method {} not found", body.method),
             jsonrpc: "2.0".to_string(),
         };
         return Ok(HttpResponse::Ok().json(result));
@@ -182,7 +237,7 @@ async fn main() -> std::io::Result<()> {
     }
     let redis_uri: String = match env::var("REDIS_URI") {
         Ok(v) => v,
-        Err(_) => "redis://127.0.0.1:6379".into(),
+        Err(_) => "redis://localhost:7777".into(),
     };
 
     HttpServer::new(move || {
@@ -212,7 +267,7 @@ async fn main() -> std::io::Result<()> {
                 )
                 .unwrap(),
             }))
-            .service(view)
+            .service(jsonrpc_call)
     })
     .bind((
         match env::var("HOST") {

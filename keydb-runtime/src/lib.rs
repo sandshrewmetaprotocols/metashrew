@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::{debug, info};
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 use redis::Commands;
 use std::sync::{Arc, Mutex};
@@ -8,6 +9,14 @@ const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 pub struct RedisRuntimeAdapter(pub String, pub Arc<Mutex<redis::Connection>>, pub u32);
 
 static mut _LABEL: Option<String> = None;
+
+const TIMEOUT: u64 = 1500;
+
+use std::{thread, time};
+
+pub fn wait_timeout() {
+    thread::sleep(time::Duration::from_millis(TIMEOUT));
+}
 
 pub fn set_label(s: String) -> () {
     unsafe {
@@ -63,26 +72,22 @@ impl RedisRuntimeAdapter {
         ))
     }
     pub fn connect(&self) -> Result<redis::Connection> {
-        let mut count = 0;
-        let mut response: Option<redis::Connection> = None;
         loop {
             match self.connect_once() {
                 Ok(v) => {
-                    response = Some(v);
-                    break;
+                    return Ok(v);
                 }
                 Err(e) => {
-                    if count > 10 {
-                        return Err(e.into());
-                    } else {
-                        count = count + 1;
-                    }
+                    debug!("{:?}", e);
+                    debug!("KeyDB reset -- wait 1.5s");
+                    wait_timeout();
                 }
             }
         }
-        Ok(response.unwrap())
     }
     pub fn reset_connection(&mut self) {
+        debug!("KeyDB reset -- wait 1.5s");
+        wait_timeout();
         self.1 = Arc::new(Mutex::new(self.connect().unwrap()));
     }
 }
@@ -128,27 +133,84 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
     fn write(&mut self, mut batch: RedisBatch) -> Result<(), Self::Error> {
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
         let height_bytes: Vec<u8> = (self.2 + 1).to_le_bytes().to_vec();
-        let mut connection = self.connect().unwrap();
         /*
         let _ok: bool = connection
             .set(to_redis_args(&key_bytes), to_redis_args(&height_bytes))
             .unwrap();
             */
         batch.put(&key_bytes, &height_bytes);
-        let result = batch.0.query(&mut connection);
-        self.reset_connection();
-        result
+        loop {
+            {
+                match batch.0.query::<()>(&mut self.1.lock().unwrap()) {
+                    Ok(_) => {
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        debug!("{:?}", e);
+                    }
+                }
+            }
+            self.reset_connection();
+        }
     }
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.1.lock().unwrap().get(to_redis_args(key))
+    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+        loop {
+            {
+                match self
+                    .1
+                    .lock()
+                    .unwrap()
+                    .get::<Vec<Vec<u8>>, Option<Vec<u8>>>(to_redis_args(key.as_ref()))
+                {
+                    Ok(v) => return Ok(v),
+                    Err(e) => {
+                        debug!("{:?}", e);
+                    }
+                }
+            }
+            self.reset_connection();
+        }
     }
-    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error> {
-        self.connect().unwrap().del(to_redis_args(key))
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
+        loop {
+            {
+                match self
+                    .1
+                    .lock()
+                    .unwrap()
+                    .del::<Vec<Vec<u8>>, ()>(to_redis_args(key.as_ref()))
+                {
+                    Ok(_) => {
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        debug!("{:?}", e);
+                    }
+                }
+            }
+            self.reset_connection();
+        }
     }
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&self, key: K, value: V) -> Result<(), Self::Error> {
-        self.1
-            .lock()
-            .unwrap()
-            .set(to_redis_key(key), to_redis_args(value))
+    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
+        loop {
+            {
+                match self
+                    .1
+                    .lock()
+                    .unwrap()
+                    .set::<Vec<Vec<u8>>, Vec<Vec<u8>>, ()>(
+                        to_redis_key(key.as_ref()),
+                        to_redis_args(value.as_ref()),
+                    ) {
+                    Ok(v) => {
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        debug!("{:?}", e);
+                    }
+                }
+            }
+            self.reset_connection();
+        }
     }
 }

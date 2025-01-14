@@ -1,9 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-  "index",
-  "view",
   "runtime",
+<<<<<<< HEAD
   "sync",
   "keydb"
 , "keydb-runtime",
@@ -11,3 +10,8 @@ members = [
   "dynamodb",
   "dynamodb-view",
   "dynamodb-runtime"]
+=======
+  "keydb",
+  "keydb-runtime",
+  "keydb-view", "mempool"]
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36

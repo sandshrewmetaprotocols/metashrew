@@ -1,9 +1,9 @@
 use anyhow::{anyhow, Result};
 use itertools::Itertools;
 //use rlp;
-use std::collections::HashSet;
-//use hex;
+use hex;
 use protobuf::Message;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
@@ -19,9 +19,9 @@ pub trait KeyValueStoreLike {
     type Error: std::fmt::Debug;
     type Batch: BatchLike;
     fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error>;
-    fn get<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
-    fn delete<K: AsRef<[u8]>>(&self, key: K) -> Result<(), Self::Error>;
-    fn put<K, V>(&self, key: K, value: V) -> Result<(), Self::Error>
+    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error>;
+    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>;
@@ -32,6 +32,7 @@ pub trait KeyValueStoreLike {
 
 pub struct State {
     limits: StoreLimits,
+    had_failure: bool,
 }
 
 pub struct MetashrewRuntimeContext<T: KeyValueStoreLike + Clone> {
@@ -80,6 +81,7 @@ impl State {
                 .tables(usize::MAX)
                 .instances(usize::MAX)
                 .build(),
+            had_failure: false,
         }
     }
 }
@@ -135,26 +137,15 @@ pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v:
     return match <T as TryInto<i32>>::try_into(v) {
         Ok(v) => v,
         Err(_) => {
-            trap_abort(caller);
             return i32::MAX;
         }
     };
-}
-
-pub fn trap_abort<'a>(caller: &mut Caller<'_, State>) {
-    let _ = caller
-        .get_export("trap")
-        .unwrap()
-        .into_func()
-        .unwrap()
-        .call(caller, &mut [], &mut []);
 }
 
 pub fn to_usize_or_trap<'a, T: TryInto<usize>>(caller: &mut Caller<'_, State>, v: T) -> usize {
     return match <T as TryInto<usize>>::try_into(v) {
         Ok(v) => v,
         Err(_) => {
-            trap_abort(caller);
             return usize::MAX;
         }
     };
@@ -195,6 +186,77 @@ where
         });
     }
 
+    pub fn preview(
+        &self,
+        block: &Vec<u8>,
+        symbol: String,
+        input: &Vec<u8>,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        // Create new isolated runtime with cloned context
+        let mut preview_context = MetashrewRuntimeContext::new(
+            self.context.lock().unwrap().db.clone(),
+            height,
+            block.clone(),
+        );
+
+        let mut linker = Linker::<State>::new(&self.engine);
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(preview_context));
+
+        {
+            wasmstore.limiter(|state| &mut state.limits);
+        }
+
+        {
+            Self::setup_linker(context.clone(), &mut linker);
+            Self::setup_linker_indexer(context.clone(), &mut linker);
+            linker.define_unknown_imports_as_traps(&self.module)?;
+        }
+
+        let instance = linker.instantiate(&mut wasmstore, &self.module)?;
+
+        // Execute block via _start
+        let start = instance.get_typed_func::<(), ()>(&mut wasmstore, "_start")?;
+        match start.call(&mut wasmstore, ()) {
+            Ok(_) => {
+                if context.lock().unwrap().state != 1 && !wasmstore.data().had_failure {
+                    return Err(anyhow!("indexer exited unexpectedly during preview"));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+
+        // Now set up for view call
+        let mut view_linker = Linker::<State>::new(&self.engine);
+        let mut view_store = Store::<State>::new(&self.engine, State::new());
+
+        {
+            view_store.limiter(|state| &mut state.limits);
+        }
+
+        {
+            Self::setup_linker(context.clone(), &mut view_linker);
+            Self::setup_linker_view(context.clone(), &mut view_linker);
+            view_linker.define_unknown_imports_as_traps(&self.module)?;
+        }
+
+        let view_instance = view_linker.instantiate(&mut view_store, &self.module)?;
+
+        // Execute view in same isolated context
+        context.lock().unwrap().block = input.clone();
+
+        let func = view_instance.get_typed_func::<(), i32>(&mut view_store, symbol.as_str())?;
+        let result = func.call(&mut view_store, ())?;
+
+        Ok(read_arraybuffer_as_vec(
+            view_instance
+                .get_memory(&mut view_store, "memory")
+                .unwrap()
+                .data(&mut view_store),
+            result,
+        ))
+    }
     pub fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
         let mut linker = Linker::<State>::new(&self.engine);
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
@@ -256,7 +318,7 @@ where
         self.handle_reorg();
         match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
-                if self.context.lock().unwrap().state != 1 {
+                if self.context.lock().unwrap().state != 1 && !self.wasmstore.data().had_failure {
                     return Err(anyhow!("indexer exited unexpectedly"));
                 }
                 return Ok(());
@@ -466,6 +528,9 @@ where
                         <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
                     input_clone.extend(input.clone());
                     let sz: usize = to_usize_or_trap(&mut caller, data_start);
+                    if sz == usize::MAX {
+                        caller.data_mut().had_failure = true;
+                    }
                     let _ = mem.write(&mut caller, sz, input_clone.as_slice());
                 },
             )
@@ -480,11 +545,10 @@ where
                     let bytes = match try_read_arraybuffer_as_vec(data, data_start) {
                         Ok(v) => v,
                         Err(_) => {
-                            trap_abort(&mut caller);
                             return;
                         }
                     };
-                    println!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
+                    print!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
                 },
             )
             .unwrap();
@@ -493,7 +557,7 @@ where
                 "env",
                 "abort",
                 |mut caller: Caller<'_, State>, _: i32, _: i32, _: i32, _: i32| {
-                    trap_abort(&mut caller);
+                    caller.data_mut().had_failure = true;
                     return;
                 },
             )
@@ -557,9 +621,10 @@ where
                         Ok(key_vec) => {
                             let lookup =
                                 Self::db_value_at_block(context_get.clone(), &key_vec, height);
-                            let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
+                            mem.write(&mut caller, value as usize, lookup.as_slice())
+                                .unwrap();
                         }
-                        Err(_) => {
+                        Err(e) => {
                             mem.write(
                                 &mut caller,
                                 (value - 4) as usize,
@@ -580,16 +645,21 @@ where
                 move |mut caller: Caller<'_, State>, key: i32| -> i32 {
                     let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
                     let data = mem.data(&caller);
+                    let key_vec_result = try_read_arraybuffer_as_vec(data, key);
                     let height = {
                         let val = context_get_len.clone().lock().unwrap().height;
                         val
                     };
-                    let key_vec = match try_read_arraybuffer_as_vec(data, key) {
-                        Ok(v) => v,
-                        Err(_) => return i32::MAX,
+                    match key_vec_result {
+                        Ok(key_vec) => {
+                            let value =
+                                Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
+                            return value.len() as i32;
+                        }
+                        Err(_) => {
+                            return i32::MAX;
+                        }
                     };
-                    let value = Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
-                    return to_signed_or_trap(&mut caller, value.len());
                 },
             )
             .unwrap();
@@ -615,7 +685,6 @@ where
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                         Ok(v) => v,
                         Err(_) => {
-                            trap_abort(&mut caller);
                             return;
                         }
                     };
@@ -667,7 +736,7 @@ where
                                 Self::db_value_at_block(context_get.clone(), &key_vec, height);
                             let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
                         }
-                        Err(_) => {
+                        Err(e) => {
                             mem.write(
                                 &mut caller,
                                 (value - 4) as usize,

@@ -1,5 +1,9 @@
 [package]
+<<<<<<< HEAD
 name = "metashrew-dynamodb-runtime"
+=======
+name = "metashrew-keydb-runtime"
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36
 version = "8.0.5"
 edition = "2021"
 
@@ -7,8 +11,15 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
+<<<<<<< HEAD
 aws-config = "1.5.13"
 aws-sdk-dynamodb = "1.59.0"
 metashrew-runtime = { path = "../runtime" }
 redis = "0.26.1"
 tokio = { version = "1.43.0", features = ["rt-multi-thread"] }
+=======
+env_logger = "0.11.5"
+log = "0.4.22"
+metashrew-runtime = { path = "../runtime" }
+redis = "0.26.1"
+>>>>>>> 613a98aaf3250424ab6b8d8a9ff7b0b7f20f6e36

@@ -4,4 +4,9 @@ members = [
   "runtime",
   "keydb",
   "keydb-runtime",
-  "keydb-view", "mempool"]
+  "keydb-view",
+  "mempool",
+  "rockshrew",
+  "rockshrew-runtime",
+  "rockshrew-view"
+]

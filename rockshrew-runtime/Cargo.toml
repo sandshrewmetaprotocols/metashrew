@@ -1,0 +1,15 @@
+[package]
+name = "metashrew-rockshrew-runtime"
+version = "8.0.5"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.86"
+env_logger = "0.11.5"
+log = "0.4.22"
+metashrew-runtime = { path = "../runtime" }
+rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
+zstd = "0.13.0"
+snap = "1.1.0"
+serde = { version = "1.0.205", features = ["derive"] }
+serde_json = "1.0.122"

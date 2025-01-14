@@ -16,3 +16,12 @@ tests/bin
 *.json
 *.swp
 *.swo
+
+# RocksDB files
+rocksdb_data/
+*.sst
+LOCK
+MANIFEST-*
+CURRENT
+LOG*
+OPTIONS-*

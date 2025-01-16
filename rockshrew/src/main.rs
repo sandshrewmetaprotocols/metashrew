@@ -34,6 +34,8 @@ struct Args {
     auth: Option<String>,
     #[arg(long)]
     label: Option<String>,
+    #[arg(long)]
+    exit_at: Option<u32>,
 }
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
@@ -322,6 +324,14 @@ impl MetashrewRocksDBSync {
     async fn run(&mut self) -> Result<()> {
         let mut i: u32 = self.query_height().await?;
         loop {
+            // Check if we should exit before processing the next block
+            if let Some(exit_at) = self.args.exit_at {
+                if i >= exit_at {
+                    println!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    return Ok(());
+                }
+            }
+
             let best: u32 = match self.best_height(i).await {
                 Ok(v) => v,
                 Err(_) => i,

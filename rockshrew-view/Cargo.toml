@@ -24,3 +24,5 @@ actix-cors = "0.7.0"
 zstd = "0.13.0"
 snap = "1.1.0"
 clap = { version = "4.5.26", features = ["unstable-doc"] }
+lazy_static = "1.5.0"
+tokio = "1.43.0"

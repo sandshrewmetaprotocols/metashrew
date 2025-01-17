@@ -1722,9 +1722,9 @@ checksum = "d4345964bb142484797b161f473a503a434de77149dd8c7427788c6e13379388"
 
 [[package]]
 name = "lazy_static"
-version = "1.4.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lazycell"
@@ -1751,7 +1751,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc2f4eb4bc735547cfed7c0a4922cbd04a4655978c09b54f1f7b228750664c34"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -2615,6 +2615,7 @@ dependencies = [
  "env_logger",
  "hex",
  "itertools 0.12.1",
+ "lazy_static",
  "log",
  "metashrew-rockshrew-runtime",
  "metashrew-runtime",
@@ -2625,6 +2626,7 @@ dependencies = [
  "snap",
  "substring",
  "tiny-keccak",
+ "tokio",
  "wasmtime 18.0.4",
  "zstd 0.13.1",
 ]

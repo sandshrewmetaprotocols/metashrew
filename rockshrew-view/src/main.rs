@@ -2,22 +2,65 @@ use actix_cors::Cors;
 use actix_web::error;
 use actix_web::http::{header::ContentType, StatusCode};
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
+use anyhow;
+use clap::{CommandFactory, Parser};
+use lazy_static::lazy_static;
+use log::{debug, info};
 use metashrew_rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use metashrew_runtime::MetashrewRuntime;
-use std::fmt;
-use anyhow;
-use clap::{Parser, CommandFactory};
-use log::{debug, info};
+use rocksdb::Options;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::env;
+use std::fmt;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
-use rocksdb::Options;
+use tokio::sync::RwLock;
+
+lazy_static! {
+    static ref CATCH_UP_LOCK: RwLock<()> = RwLock::new(());
+    static ref LAST_CATCH_UP: AtomicU64 = AtomicU64::new(0);
+}
+
+async fn synchronized_catch_up(db: &rocksdb::DB) -> Result<(), rocksdb::Error> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    // First try with read lock - if catch-up was recent, skip
+    {
+        let _read_guard = CATCH_UP_LOCK.read().await;
+        let last_catch_up = LAST_CATCH_UP.load(Ordering::Acquire);
+        if now - last_catch_up < 1 {
+            // Skip if less than 1 second since last catch-up
+            return Ok(());
+        }
+    }
+
+    // Need to catch up - acquire write lock
+    let _write_guard = CATCH_UP_LOCK.write().await;
+
+    // Check again in case another thread did catch-up while we were waiting
+    let last_catch_up = LAST_CATCH_UP.load(Ordering::Acquire);
+    if now - last_catch_up < 1 {
+        return Ok(());
+    }
+
+    // Do the actual catch-up
+    let result = db.try_catch_up_with_primary();
+
+    if result.is_ok() {
+        LAST_CATCH_UP.store(now, Ordering::Release);
+    }
+
+    result
+}
 
 /// RocksDB-backed view server for metashrew
 #[derive(Parser, Debug, Default)]
@@ -26,34 +69,30 @@ struct RockshrewViewArgs {
     /// Path to the indexer WASM program
     #[arg(long, env = "PROGRAM_PATH", default_value = "/mnt/volume/indexer.wasm")]
     indexer: PathBuf,
-    
+
     /// Optional RocksDB label for the database
     #[arg(long, env = "ROCKS_LABEL")]
     label: Option<String>,
-    
+
     /// Path to the primary RocksDB database directory
     #[arg(long, env = "ROCKS_DB_PATH", default_value = "rocksdb_data")]
     db_path: String,
-    
+
     /// Path for secondary instance files (required for secondary mode)
     #[arg(long, env = "SECONDARY_PATH", default_value = "rocksdb_secondary")]
     secondary_path: String,
-    
+
     /// Host address to bind the server to
     #[arg(long, env = "HOST", default_value = "127.0.0.1")]
     host: String,
-    
+
     /// Port number to listen on
     #[arg(long, env = "PORT", default_value_t = 8080)]
     port: u16,
 }
 
 fn from_anyhow(err: anyhow::Error) -> actix_web::Error {
-    error::InternalError::new(
-        err.to_string(),
-        StatusCode::INTERNAL_SERVER_ERROR,
-    )
-    .into()
+    error::InternalError::new(err.to_string(), StatusCode::INTERNAL_SERVER_ERROR).into()
 }
 
 #[derive(Deserialize, Serialize)]
@@ -120,8 +159,13 @@ async fn jsonrpc_call(
 ) -> Result<impl Responder> {
     debug!("{}", serde_json::to_string(&body).unwrap());
 
+    // Ensure we're caught up with primary before processing request
+    if let Err(e) = synchronized_catch_up(&context.runtime.context.lock().unwrap().db.db).await {
+        log::warn!("Failed to catch up with primary before request: {}", e);
+        // Continue processing despite catch-up failure
+    }
+
     if body.method == "metashrew_view" {
-        // Ensure we have required params
         if body.params.len() < 3 {
             let error = JsonRpcError {
                 id: body.id,
@@ -179,29 +223,28 @@ async fn jsonrpc_call(
                     h
                 }
             }
-            serde_json::Value::String(s) => {
-                match s.parse::<u32>() {
-                    Ok(h) => {
-                        if h > height() {
-                            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
-                        } else {
-                            h
-                        }
-                    }
-                    Err(_) => {
-                        let error = JsonRpcError {
-                            id: body.id,
-                            error: JsonRpcErrorObject {
-                                code: -32602,
-                                message: "Invalid params: height must be a number or 'latest'".to_string(),
-                                data: None,
-                            },
-                            jsonrpc: "2.0".to_string(),
-                        };
-                        return Ok(HttpResponse::Ok().json(error));
+            serde_json::Value::String(s) => match s.parse::<u32>() {
+                Ok(h) => {
+                    if h > height() {
+                        fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                    } else {
+                        h
                     }
                 }
-            }
+                Err(_) => {
+                    let error = JsonRpcError {
+                        id: body.id,
+                        error: JsonRpcErrorObject {
+                            code: -32602,
+                            message: "Invalid params: height must be a number or 'latest'"
+                                .to_string(),
+                            data: None,
+                        },
+                        jsonrpc: "2.0".to_string(),
+                    };
+                    return Ok(HttpResponse::Ok().json(error));
+                }
+            },
             _ => {
                 let error = JsonRpcError {
                     id: body.id,
@@ -218,11 +261,8 @@ async fn jsonrpc_call(
 
         match context.runtime.view(
             view_name,
-            &hex::decode(
-                input_hex.trim_start_matches("0x"),
-            ).map_err(|e| {
-                error::ErrorBadRequest(format!("Invalid hex input: {}", e))
-            })?,
+            &hex::decode(input_hex.trim_start_matches("0x"))
+                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
             height,
         ) {
             Ok(res_string) => {
@@ -261,7 +301,8 @@ async fn jsonrpc_call(
                 id: body.id,
                 error: JsonRpcErrorObject {
                     code: -32602,
-                    message: "Invalid params: requires [block_data, view_name, input_data, height]".to_string(),
+                    message: "Invalid params: requires [block_data, view_name, input_data, height]"
+                        .to_string(),
                     data: None,
                 },
                 jsonrpc: "2.0".to_string(),
@@ -329,29 +370,28 @@ async fn jsonrpc_call(
                     h
                 }
             }
-            serde_json::Value::String(s) => {
-                match s.parse::<u32>() {
-                    Ok(h) => {
-                        if h > height() {
-                            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
-                        } else {
-                            h
-                        }
-                    }
-                    Err(_) => {
-                        let error = JsonRpcError {
-                            id: body.id,
-                            error: JsonRpcErrorObject {
-                                code: -32602,
-                                message: "Invalid params: height must be a number or 'latest'".to_string(),
-                                data: None,
-                            },
-                            jsonrpc: "2.0".to_string(),
-                        };
-                        return Ok(HttpResponse::Ok().json(error));
+            serde_json::Value::String(s) => match s.parse::<u32>() {
+                Ok(h) => {
+                    if h > height() {
+                        fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                    } else {
+                        h
                     }
                 }
-            }
+                Err(_) => {
+                    let error = JsonRpcError {
+                        id: body.id,
+                        error: JsonRpcErrorObject {
+                            code: -32602,
+                            message: "Invalid params: height must be a number or 'latest'"
+                                .to_string(),
+                            data: None,
+                        },
+                        jsonrpc: "2.0".to_string(),
+                    };
+                    return Ok(HttpResponse::Ok().json(error));
+                }
+            },
             _ => {
                 let error = JsonRpcError {
                     id: body.id,
@@ -385,11 +425,8 @@ async fn jsonrpc_call(
         match context.runtime.preview(
             &block_data,
             view_name,
-            &hex::decode(
-                input_hex.trim_start_matches("0x"),
-            ).map_err(|e| {
-                error::ErrorBadRequest(format!("Invalid hex input: {}", e))
-            })?,
+            &hex::decode(input_hex.trim_start_matches("0x"))
+                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
             height,
         ) {
             Ok(res_string) => {
@@ -430,14 +467,14 @@ async fn jsonrpc_call(
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
-    
+
     // Parse command line arguments (falls back to env vars via #[arg(env)])
     let args = RockshrewViewArgs::parse();
-    
+
     if let Some(label) = args.label {
         set_label(label);
     }
-    
+
     let program = File::open(&args.indexer).expect("Failed to open program file");
     let mut buf = BufReader::new(program);
     let mut bytes: Vec<u8> = vec![];
@@ -447,32 +484,32 @@ async fn main() -> std::io::Result<()> {
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
     info!("program hash: 0x{}", hex::encode(output));
-    
+
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
     opts.create_if_missing(false);
     opts.set_max_open_files(1000); // Reduced from 10000 to stay within system limits
-    
+
     // Read-mostly optimizations
     opts.optimize_for_point_lookup(32 * 1024 * 1024);
     opts.increase_parallelism(4);
     opts.set_max_background_jobs(4);
-    
+
     // Cache settings for reads
     opts.set_table_cache_num_shard_bits(4); // Reduced from 6 to lower file handle usage
     opts.set_max_file_opening_threads(8); // Reduced from 16
-    
-    // Secondary instance specific settings 
+
+    // Secondary instance specific settings
     opts.set_max_background_compactions(0);
     opts.set_disable_auto_compactions(true);
-    
+
     // Create secondary path if it doesn't exist
     std::fs::create_dir_all(&args.secondary_path)?;
-    
+
     // Setup periodic catch-up with primary
     let secondary_path = args.secondary_path.clone();
     let db_path = args.db_path.clone();
-    
+
     let opts_clone = opts.clone();
     let catch_up_interval = std::time::Duration::from_secs(1);
     actix_web::rt::spawn(async move {
@@ -512,8 +549,9 @@ async fn main() -> std::io::Result<()> {
                     RocksDBRuntimeAdapter::open_secondary(
                         args.db_path.clone(),
                         args.secondary_path.clone(),
-                        opts.clone()
-                    ).unwrap(),
+                        opts.clone(),
+                    )
+                    .unwrap(),
                 )
                 .unwrap(),
             }))

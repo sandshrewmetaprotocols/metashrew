@@ -2,9 +2,6 @@
 resolver = "2"
 members = [
   "runtime",
-  "keydb",
-  "keydb-runtime",
-  "keydb-view",
   "mempool",
   "rockshrew",
   "rockshrew-runtime",

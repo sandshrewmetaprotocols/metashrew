@@ -63,6 +63,17 @@ pub async fn query_height(db: Arc<DB>, start_block: u32) -> Result<u32> {
 }
 
 impl RocksDBRuntimeAdapter {
+    pub fn open_secondary(
+        primary_path: String,
+        secondary_path: String, 
+        opts: rocksdb::Options
+    ) -> Result<Self, rocksdb::Error> {
+        let db = rocksdb::DB::open_as_secondary(&opts, &primary_path, &secondary_path)?;
+        Ok(RocksDBRuntimeAdapter {
+            db: Arc::new(db),
+            height: 0
+        })
+    }
     pub fn open(path: String, opts: Options) -> Result<RocksDBRuntimeAdapter> {
         let db = DB::open(&opts, path)?;
         Ok(RocksDBRuntimeAdapter {
@@ -74,7 +85,6 @@ impl RocksDBRuntimeAdapter {
     pub fn is_open(&self) -> bool {
         true // RocksDB doesn't need connection management like Redis
     }
-
     pub fn set_height(&mut self, height: u32) {
         self.height = height;
     }

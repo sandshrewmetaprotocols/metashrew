@@ -6,6 +6,7 @@ use metashrew_rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter
 use metashrew_runtime::MetashrewRuntime;
 use std::fmt;
 use anyhow;
+use clap::{Parser, CommandFactory};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -18,42 +19,42 @@ use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
 use rocksdb::Options;
 
-struct MetashrewViewError(pub anyhow::Error);
-
-impl From<anyhow::Error> for MetashrewViewError {
-    fn from(v: anyhow::Error) -> Self {
-        Self(v)
-    }
+/// RocksDB-backed view server for metashrew
+#[derive(Parser, Debug, Default)]
+#[command(author, version, about, long_about = None)]
+struct RockshrewViewArgs {
+    /// Path to the indexer WASM program
+    #[arg(long, env = "PROGRAM_PATH", default_value = "/mnt/volume/indexer.wasm")]
+    program_path: PathBuf,
+    
+    /// Optional RocksDB label for the database
+    #[arg(long, env = "ROCKS_LABEL")]
+    rocks_label: Option<String>,
+    
+    /// Path to the primary RocksDB database directory
+    #[arg(long, env = "ROCKS_DB_PATH", default_value = "rocksdb_data")]
+    db_path: String,
+    
+    /// Path for secondary instance files (required for secondary mode)
+    #[arg(long, env = "SECONDARY_PATH", default_value = "rocksdb_secondary")]
+    secondary_path: String,
+    
+    /// Host address to bind the server to
+    #[arg(long, env = "HOST", default_value = "127.0.0.1")]
+    host: String,
+    
+    /// Port number to listen on
+    #[arg(long, env = "PORT", default_value_t = 8080)]
+    port: u16,
 }
 
-impl fmt::Display for MetashrewViewError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        <anyhow::Error as fmt::Display>::fmt(&self.0, f)
-    }
+fn from_anyhow(err: anyhow::Error) -> actix_web::Error {
+    error::InternalError::new(
+        err.to_string(),
+        StatusCode::INTERNAL_SERVER_ERROR,
+    )
+    .into()
 }
-
-impl std::fmt::Debug for MetashrewViewError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        <anyhow::Error as std::fmt::Debug>::fmt(&self.0, f)
-    }
-}
-
-impl error::ResponseError for MetashrewViewError {
-    fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status_code())
-            .insert_header(ContentType::html())
-            .body(String::from("Internal server error"))
-    }
-    fn status_code(&self) -> StatusCode {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
-}
-
-fn from_anyhow(v: anyhow::Error) -> MetashrewViewError {
-    v.into()
-}
-
-use env_logger;
 
 #[derive(Deserialize, Serialize)]
 struct JsonRpcRequest {
@@ -215,16 +216,14 @@ async fn jsonrpc_call(
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     
-    let path = match env::var("PROGRAM_PATH") {
-        Ok(val) => val,
-        Err(_e) => PathBuf::from("/mnt/volume/indexer.wasm")
-            .to_str()
-            .unwrap()
-            .try_into()
-            .unwrap(),
-    };
+    // Parse command line arguments (falls back to env vars via #[arg(env)])
+    let args = RockshrewViewArgs::parse();
     
-    let program = File::open(path.clone()).expect("msg");
+    if let Some(label) = args.rocks_label {
+        set_label(label);
+    }
+    
+    let program = File::open(&args.program_path).expect("Failed to open program file");
     let mut buf = BufReader::new(program);
     let mut bytes: Vec<u8> = vec![];
     let _ = buf.read_to_end(&mut bytes);
@@ -233,35 +232,43 @@ async fn main() -> std::io::Result<()> {
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
     info!("program hash: 0x{}", hex::encode(output));
-    let path_clone: PathBuf = path.into();
     
-    if let Ok(label) = env::var("ROCKS_LABEL") {
-        set_label(label.clone());
-    }
-    
-    let db_path: String = match env::var("ROCKS_DB_PATH") {
-        Ok(v) => v,
-        Err(_) => "rocksdb_data".into(),
-    };
-
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
-    opts.create_if_missing(true);
+    opts.create_if_missing(false);
     opts.set_max_open_files(10000);
-    opts.set_use_fsync(false);
-    opts.set_bytes_per_sync(8388608); // 8MB
-    opts.optimize_for_point_lookup(1024);
-    opts.set_table_cache_num_shard_bits(6);
-    opts.set_max_write_buffer_number(6);
-    opts.set_write_buffer_size(256 * 1024 * 1024);
-    opts.set_target_file_size_base(256 * 1024 * 1024);
-    opts.set_min_write_buffer_number_to_merge(2);
-    opts.set_level_zero_file_num_compaction_trigger(4);
-    opts.set_level_zero_slowdown_writes_trigger(20);
-    opts.set_level_zero_stop_writes_trigger(30);
+    
+    // Read-mostly optimizations
+    opts.optimize_for_point_lookup(32 * 1024 * 1024);
+    opts.increase_parallelism(4);
     opts.set_max_background_jobs(4);
-    opts.set_max_background_compactions(4);
-    opts.set_disable_auto_compactions(false);
+    
+    // Cache settings for reads
+    opts.set_table_cache_num_shard_bits(6);
+    opts.set_max_file_opening_threads(16);
+    
+    // Secondary instance specific settings
+    opts.set_max_background_compactions(0); // No compactions needed for secondary
+    opts.set_disable_auto_compactions(true);
+    
+    // Create secondary path if it doesn't exist
+    std::fs::create_dir_all(&args.secondary_path)?;
+    
+    // Setup periodic catch-up with primary
+    let secondary_path = args.secondary_path.clone();
+    let db_path = args.db_path.clone();
+    
+    let opts_clone = opts.clone();
+    let catch_up_interval = std::time::Duration::from_secs(1);
+    actix_web::rt::spawn(async move {
+        let mut interval = actix_web::rt::time::interval(catch_up_interval);
+        loop {
+            interval.tick().await;
+            if let Ok(db) = rocksdb::DB::open_as_secondary(&opts_clone, &db_path, &secondary_path) {
+                let _ = db.try_catch_up_with_primary(); // Ignore temporary errors
+            }
+        }
+    });
 
     HttpServer::new(move || {
         App::new()
@@ -276,23 +283,18 @@ async fn main() -> std::io::Result<()> {
                 hash: output,
                 program: bytes.clone(),
                 runtime: MetashrewRuntime::load(
-                    path_clone.clone(),
-                    RocksDBRuntimeAdapter::open(db_path.clone(), opts.clone()).unwrap(),
+                    args.program_path.clone(),
+                    RocksDBRuntimeAdapter::open_secondary(
+                        args.db_path.clone(),
+                        args.secondary_path.clone(),
+                        opts.clone()
+                    ).unwrap(),
                 )
                 .unwrap(),
             }))
             .service(jsonrpc_call)
     })
-    .bind((
-        match env::var("HOST") {
-            Ok(val) => val,
-            Err(_e) => String::from("127.0.0.1"),
-        },
-        match env::var("PORT") {
-            Ok(val) => val.parse::<u16>().unwrap(),
-            Err(_e) => 8080,
-        },
-    ))?
+    .bind((args.host.as_str(), args.port))?
     .run()
     .await
 }

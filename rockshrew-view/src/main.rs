@@ -66,18 +66,23 @@ struct JsonRpcRequest {
 }
 
 #[derive(Serialize)]
-struct JsonRpcError {
-    id: u32,
-    error: String,
-    jsonrpc: String,
-}
-
-#[derive(Serialize)]
 struct JsonRpcResult {
     id: u32,
     result: String,
     jsonrpc: String,
-    error: String,
+}
+#[derive(Serialize)]
+struct JsonRpcError {
+    id: u32,
+    error: JsonRpcErrorObject,
+    jsonrpc: String,
+}
+
+#[derive(Serialize)]
+struct JsonRpcErrorObject {
+    code: i32,
+    message: String,
+    data: Option<String>,
 }
 
 struct Context {
@@ -113,9 +118,8 @@ async fn jsonrpc_call(
     body: web::Json<JsonRpcRequest>,
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
-    {
-        debug!("{}", serde_json::to_string(&body).unwrap());
-    }
+    debug!("{}", serde_json::to_string(&body).unwrap());
+
     if body.method == "metashrew_view" {
         let height: u32 = if body.params[2] == "latest" {
             fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
@@ -126,7 +130,8 @@ async fn jsonrpc_call(
             }
             h
         };
-        let (res_string, err) = match context.runtime.view(
+
+        match context.runtime.view(
             body.params[0].clone(),
             &hex::decode(
                 body.params[1]
@@ -136,28 +141,35 @@ async fn jsonrpc_call(
             .unwrap(),
             height,
         ) {
-            Ok(str) => (str, "".to_string()),
-            Err(err) => {
-                println!("{:#?}", err);
-                (vec![], err.to_string())
+            Ok(res_string) => {
+                let result = JsonRpcResult {
+                    id: body.id,
+                    result: String::from("0x") + hex::encode(res_string).as_str(),
+                    jsonrpc: "2.0".to_string(),
+                };
+                Ok(HttpResponse::Ok().json(result))
             }
-        };
-        let result = JsonRpcResult {
-            id: body.id,
-            result: String::from("0x") + hex::encode(res_string).as_str(),
-            error: err,
-            jsonrpc: "2.0".to_string(),
-        };
-        return Ok(HttpResponse::Ok().json(result));
+            Err(err) => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32000,
+                        message: err.to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                Ok(HttpResponse::Ok().json(error))
+            }
+        }
     } else if body.method == "metashrew_height" {
         let height = fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
         let result = JsonRpcResult {
             id: body.id,
             result: height.to_string(),
-            error: "".to_string(),
             jsonrpc: "2.0".to_string(),
         };
-        return Ok(HttpResponse::Ok().json(result));
+        Ok(HttpResponse::Ok().json(result))
     } else if body.method == "metashrew_preview" {
         let height: u32 = if body.params[3] == "latest" {
             fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
@@ -170,12 +182,23 @@ async fn jsonrpc_call(
         };
 
         let block_hex = body.params[0].clone();
-        // Remove 0x prefix if present and decode hex
-        let block_data =
-            hex::decode(block_hex.trim_start_matches("0x")).map_err(|e| from_anyhow(e.into()))?;
+        let block_data = match hex::decode(block_hex.trim_start_matches("0x")) {
+            Ok(data) => data,
+            Err(e) => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: format!("Invalid hex block data: {}", e),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
+            }
+        };
 
-        // Use preview to execute block and view
-        let (res_string, err) = match context.runtime.preview(
+        match context.runtime.preview(
             &block_data,
             body.params[1].clone(),
             &hex::decode(
@@ -186,29 +209,38 @@ async fn jsonrpc_call(
             .unwrap(),
             height,
         ) {
-            Ok(str) => (str, "".to_string()),
-            Err(err) => {
-                println!("{:#?}", err);
-                (vec![], err.to_string())
+            Ok(res_string) => {
+                let result = JsonRpcResult {
+                    id: body.id,
+                    result: String::from("0x") + hex::encode(res_string).as_str(),
+                    jsonrpc: "2.0".to_string(),
+                };
+                Ok(HttpResponse::Ok().json(result))
             }
-        };
-
-        let result = JsonRpcResult {
-            id: body.id,
-            result: String::from("0x") + hex::encode(res_string).as_str(),
-            error: err,
-            jsonrpc: "2.0".to_string(),
-        };
-
-        return Ok(HttpResponse::Ok().json(result));
+            Err(err) => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32000,
+                        message: err.to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                Ok(HttpResponse::Ok().json(error))
+            }
+        }
     } else {
-        let result = JsonRpcResult {
+        let error = JsonRpcError {
             id: body.id,
-            result: "".to_owned(),
-            error: format!("RPC method {} not found", body.method),
+            error: JsonRpcErrorObject {
+                code: -32601,
+                message: format!("Method '{}' not found", body.method),
+                data: None,
+            },
             jsonrpc: "2.0".to_string(),
         };
-        return Ok(HttpResponse::Ok().json(result));
+        Ok(HttpResponse::Ok().json(error))
     }
 }
 

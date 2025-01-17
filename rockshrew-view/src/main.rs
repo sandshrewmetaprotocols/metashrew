@@ -25,11 +25,11 @@ use rocksdb::Options;
 struct RockshrewViewArgs {
     /// Path to the indexer WASM program
     #[arg(long, env = "PROGRAM_PATH", default_value = "/mnt/volume/indexer.wasm")]
-    program_path: PathBuf,
+    indexer: PathBuf,
     
     /// Optional RocksDB label for the database
     #[arg(long, env = "ROCKS_LABEL")]
-    rocks_label: Option<String>,
+    label: Option<String>,
     
     /// Path to the primary RocksDB database directory
     #[arg(long, env = "ROCKS_DB_PATH", default_value = "rocksdb_data")]
@@ -219,11 +219,11 @@ async fn main() -> std::io::Result<()> {
     // Parse command line arguments (falls back to env vars via #[arg(env)])
     let args = RockshrewViewArgs::parse();
     
-    if let Some(label) = args.rocks_label {
+    if let Some(label) = args.label {
         set_label(label);
     }
     
-    let program = File::open(&args.program_path).expect("Failed to open program file");
+    let program = File::open(&args.indexer).expect("Failed to open program file");
     let mut buf = BufReader::new(program);
     let mut bytes: Vec<u8> = vec![];
     let _ = buf.read_to_end(&mut bytes);
@@ -236,7 +236,7 @@ async fn main() -> std::io::Result<()> {
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
     opts.create_if_missing(false);
-    opts.set_max_open_files(10000);
+    opts.set_max_open_files(1000); // Reduced from 10000 to stay within system limits
     
     // Read-mostly optimizations
     opts.optimize_for_point_lookup(32 * 1024 * 1024);
@@ -244,11 +244,11 @@ async fn main() -> std::io::Result<()> {
     opts.set_max_background_jobs(4);
     
     // Cache settings for reads
-    opts.set_table_cache_num_shard_bits(6);
-    opts.set_max_file_opening_threads(16);
+    opts.set_table_cache_num_shard_bits(4); // Reduced from 6 to lower file handle usage
+    opts.set_max_file_opening_threads(8); // Reduced from 16
     
-    // Secondary instance specific settings
-    opts.set_max_background_compactions(0); // No compactions needed for secondary
+    // Secondary instance specific settings 
+    opts.set_max_background_compactions(0);
     opts.set_disable_auto_compactions(true);
     
     // Create secondary path if it doesn't exist
@@ -262,10 +262,20 @@ async fn main() -> std::io::Result<()> {
     let catch_up_interval = std::time::Duration::from_secs(1);
     actix_web::rt::spawn(async move {
         let mut interval = actix_web::rt::time::interval(catch_up_interval);
+        let mut retry_interval = actix_web::rt::time::interval(std::time::Duration::from_secs(5));
         loop {
             interval.tick().await;
-            if let Ok(db) = rocksdb::DB::open_as_secondary(&opts_clone, &db_path, &secondary_path) {
-                let _ = db.try_catch_up_with_primary(); // Ignore temporary errors
+            match rocksdb::DB::open_as_secondary(&opts_clone, &db_path, &secondary_path) {
+                Ok(db) => {
+                    if let Err(e) = db.try_catch_up_with_primary() {
+                        log::warn!("Error catching up with primary: {}", e);
+                    }
+                }
+                Err(e) => {
+                    log::error!("Failed to open secondary DB: {}", e);
+                    // Wait longer before retry on error
+                    retry_interval.tick().await;
+                }
             }
         }
     });
@@ -283,7 +293,7 @@ async fn main() -> std::io::Result<()> {
                 hash: output,
                 program: bytes.clone(),
                 runtime: MetashrewRuntime::load(
-                    args.program_path.clone(),
+                    args.indexer.clone(),
                     RocksDBRuntimeAdapter::open_secondary(
                         args.db_path.clone(),
                         args.secondary_path.clone(),

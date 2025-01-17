@@ -79,14 +79,9 @@ impl MetashrewRocksDBSync {
                     let (username, password) = v.split(":").next_tuple().unwrap();
                     url.set_username(username).unwrap();
                     url.set_password(Some(password)).unwrap();
-                    println!("auth URL: {:?}", url);
                     url
                 }
                 None => {
-                    println!(
-                        "no auth URL: {:?}",
-                        Url::parse(self.args.daemon_rpc_url.as_str()).unwrap()
-                    );
                     Url::parse(self.args.daemon_rpc_url.as_str()).unwrap()
                 }
             })

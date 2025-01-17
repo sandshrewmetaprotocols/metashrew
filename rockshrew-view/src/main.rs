@@ -60,7 +60,7 @@ fn from_anyhow(err: anyhow::Error) -> actix_web::Error {
 struct JsonRpcRequest {
     id: u32,
     method: String,
-    params: Vec<String>,
+    params: Vec<serde_json::Value>,
     #[allow(dead_code)]
     jsonrpc: String,
 }
@@ -121,24 +121,108 @@ async fn jsonrpc_call(
     debug!("{}", serde_json::to_string(&body).unwrap());
 
     if body.method == "metashrew_view" {
-        let height: u32 = if body.params[2] == "latest" {
-            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
-        } else {
-            let h = body.params[2].parse::<u32>().unwrap();
-            if h > height() {
-                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+        // Ensure we have required params
+        if body.params.len() < 3 {
+            let error = JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: "Invalid params: requires [view_name, input_data, height]".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            };
+            return Ok(HttpResponse::Ok().json(error));
+        }
+
+        let view_name = match body.params[0].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: view_name must be a string".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
             }
-            h
+        };
+
+        let input_hex = match body.params[1].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: input_data must be a hex string".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
+            }
+        };
+
+        let height: u32 = match &body.params[2] {
+            serde_json::Value::String(s) if s == "latest" => {
+                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+            }
+            serde_json::Value::Number(n) => {
+                let h = n.as_u64().unwrap_or(0) as u32;
+                if h > height() {
+                    fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                } else {
+                    h
+                }
+            }
+            serde_json::Value::String(s) => {
+                match s.parse::<u32>() {
+                    Ok(h) => {
+                        if h > height() {
+                            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                        } else {
+                            h
+                        }
+                    }
+                    Err(_) => {
+                        let error = JsonRpcError {
+                            id: body.id,
+                            error: JsonRpcErrorObject {
+                                code: -32602,
+                                message: "Invalid params: height must be a number or 'latest'".to_string(),
+                                data: None,
+                            },
+                            jsonrpc: "2.0".to_string(),
+                        };
+                        return Ok(HttpResponse::Ok().json(error));
+                    }
+                }
+            }
+            _ => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: height must be a number or 'latest'".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
+            }
         };
 
         match context.runtime.view(
-            body.params[0].clone(),
+            view_name,
             &hex::decode(
-                body.params[1]
-                    .to_string()
-                    .substring(2, body.params[1].len()),
-            )
-            .unwrap(),
+                input_hex.trim_start_matches("0x"),
+            ).map_err(|e| {
+                error::ErrorBadRequest(format!("Invalid hex input: {}", e))
+            })?,
             height,
         ) {
             Ok(res_string) => {
@@ -171,17 +255,117 @@ async fn jsonrpc_call(
         };
         Ok(HttpResponse::Ok().json(result))
     } else if body.method == "metashrew_preview" {
-        let height: u32 = if body.params[3] == "latest" {
-            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
-        } else {
-            let h = body.params[3].parse::<u32>().unwrap();
-            if h > height() {
-                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+        // Ensure we have required params
+        if body.params.len() < 4 {
+            let error = JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: "Invalid params: requires [block_data, view_name, input_data, height]".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            };
+            return Ok(HttpResponse::Ok().json(error));
+        }
+
+        let block_hex = match body.params[0].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: block_data must be a hex string".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
             }
-            h
         };
 
-        let block_hex = body.params[0].clone();
+        let view_name = match body.params[1].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: view_name must be a string".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
+            }
+        };
+
+        let input_hex = match body.params[2].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: input_data must be a hex string".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
+            }
+        };
+
+        let height: u32 = match &body.params[3] {
+            serde_json::Value::String(s) if s == "latest" => {
+                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+            }
+            serde_json::Value::Number(n) => {
+                let h = n.as_u64().unwrap_or(0) as u32;
+                if h > height() {
+                    fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                } else {
+                    h
+                }
+            }
+            serde_json::Value::String(s) => {
+                match s.parse::<u32>() {
+                    Ok(h) => {
+                        if h > height() {
+                            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                        } else {
+                            h
+                        }
+                    }
+                    Err(_) => {
+                        let error = JsonRpcError {
+                            id: body.id,
+                            error: JsonRpcErrorObject {
+                                code: -32602,
+                                message: "Invalid params: height must be a number or 'latest'".to_string(),
+                                data: None,
+                            },
+                            jsonrpc: "2.0".to_string(),
+                        };
+                        return Ok(HttpResponse::Ok().json(error));
+                    }
+                }
+            }
+            _ => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: height must be a number or 'latest'".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
+            }
+        };
+
         let block_data = match hex::decode(block_hex.trim_start_matches("0x")) {
             Ok(data) => data,
             Err(e) => {
@@ -200,13 +384,12 @@ async fn jsonrpc_call(
 
         match context.runtime.preview(
             &block_data,
-            body.params[1].clone(),
+            view_name,
             &hex::decode(
-                body.params[2]
-                    .to_string()
-                    .substring(2, body.params[2].len()),
-            )
-            .unwrap(),
+                input_hex.trim_start_matches("0x"),
+            ).map_err(|e| {
+                error::ErrorBadRequest(format!("Invalid hex input: {}", e))
+            })?,
             height,
         ) {
             Ok(res_string) => {

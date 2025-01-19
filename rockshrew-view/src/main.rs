@@ -486,27 +486,25 @@ async fn main() -> std::io::Result<()> {
     info!("program hash: 0x{}", hex::encode(output));
 
     // Configure RocksDB options for optimal performance
+    // Configure RocksDB options for optimal performance while limiting resource usage
     let mut opts = Options::default();
     opts.create_if_missing(false);
-    opts.set_max_open_files(1000); // Reduced from 10000 to stay within system limits
-
-    // Read-mostly optimizations
-    opts.optimize_for_point_lookup(32 * 1024 * 1024);
-    opts.increase_parallelism(4);
-    opts.set_max_background_jobs(4);
-
-    // Cache settings for reads
-    opts.set_table_cache_num_shard_bits(4); // Reduced from 6 to lower file handle usage
-    opts.set_max_file_opening_threads(8); // Reduced from 16
-
-    // Secondary instance specific settings
+    opts.set_max_open_files(256); // Significantly reduced to prevent handle exhaustion
+    
+    // Read-optimized settings with reduced resource usage
+    opts.optimize_for_point_lookup(8 * 1024 * 1024); // Reduced cache size
+    opts.set_table_cache_num_shard_bits(2); // Reduced from 4 to lower file handles
+    opts.set_max_file_opening_threads(4); // Reduced from 8
+    
+    // Minimal background operations for secondary
+    opts.set_max_background_jobs(2);
     opts.set_max_background_compactions(0);
     opts.set_disable_auto_compactions(true);
 
     // Create secondary path if it doesn't exist
     std::fs::create_dir_all(&args.secondary_path)?;
 
-    // Setup periodic catch-up with primary
+    // Setup periodic catch-up with primary using exponential backoff
     let secondary_path = args.secondary_path.clone();
     let db_path = args.db_path.clone();
 
@@ -514,19 +512,29 @@ async fn main() -> std::io::Result<()> {
     let catch_up_interval = std::time::Duration::from_secs(1);
     actix_web::rt::spawn(async move {
         let mut interval = actix_web::rt::time::interval(catch_up_interval);
-        let mut retry_interval = actix_web::rt::time::interval(std::time::Duration::from_secs(5));
+        let mut backoff = std::time::Duration::from_secs(1);
+        let max_backoff = std::time::Duration::from_secs(30);
+        
         loop {
             interval.tick().await;
             match rocksdb::DB::open_as_secondary(&opts_clone, &db_path, &secondary_path) {
                 Ok(db) => {
                     if let Err(e) = db.try_catch_up_with_primary() {
                         log::warn!("Error catching up with primary: {}", e);
+                        // On error, use exponential backoff
+                        backoff = std::cmp::min(backoff * 2, max_backoff);
+                        actix_web::rt::time::sleep(backoff).await;
+                    } else {
+                        // On success, reset backoff
+                        backoff = std::time::Duration::from_secs(1);
                     }
+                    // Explicitly close the DB handle
+                    drop(db);
                 }
                 Err(e) => {
                     log::error!("Failed to open secondary DB: {}", e);
-                    // Wait longer before retry on error
-                    retry_interval.tick().await;
+                    backoff = std::cmp::min(backoff * 2, max_backoff);
+                    actix_web::rt::time::sleep(backoff).await;
                 }
             }
         }

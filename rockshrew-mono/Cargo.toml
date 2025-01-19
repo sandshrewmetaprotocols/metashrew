@@ -1,0 +1,21 @@
+[package]
+name = "rockshrew-mono"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reqwest = { version = "0.12.12", features = ["json"] }
+metashrew-rockshrew-runtime = { path = "../rockshrew-runtime" }
+metashrew-runtime = { path = "../runtime" }
+serde_json = "1.0.136"
+actix-web = "4.9.0"
+serde = "1.0.217"
+log = "0.4.25"
+env_logger = "0.11.6"
+hex = "0.4.3"
+rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
+tokio = { version = "1.43.0", features = ["full"] }
+clap = { version = "4.5.26", features = ["unstable-doc"] }
+actix-cors = "0.7.0"
+itertools = "0.14.0"
+anyhow = "1.0.95"

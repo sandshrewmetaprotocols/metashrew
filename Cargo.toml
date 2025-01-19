@@ -6,4 +6,4 @@ members = [
   "rockshrew",
   "rockshrew-runtime",
   "rockshrew-view"
-]
+, "rockshrew-mono"]

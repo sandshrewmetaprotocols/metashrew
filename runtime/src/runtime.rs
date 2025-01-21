@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
 //use rlp;
 use hex;
@@ -7,6 +7,18 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
+
+fn lock_err<T>(err: std::sync::PoisonError<T>) -> anyhow::Error {
+    anyhow!("Mutex lock error: {}", err)
+}
+
+fn to_anyhow<T, E: std::fmt::Debug>(result: std::result::Result<T, E>) -> Result<T> {
+    result.map_err(|e| anyhow!("Conversion error: {:?}", e))
+}
+
+fn try_into_vec<const N: usize>(bytes: [u8; N]) -> Result<Vec<u8>> {
+    Vec::<u8>::try_from(bytes).map_err(|e| anyhow!("Failed to convert bytes to Vec: {:?}", e))
+}
 
 use crate::proto::metashrew::KeyValueFlush;
 
@@ -86,23 +98,23 @@ impl State {
     }
 }
 
-pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Vec<u8> {
+pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Result<Vec<u8>> {
     let mut entry = v.clone();
-    let index_bits: Vec<u8> = index.to_le_bytes().try_into().unwrap();
+    let index_bits = try_into_vec(index.to_le_bytes())?;
     entry.extend(index_bits);
-    return entry;
+    Ok(entry)
 }
 
-pub fn db_make_length_key(key: &Vec<u8>) -> Vec<u8> {
-    return db_make_list_key(key, u32::MAX);
+pub fn db_make_length_key(key: &Vec<u8>) -> Result<Vec<u8>> {
+    db_make_list_key(key, u32::MAX)
 }
 
 pub fn db_make_updated_key(key: &Vec<u8>) -> Vec<u8> {
-    return key.clone();
+    key.clone()
 }
 
-pub fn u32_to_vec(v: u32) -> Vec<u8> {
-    return v.to_le_bytes().try_into().unwrap();
+pub fn u32_to_vec(v: u32) -> Result<Vec<u8>> {
+    try_into_vec(v.to_le_bytes())
 }
 
 pub fn try_read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Result<Vec<u8>> {
@@ -126,11 +138,11 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     }
 }
 
-pub fn db_annotate_value(v: &Vec<u8>, block_height: u32) -> Vec<u8> {
+pub fn db_annotate_value(v: &Vec<u8>, block_height: u32) -> Result<Vec<u8>> {
     let mut entry: Vec<u8> = v.clone();
-    let height: Vec<u8> = block_height.to_le_bytes().try_into().unwrap();
+    let height = try_into_vec(block_height.to_le_bytes())?;
     entry.extend(height);
-    return entry;
+    Ok(entry)
 }
 
 pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v: T) -> i32 {
@@ -159,7 +171,8 @@ where
 {
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::from_file(&engine, indexer.into_os_string()).unwrap();
+        let module = wasmtime::Module::from_file(&engine, indexer.into_os_string())
+            .context("Failed to load WASM module")?;
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
@@ -171,19 +184,22 @@ where
             wasmstore.limiter(|state| &mut state.limits)
         }
         {
-            Self::setup_linker(context.clone(), &mut linker);
-            Self::setup_linker_indexer(context.clone(), &mut linker);
+            Self::setup_linker(context.clone(), &mut linker)
+                .context("Failed to setup basic linker")?;
+            Self::setup_linker_indexer(context.clone(), &mut linker)
+                .context("Failed to setup indexer linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
-        let instance = linker.instantiate(&mut wasmstore, &module).unwrap();
-        return Ok(MetashrewRuntime {
-            wasmstore: wasmstore,
-            engine: engine,
-            module: module,
-            linker: linker,
-            context: context,
-            instance: instance,
-        });
+        let instance = linker.instantiate(&mut wasmstore, &module)
+            .context("Failed to instantiate WASM module")?;
+        Ok(MetashrewRuntime {
+            wasmstore,
+            engine,
+            module,
+            linker,
+            context,
+            instance,
+        })
     }
 
     pub fn preview(
@@ -194,11 +210,10 @@ where
         height: u32,
     ) -> Result<Vec<u8>> {
         // Create new isolated runtime with cloned context
-        let mut preview_context = MetashrewRuntimeContext::new(
-            self.context.lock().unwrap().db.clone(),
-            height,
-            block.clone(),
-        );
+        let preview_context = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            MetashrewRuntimeContext::new(guard.db.clone(), height, block.clone())
+        };
 
         let mut linker = Linker::<State>::new(&self.engine);
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
@@ -209,22 +224,28 @@ where
         }
 
         {
-            Self::setup_linker(context.clone(), &mut linker);
-            Self::setup_linker_indexer(context.clone(), &mut linker);
+            Self::setup_linker(context.clone(), &mut linker)
+                .context("Failed to setup basic linker")?;
+            Self::setup_linker_indexer(context.clone(), &mut linker)
+                .context("Failed to setup indexer linker")?;
             linker.define_unknown_imports_as_traps(&self.module)?;
         }
 
-        let instance = linker.instantiate(&mut wasmstore, &self.module)?;
+        let instance = linker.instantiate(&mut wasmstore, &self.module)
+            .context("Failed to instantiate module for preview")?;
 
         // Execute block via _start
-        let start = instance.get_typed_func::<(), ()>(&mut wasmstore, "_start")?;
+        let start = instance.get_typed_func::<(), ()>(&mut wasmstore, "_start")
+            .context("Failed to get _start function for preview")?;
+            
         match start.call(&mut wasmstore, ()) {
             Ok(_) => {
-                if context.lock().unwrap().state != 1 && !wasmstore.data().had_failure {
+                let context_guard = context.lock().map_err(lock_err)?;
+                if context_guard.state != 1 && !wasmstore.data().had_failure {
                     return Err(anyhow!("indexer exited unexpectedly during preview"));
                 }
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e).context("Error executing _start in preview"),
         }
 
         // Now set up for view call
@@ -236,332 +257,448 @@ where
         }
 
         {
-            Self::setup_linker(context.clone(), &mut view_linker);
-            Self::setup_linker_view(context.clone(), &mut view_linker);
+            Self::setup_linker(context.clone(), &mut view_linker)
+                .context("Failed to setup basic linker for view")?;
+            Self::setup_linker_view(context.clone(), &mut view_linker)
+                .context("Failed to setup view linker")?;
             view_linker.define_unknown_imports_as_traps(&self.module)?;
         }
 
-        let view_instance = view_linker.instantiate(&mut view_store, &self.module)?;
+        let view_instance = view_linker.instantiate(&mut view_store, &self.module)
+            .context("Failed to instantiate module for view")?;
 
         // Execute view in same isolated context
-        context.lock().unwrap().block = input.clone();
+        context.lock().map_err(lock_err)?.block = input.clone();
 
-        let func = view_instance.get_typed_func::<(), i32>(&mut view_store, symbol.as_str())?;
-        let result = func.call(&mut view_store, ())?;
+        let func = view_instance.get_typed_func::<(), i32>(&mut view_store, symbol.as_str())
+            .context("Failed to get view function")?;
+            
+        let result = func.call(&mut view_store, ())
+            .context("Failed to execute view function")?;
 
+        let memory = view_instance
+            .get_memory(&mut view_store, "memory")
+            .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
+            
         Ok(read_arraybuffer_as_vec(
-            view_instance
-                .get_memory(&mut view_store, "memory")
-                .unwrap()
-                .data(&mut view_store),
+            memory.data(&mut view_store),
             result,
         ))
     }
     pub fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
         let mut linker = Linker::<State>::new(&self.engine);
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(
-            self.context.clone().lock().unwrap().clone(),
-        ));
+        
+        let context = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(guard.clone()))
+        };
+        
         {
-            (
-                context.lock().unwrap().height,
-                context.lock().unwrap().block,
-            ) = (height, input.clone());
+            let mut guard = context.lock().map_err(lock_err)?;
+            guard.height = height;
+            guard.block = input.clone();
         }
+        
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
+        
         {
-            Self::setup_linker(context.clone(), &mut linker);
-            Self::setup_linker_view(context.clone(), &mut linker);
+            Self::setup_linker(context.clone(), &mut linker)
+                .context("Failed to setup basic linker for view")?;
+            Self::setup_linker_view(context.clone(), &mut linker)
+                .context("Failed to setup view linker")?;
             linker.define_unknown_imports_as_traps(&self.module)?;
         }
-        let instance = linker.instantiate(&mut wasmstore, &self.module).unwrap();
+        
+        let instance = linker.instantiate(&mut wasmstore, &self.module)
+            .context("Failed to instantiate module for view")?;
+            
         let func = instance
             .get_typed_func::<(), i32>(&mut wasmstore, symbol.as_str())
-            .unwrap();
-        let result = func.call(&mut wasmstore, ());
-        return match result {
-            Ok(v) => Ok(read_arraybuffer_as_vec(
-                instance
-                    .get_memory(&mut wasmstore, "memory")
-                    .unwrap()
-                    .data(&mut wasmstore),
-                v,
-            )),
-            Err(e) => Err(e),
-        };
+            .with_context(|| format!("Failed to get view function '{}'", symbol))?;
+            
+        let result = func.call(&mut wasmstore, ())
+            .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
+            
+        let memory = instance
+            .get_memory(&mut wasmstore, "memory")
+            .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
+            
+        Ok(read_arraybuffer_as_vec(
+            memory.data(&mut wasmstore),
+            result,
+        ))
     }
-    pub fn refresh_memory(&mut self) {
+    pub fn refresh_memory(&mut self) -> Result<()> {
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
         wasmstore.limiter(|state| &mut state.limits);
         self.instance = self
             .linker
             .instantiate(&mut wasmstore, &self.module)
-            .unwrap();
+            .context("Failed to instantiate module during memory refresh")?;
         self.wasmstore = wasmstore;
+        Ok(())
     }
 
-    pub fn db_create_empty_update_list(batch: &mut T::Batch, height: u32) {
-        let height_vec: Vec<u8> = height.to_le_bytes().try_into().unwrap();
-        let key: Vec<u8> = db_make_length_key(&db_make_updated_key(&height_vec));
-        let value_vec: Vec<u8> = (0 as u32).to_le_bytes().try_into().unwrap();
+    pub fn db_create_empty_update_list(batch: &mut T::Batch, height: u32) -> Result<()> {
+        let height_vec = u32_to_vec(height)?;
+        let updated_key = db_make_updated_key(&height_vec);
+        let key = db_make_length_key(&updated_key)?;
+        let value_vec = u32_to_vec(0)?;
         batch.put(&key, &value_vec);
+        Ok(())
     }
     pub fn run(&mut self) -> Result<(), anyhow::Error> {
-        self.context.lock().unwrap().state = 0;
+        self.context.lock().map_err(lock_err)?.state = 0;
         let start = self
             .instance
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
-            .unwrap();
-        self.handle_reorg();
+            .context("Failed to get _start function")?;
+        
+        self.handle_reorg()?;
+        
         match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
-                if self.context.lock().unwrap().state != 1 && !self.wasmstore.data().had_failure {
+                if self.context.lock().map_err(lock_err)?.state != 1 && !self.wasmstore.data().had_failure {
                     return Err(anyhow!("indexer exited unexpectedly"));
                 }
-                return Ok(());
+                Ok(())
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e).context("Error calling _start function"),
         }
     }
 
     pub fn check_latest_block_for_reorg(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         height: u32,
-    ) -> u32 {
+    ) -> Result<u32> {
+        let key = u32_to_vec(height as u32)?;
+        let updated_key = db_make_updated_key(&key);
+        let length_key = db_make_length_key(&updated_key)?;
+        
         let result = context
             .lock()
-            .unwrap()
+            .map_err(lock_err)?
             .db
-            .get(db_make_length_key(&db_make_updated_key(&u32_to_vec(
-                height as u32,
-            ))))
-            .unwrap();
+            .get(&length_key)
+            .map_err(|e| anyhow!("Database error: {:?}", e))?;
+            
         match result {
             Some(_v) => Self::check_latest_block_for_reorg(context.clone(), height + 1),
-            None => return height,
+            None => Ok(height),
         }
     }
 
     pub fn db_length_at_key(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         length_key: &Vec<u8>,
-    ) -> u32 {
-        return match context.lock().unwrap().db.get(length_key).unwrap() {
-            Some(v) => u32::from_le_bytes(v.try_into().unwrap()),
-            None => 0,
-        };
+    ) -> Result<u32> {
+        let value = context
+            .lock()
+            .map_err(lock_err)?
+            .db
+            .get(length_key)
+            .map_err(|e| anyhow!("Database error: {:?}", e))?;
+            
+        match value {
+            Some(v) => {
+                let bytes: [u8; 4] = v.try_into()
+                    .map_err(|e| anyhow!("Invalid length value: {:?}", e))?;
+                Ok(u32::from_le_bytes(bytes))
+            }
+            None => Ok(0),
+        }
     }
 
     pub fn db_updated_keys_for_block(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         height: u32,
-    ) -> HashSet<Vec<u8>> {
-        let key: Vec<u8> = db_make_updated_key(&u32_to_vec(height));
-        let length: i32 = Self::db_length_at_key(context.clone(), &key) as i32;
+    ) -> Result<HashSet<Vec<u8>>> {
+        let key = u32_to_vec(height)?;
+        let updated_key = db_make_updated_key(&key);
+        let length = Self::db_length_at_key(context.clone(), &updated_key)? as i32;
         let mut i: i32 = 0;
         let mut set: HashSet<Vec<u8>> = HashSet::<Vec<u8>>::new();
+        
         while i < length {
-            set.insert(
-                context
-                    .lock()
-                    .unwrap()
-                    .db
-                    .get(&db_make_list_key(&key, i as u32))
-                    .unwrap()
-                    .unwrap(),
-            );
-            i = i + 1;
+            let list_key = db_make_list_key(&updated_key, i as u32)?;
+            let value = context
+                .lock()
+                .map_err(lock_err)?
+                .db
+                .get(&list_key)
+                .map_err(|e| anyhow!("Database error: {:?}", e))?
+                .ok_or_else(|| anyhow!("Missing value for key at index {}", i))?;
+                
+            set.insert(value);
+            i += 1;
         }
-        return set;
+        Ok(set)
     }
     pub fn db_value_at_block(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         height: u32,
-    ) -> Vec<u8> {
-        let length: i32 = Self::db_length_at_key(context.clone(), &db_make_length_key(key))
-            .try_into()
-            .unwrap();
-        let mut index: i32 = length - 1;
+    ) -> Result<Vec<u8>> {
+        let length_key = db_make_length_key(key)?;
+        let length = Self::db_length_at_key(context.clone(), &length_key)?;
+        let mut index = length as i32 - 1;
+
         while index >= 0 {
-            let value: Vec<u8> = match context
+            let list_key = db_make_list_key(key, index as u32)?;
+            let value = match context
                 .lock()
-                .unwrap()
+                .map_err(lock_err)?
                 .db
-                .get(db_make_list_key(key, index.try_into().unwrap()))
-                .unwrap()
-            {
-                Some(v) => v,
-                None => db_make_list_key(&Vec::<u8>::new(), 0),
+                .get(&list_key)
+                .map_err(|e| anyhow!("Database error: {:?}", e))? {
+                    Some(v) => v,
+                    None => db_make_list_key(&Vec::<u8>::new(), 0)?,
+                };
+
+            if value.len() < 4 {
+                return Err(anyhow!("Invalid value length: {}", value.len()));
+            }
+
+            let value_height = {
+                let bytes: [u8; 4] = value.as_slice()[(value.len() - 4)..]
+                    .try_into()
+                    .map_err(|e| anyhow!("Invalid value height bytes: {:?}", e))?;
+                u32::from_le_bytes(bytes)
             };
 
-            let value_height: u32 =
-                u32::from_le_bytes(value.as_slice()[(value.len() - 4)..].try_into().unwrap());
-            if height >= value_height.try_into().unwrap() {
+            if height >= value_height {
                 let mut result = value.clone();
                 result.truncate(value.len().saturating_sub(4));
-                /*
-                panic!("exit");
-                */
-                return result;
+                return Ok(result);
             }
             index -= 1;
         }
-        return vec![];
+        Ok(vec![])
     }
 
     pub fn db_updated_keys_for_block_range(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         from: u32,
         to: u32,
-    ) -> HashSet<Vec<u8>> {
+    ) -> Result<HashSet<Vec<u8>>> {
         let mut i = from;
         let mut result: HashSet<Vec<u8>> = HashSet::<Vec<u8>>::new();
         while to >= i {
-            result.extend(Self::db_updated_keys_for_block(context.clone(), i));
+            result.extend(Self::db_updated_keys_for_block(context.clone(), i)?);
             i = i + 1;
         }
-        return result;
+        Ok(result)
     }
 
     pub fn db_rollback_key(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         to_block: u32,
-    ) {
-        let length: i32 = Self::db_length_at_key(context.clone(), &key)
-            .try_into()
-            .unwrap();
-        let mut index: i32 = length - 1;
-        let mut end_length: i32 = length;
+    ) -> Result<()> {
+        let length = Self::db_length_at_key(context.clone(), key)?;
+        let mut index = length as i32 - 1;
+        let mut end_length = length as i32;
+        
         while index >= 0 {
-            let list_key = db_make_list_key(key, index.try_into().unwrap());
-            let _ = match context.lock().unwrap().db.get(&list_key).unwrap() {
+            let list_key = db_make_list_key(key, index as u32)?;
+            let db_value = context
+                .lock()
+                .map_err(lock_err)?
+                .db
+                .get(&list_key)
+                .map_err(|e| anyhow!("Database error: {:?}", e))?;
+
+            match db_value {
                 Some(value) => {
-                    let value_height: u32 = u32::from_le_bytes(
-                        value.as_slice()[(value.len() - 4)..].try_into().unwrap(),
-                    );
-                    if to_block <= value_height.try_into().unwrap() {
-                        context.lock().unwrap().db.delete(&list_key).unwrap();
-                        end_length = end_length - 1;
+                    if value.len() < 4 {
+                        return Err(anyhow!("Invalid value length: {}", value.len()));
+                    }
+                    
+                    let value_height = {
+                        let bytes: [u8; 4] = value.as_slice()[(value.len() - 4)..]
+                            .try_into()
+                            .map_err(|e| anyhow!("Invalid value height bytes: {:?}", e))?;
+                        u32::from_le_bytes(bytes)
+                    };
+                    
+                    if to_block <= value_height {
+                        context
+                            .lock()
+                            .map_err(lock_err)?
+                            .db
+                            .delete(&list_key)
+                            .map_err(|e| anyhow!("Database delete error: {:?}", e))?;
+                        end_length -= 1;
                     } else {
                         break;
                     }
                 }
-                None => {
-                    break;
-                }
-            };
+                None => break,
+            }
             index -= 1;
         }
-        if end_length != length {
-            Self::db_set_length(context.clone(), key, end_length as u32);
+        
+        if end_length != length as i32 {
+            Self::db_set_length(context.clone(), key, end_length as u32)?;
         }
+        
+        Ok(())
     }
 
     pub fn db_set_length(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         length: u32,
-    ) {
-        let length_key = db_make_length_key(key);
+    ) -> Result<()> {
+        let length_key = db_make_length_key(key)?;
+        let mut guard = context.lock().map_err(lock_err)?;
+        
         if length == 0 {
-            context.lock().unwrap().db.delete(&length_key).unwrap();
-            return;
+            guard.db.delete(&length_key)
+                .map_err(|e| anyhow!("Failed to delete length key: {:?}", e))?;
+            return Ok(());
         }
-        let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
-        context
-            .lock()
-            .unwrap()
-            .db
+        
+        let new_length_bits = u32_to_vec(length + 1)?;
+        guard.db
             .put(&length_key, &new_length_bits)
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to update length: {:?}", e))?;
+            
+        Ok(())
     }
 
-    pub fn handle_reorg(&mut self) {
-        let context: Arc<Mutex<MetashrewRuntimeContext<T>>> = self.context.clone();
-        let height = { context.lock().unwrap().height };
-        let latest: u32 = Self::check_latest_block_for_reorg(context.clone(), height);
+    pub fn handle_reorg(&mut self) -> Result<()> {
+        let context = self.context.clone();
+        let height = { context.lock().map_err(lock_err)?.height };
+        let latest = Self::check_latest_block_for_reorg(context.clone(), height)?;
+        
         if latest == height {
-            return;
+            return Ok(());
         }
-        let set: HashSet<Vec<u8>> =
-            Self::db_updated_keys_for_block_range(context.clone(), height, latest);
-        if set.len() != 0 {
-            self.refresh_memory();
+        
+        let set = Self::db_updated_keys_for_block_range(context.clone(), height, latest)?;
+        if !set.is_empty() {
+            self.refresh_memory()?;
         }
-        for key in set.iter() {
-            Self::db_rollback_key(context.clone(), &key, height);
+        
+        for key in &set {
+            Self::db_rollback_key(context.clone(), key, height)?;
         }
+        
+        Ok(())
     }
 
     pub fn setup_linker(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
-    ) {
+    ) -> Result<()> {
         let context_ref_len = context.clone();
         let context_ref_input = context.clone();
+        
         linker
             .func_wrap(
                 "env",
                 "__host_len",
                 move |mut _caller: Caller<'_, State>| -> i32 {
-                    return context_ref_len.lock().unwrap().block.len() as i32 + 4;
+                    match context_ref_len.lock() {
+                        Ok(ctx) => ctx.block.len() as i32 + 4,
+                        Err(_) => i32::MAX, // Signal error
+                    }
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __host_len: {:?}", e))?;
+
         linker
             .func_wrap(
                 "env",
                 "__load_input",
                 move |mut caller: Caller<'_, State>, data_start: i32| {
-                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
-                    let (input, height) = {
-                        let ref_copy = context_ref_input.clone();
-                        let ctx = ref_copy.lock().unwrap();
-                        (ctx.block.clone(), ctx.height)
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
                     };
-                    let mut input_clone: Vec<u8> =
-                        <Vec<u8> as TryFrom<[u8; 4]>>::try_from(height.to_le_bytes()).unwrap();
-                    input_clone.extend(input.clone());
-                    let sz: usize = to_usize_or_trap(&mut caller, data_start);
+
+                    let (input, height) = match context_ref_input.lock() {
+                        Ok(ctx) => (ctx.block.clone(), ctx.height),
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    let input_clone = match try_into_vec(height.to_le_bytes()) {
+                        Ok(mut v) => {
+                            v.extend(input);
+                            v
+                        }
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    let sz = to_usize_or_trap(&mut caller, data_start);
                     if sz == usize::MAX {
                         caller.data_mut().had_failure = true;
+                        return;
                     }
-                    let _ = mem.write(&mut caller, sz, input_clone.as_slice());
+
+                    if let Err(_) = mem.write(&mut caller, sz, input_clone.as_slice()) {
+                        caller.data_mut().had_failure = true;
+                    }
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __load_input: {:?}", e))?;
+
         linker
             .func_wrap(
                 "env",
                 "__log",
                 |mut caller: Caller<'_, State>, data_start: i32| {
-                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => return,
+                        },
+                        None => return,
+                    };
+
                     let data = mem.data(&caller);
                     let bytes = match try_read_arraybuffer_as_vec(data, data_start) {
                         Ok(v) => v,
-                        Err(_) => {
-                            return;
-                        }
+                        Err(_) => return,
                     };
-                    print!("{}", std::str::from_utf8(bytes.as_slice()).unwrap());
+
+                    if let Ok(text) = std::str::from_utf8(&bytes) {
+                        print!("{}", text);
+                    }
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __log: {:?}", e))?;
+
         linker
             .func_wrap(
                 "env",
                 "abort",
                 |mut caller: Caller<'_, State>, _: i32, _: i32, _: i32, _: i32| {
                     caller.data_mut().had_failure = true;
-                    return;
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap abort: {:?}", e))?;
+
+        Ok(())
     }
     pub fn db_append_annotated(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
@@ -569,211 +706,347 @@ where
         key: &Vec<u8>,
         value: &Vec<u8>,
         block_height: u32,
-    ) {
-        let length_key = db_make_length_key(key);
-        let length: u32 = Self::db_length_at_key(context.clone(), &length_key);
-        let entry = db_annotate_value(value, block_height);
+    ) -> Result<()> {
+        let length_key = db_make_length_key(key)?;
+        let length = Self::db_length_at_key(context.clone(), &length_key)?;
+        let entry = db_annotate_value(value, block_height)?;
 
-        let entry_key: Vec<u8> = db_make_list_key(key, length);
+        let entry_key = db_make_list_key(key, length)?;
         batch.put(&entry_key, &entry);
-        let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
+        
+        let new_length_bits = u32_to_vec(length + 1)?;
         batch.put(&length_key, &new_length_bits);
+        
+        Ok(())
     }
     pub fn db_append(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         batch: &mut T::Batch,
         key: &Vec<u8>,
         value: &Vec<u8>,
-    ) {
-        let length_key = db_make_length_key(key);
-        let length: u32 = Self::db_length_at_key(context.clone(), &length_key);
-        let entry_key: Vec<u8> = db_make_list_key(key, length);
+    ) -> Result<()> {
+        let length_key = db_make_length_key(key)?;
+        let length = Self::db_length_at_key(context.clone(), &length_key)?;
+        let entry_key = db_make_list_key(key, length)?;
+        
         batch.put(&entry_key, &value);
-        let new_length_bits: Vec<u8> = (length + 1).to_le_bytes().try_into().unwrap();
+        
+        let new_length_bits = u32_to_vec(length + 1)?;
         batch.put(&length_key, &new_length_bits);
+        
+        Ok(())
     }
     pub fn setup_linker_view(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
-    ) {
+    ) -> Result<()> {
         let context_get = context.clone();
         let context_get_len = context.clone();
+        
         linker
             .func_wrap(
                 "env",
                 "__flush",
                 move |_caller: Caller<'_, State>, _encoded: i32| {},
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
+
         linker
             .func_wrap(
                 "env",
                 "__get",
                 move |mut caller: Caller<'_, State>, key: i32, value: i32| {
-                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
                     let data = mem.data(&caller);
-                    let height = {
-                        let val = context_get.clone().lock().unwrap().height;
-                        val
+                    let height = match context_get.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
                     };
-                    let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-                    match key_vec_result {
+
+                    match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            let lookup =
-                                Self::db_value_at_block(context_get.clone(), &key_vec, height);
-                            mem.write(&mut caller, value as usize, lookup.as_slice())
-                                .unwrap();
+                            match Self::db_value_at_block(context_get.clone(), &key_vec, height) {
+                                Ok(lookup) => {
+                                    if let Err(_) = mem.write(&mut caller, value as usize, lookup.as_slice()) {
+                                        caller.data_mut().had_failure = true;
+                                    }
+                                }
+                                Err(_) => {
+                                    caller.data_mut().had_failure = true;
+                                }
+                            }
                         }
-                        Err(e) => {
-                            mem.write(
-                                &mut caller,
-                                (value - 4) as usize,
-                                <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes())
-                                    .unwrap()
-                                    .as_slice(),
-                            )
-                            .unwrap();
+                        Err(_) => {
+                            if let Ok(error_bits) = u32_to_vec(i32::MAX.try_into().unwrap()) {
+                                if let Err(_) = mem.write(
+                                    &mut caller,
+                                    (value - 4) as usize,
+                                    error_bits.as_slice(),
+                                ) {
+                                    caller.data_mut().had_failure = true;
+                                }
+                            } else {
+                                caller.data_mut().had_failure = true;
+                            }
                         }
-                    };
+                    }
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __get: {:?}", e))?;
+
         linker
             .func_wrap(
                 "env",
                 "__get_len",
                 move |mut caller: Caller<'_, State>, key: i32| -> i32 {
-                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => return i32::MAX,
+                        },
+                        None => return i32::MAX,
+                    };
+
                     let data = mem.data(&caller);
-                    let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-                    let height = {
-                        let val = context_get_len.clone().lock().unwrap().height;
-                        val
+                    let height = match context_get_len.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => return i32::MAX,
                     };
-                    match key_vec_result {
+
+                    match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            let value =
-                                Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
-                            return value.len() as i32;
+                            match Self::db_value_at_block(context_get_len.clone(), &key_vec, height) {
+                                Ok(value) => value.len() as i32,
+                                Err(_) => i32::MAX,
+                            }
                         }
-                        Err(_) => {
-                            return i32::MAX;
-                        }
-                    };
+                        Err(_) => i32::MAX,
+                    }
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __get_len: {:?}", e))?;
+
+        Ok(())
     }
     pub fn setup_linker_indexer(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
-    ) {
+    ) -> Result<()> {
         let context_ref = context.clone();
         let context_get = context.clone();
         let context_get_len = context.clone();
+        
         linker
             .func_wrap(
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
-                    let height = {
-                        let val = context_ref.clone().lock().unwrap().height;
-                        val
+                    let height = match context_ref.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
                     };
-                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
                     let data = mem.data(&caller);
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                         Ok(v) => v,
                         Err(_) => {
+                            caller.data_mut().had_failure = true;
                             return;
                         }
                     };
+
                     let mut batch = T::Batch::default();
-                    let _ = Self::db_create_empty_update_list(&mut batch, height as u32);
-                    let decoded: KeyValueFlush =
-                        KeyValueFlush::parse_from_bytes(&encoded_vec).unwrap();
+                    if let Err(_) = Self::db_create_empty_update_list(&mut batch, height as u32) {
+                        caller.data_mut().had_failure = true;
+                        return;
+                    }
+
+                    let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
+                        Ok(d) => d,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
 
                     for (k, v) in decoded.list.iter().tuples() {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
                         let v_owned = <Vec<u8> as Clone>::clone(v);
-                        Self::db_append_annotated(
+
+                        if let Err(_) = Self::db_append_annotated(
                             context_ref.clone(),
                             &mut batch,
                             &k_owned,
                             &v_owned,
                             height as u32,
-                        );
-                        let update_key: Vec<u8> =
-                            <Vec<u8> as TryFrom<[u8; 4]>>::try_from((height as u32).to_le_bytes())
-                                .unwrap();
-                        Self::db_append(context_ref.clone(), &mut batch, &update_key, &k_owned);
+                        ) {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+
+                        match u32_to_vec(height) {
+                            Ok(update_key) => {
+                                if let Err(_) = Self::db_append(context_ref.clone(), &mut batch, &update_key, &k_owned) {
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
+                            }
+                            Err(_) => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        }
                     }
+
                     debug!(
                         "saving {:?} k/v pairs for block {:?}",
                         decoded.list.len() / 2,
                         height
                     );
-                    context_ref.clone().lock().unwrap().state = 1;
-                    context_ref.clone().lock().unwrap().db.write(batch).unwrap();
+
+                    match context_ref.clone().lock() {
+                        Ok(mut ctx) => {
+                            ctx.state = 1;
+                            if let Err(e) = ctx.db.write(batch) {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        }
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    }
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
+
         linker
             .func_wrap(
                 "env",
                 "__get",
                 move |mut caller: Caller<'_, State>, key: i32, value: i32| {
-                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-                    let height = {
-                        let val = context_get.clone().lock().unwrap().height;
-                        val
+                    let height = match context_get.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
                     };
+
                     match key_vec_result {
                         Ok(key_vec) => {
-                            let lookup =
-                                Self::db_value_at_block(context_get.clone(), &key_vec, height);
-                            let _ = mem.write(&mut caller, value as usize, lookup.as_slice());
+                            match Self::db_value_at_block(context_get.clone(), &key_vec, height) {
+                                Ok(lookup) => {
+                                    if let Err(_) = mem.write(&mut caller, value as usize, lookup.as_slice()) {
+                                        caller.data_mut().had_failure = true;
+                                    }
+                                }
+                                Err(_) => {
+                                    caller.data_mut().had_failure = true;
+                                }
+                            }
                         }
-                        Err(e) => {
-                            mem.write(
-                                &mut caller,
-                                (value - 4) as usize,
-                                <[u8; 4] as TryInto<Vec<u8>>>::try_into(i32::MAX.to_le_bytes())
-                                    .unwrap()
-                                    .as_slice(),
-                            )
-                            .unwrap();
+                        Err(_) => {
+                            if let Ok(error_bits) = u32_to_vec(i32::MAX.try_into().unwrap()) {
+                                if let Err(_) = mem.write(
+                                    &mut caller,
+                                    (value - 4) as usize,
+                                    error_bits.as_slice(),
+                                ) {
+                                    caller.data_mut().had_failure = true;
+                                }
+                            } else {
+                                caller.data_mut().had_failure = true;
+                            }
                         }
                     };
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __get: {:?}", e))?;
+
         linker
             .func_wrap(
                 "env",
                 "__get_len",
                 move |mut caller: Caller<'_, State>, key: i32| -> i32 {
-                    let mem = caller.get_export("memory").unwrap().into_memory().unwrap();
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => return i32::MAX,
+                        },
+                        None => return i32::MAX,
+                    };
+
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-                    let height = {
-                        let val = context_get_len.clone().lock().unwrap().height;
-                        val
+                    let height = match context_get_len.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => return i32::MAX,
                     };
+
                     match key_vec_result {
                         Ok(key_vec) => {
-                            let value =
-                                Self::db_value_at_block(context_get_len.clone(), &key_vec, height);
-                            return value.len() as i32;
+                            match Self::db_value_at_block(context_get_len.clone(), &key_vec, height) {
+                                Ok(value) => value.len() as i32,
+                                Err(_) => i32::MAX,
+                            }
                         }
-                        Err(_) => {
-                            return i32::MAX;
-                        }
-                    };
+                        Err(_) => i32::MAX,
+                    }
                 },
             )
-            .unwrap();
+            .map_err(|e| anyhow!("Failed to wrap __get_len: {:?}", e))?;
+
+        Ok(())
     }
 }

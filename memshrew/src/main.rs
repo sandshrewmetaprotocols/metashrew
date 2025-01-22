@@ -1,7 +1,7 @@
 use actix_cors::Cors;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result as ActixResult};
 use anyhow::{anyhow, Result};
-use bitcoin::consensus::encode::{deserialize};
+use bitcoin::consensus::encode::deserialize;
 use bitcoin::hashes::Hash;
 use bitcoin::{Transaction, Txid};
 use clap::Parser;
@@ -31,9 +31,10 @@ impl FromHex for Txid {
 }
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(2);
+const TEMPLATE_CACHE_DURATION: Duration = Duration::from_secs(30);
+const BLOCK_CONFIRM_TARGETS: [u32; 3] = [1, 2, 3]; // Number of blocks to target
 const MAX_BLOCK_WEIGHT: u32 = 4_000_000;
 const MIN_FEE_RATE: f64 = 1.0; // sat/vB
-const TEMPLATE_CACHE_DURATION: Duration = Duration::from_secs(30);
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -90,6 +91,11 @@ struct JsonRpcRequest {
     jsonrpc: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct FeeEstimate {
+    target_blocks: u32,
+    fee_rate: f64, // sat/vB
+}
 #[derive(Deserialize, Serialize)]
 struct JsonRpcResponse {
     id: u32,
@@ -390,15 +396,15 @@ async fn handle_jsonrpc(
         "memshrew_getmempooltxs" => {
             let txs = state.tracker.mempool_txs.read().await;
             let result = txs.iter()
-                .map(|(txid, info)| json!({
-                    "txid": txid.to_string(),
-                    "fee": info.fee,
-                    "vsize": info.vsize,
-                    "fee_rate": info.fee_rate,
-                    "ancestors": info.ancestors.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
-                    "descendants": info.descendants.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
-                }))
-                .collect::<Vec<_>>();
+	                    .map(|(txid, info)| json!({
+	                        "txid": txid.to_string(),
+	                        "fee": info.fee,
+	                        "vsize": info.vsize,
+	                        "fee_rate": info.fee_rate,
+	                        "ancestors": info.ancestors.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
+	                        "descendants": info.descendants.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
+	                    }))
+	                    .collect::<Vec<_>>();
 
             Ok(HttpResponse::Ok().json(JsonRpcResponse {
                 id: body.id,
@@ -428,6 +434,39 @@ async fn handle_jsonrpc(
             Ok(HttpResponse::Ok().json(JsonRpcResponse {
                 id: body.id,
                 result: json!(result),
+                jsonrpc: "2.0".to_string(),
+            }))
+        }
+
+        "memshrew_estimatefees" => {
+            let txs = state.tracker.mempool_txs.read().await;
+            let mut fee_rates: Vec<_> = txs.iter().map(|(_, info)| info.fee_rate).collect();
+            fee_rates.sort_by(|a, b| b.partial_cmp(a).unwrap_or(Ordering::Equal));
+
+            let estimates: Vec<FeeEstimate> = BLOCK_CONFIRM_TARGETS
+                .iter()
+                .map(|&target| {
+                    // Use higher percentiles for lower confirmation targets
+                    let percentile = match target {
+                        1 => 0.05, // 95th percentile for 1-block
+                        2 => 0.20, // 80th percentile for 2-blocks
+                        3 => 0.50, // 50th percentile for 3-blocks
+                        _ => 0.75, // Fallback, shouldn't happen
+                    };
+
+                    let index = ((fee_rates.len() as f64) * percentile) as usize;
+                    let fee_rate = fee_rates.get(index).copied().unwrap_or(MIN_FEE_RATE);
+
+                    FeeEstimate {
+                        target_blocks: target,
+                        fee_rate: fee_rate.max(MIN_FEE_RATE), // Never go below min fee rate
+                    }
+                })
+                .collect();
+
+            Ok(HttpResponse::Ok().json(JsonRpcResponse {
+                id: body.id,
+                result: json!(estimates),
                 jsonrpc: "2.0".to_string(),
             }))
         }

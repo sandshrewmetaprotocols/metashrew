@@ -4,12 +4,11 @@ use env_logger;
 use hex;
 use itertools::Itertools;
 use log::debug;
-use metashrew_rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
+use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use metashrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::MetashrewRuntime;
-use rocksdb::{DB, Options};
+use rocksdb::{Options};
 use reqwest::{Response, Url};
-use retry::{delay::Fixed, retry, OperationResult};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::{Number, Value};
@@ -92,6 +91,7 @@ impl MetashrewRocksDBSync {
         return response;
     }
 
+    #[allow(unused_assignments)]
     async fn post(&self, body: String) -> Result<Response> {
         let mut count = 0;
         let mut response: Option<Response> = None;
@@ -197,6 +197,7 @@ impl MetashrewRocksDBSync {
             .map_err(|_| anyhow!("GET error against RocksDB"))
     }
 
+    #[allow(unused_assignments)]
     fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
         let mut count = 0;
         let mut response: Option<Option<Vec<u8>>> = None;
@@ -312,7 +313,7 @@ impl MetashrewRocksDBSync {
             .await?
             .result
             .ok_or("")
-            .map_err(|e| anyhow!("missing result from JSON-RPC response"))?,
+            .map_err(|_| anyhow!("missing result from JSON-RPC response"))?,
         )?)
     }
 
@@ -336,7 +337,7 @@ impl MetashrewRocksDBSync {
             self.runtime.context.lock().unwrap().db.set_height(best);
             if let Err(_) = self.runtime.run() {
                 debug!("respawn cache");
-                self.runtime.refresh_memory();
+                self.runtime.refresh_memory()?;
                 if let Err(e) = self.runtime.run() {
                     panic!("runtime run failed after retry: {}", e);
                 }
@@ -349,6 +350,7 @@ impl MetashrewRocksDBSync {
     }
 }
 
+#[allow(deprecated)]
 #[tokio::main]
 async fn main() {
     env_logger::init();

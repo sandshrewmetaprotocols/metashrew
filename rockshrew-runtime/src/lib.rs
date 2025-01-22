@@ -1,8 +1,7 @@
 use anyhow::Result;
-use log::{debug, info};
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 use rocksdb::{DB, Options, WriteBatch, WriteBatchIterator};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc};
 
 const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 
@@ -28,10 +27,12 @@ pub fn set_label(s: String) -> () {
     }
 }
 
+#[allow(static_mut_refs)]
 pub fn get_label() -> &'static String {
     unsafe { _LABEL.as_ref().unwrap() }
 }
 
+#[allow(static_mut_refs)]
 pub fn has_label() -> bool {
     unsafe { _LABEL.is_some() }
 }
@@ -113,9 +114,9 @@ pub struct RocksDBBatchCloner<'a>(&'a mut WriteBatch);
 
 impl<'a> WriteBatchIterator for RocksDBBatchCloner<'a> {
   fn put(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
-    self.0.put(key.as_ref().clone(), value.as_ref().clone());
+    self.0.put(key.as_ref(), value.as_ref());
   }
-  fn delete(&mut self, key: Box<[u8]>) {
+  fn delete(&mut self, _key: Box<[u8]>) {
     //no-op
   }
 }

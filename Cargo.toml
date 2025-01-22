@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
   "runtime",
-  "mempool",
+  "memshrew",
   "rockshrew",
   "rockshrew-runtime",
   "rockshrew-view"

@@ -1,5 +1,5 @@
 [package]
-name = "metashrew-rockshrew-runtime"
+name = "rockshrew-runtime"
 version = "8.0.5"
 edition = "2021"
 

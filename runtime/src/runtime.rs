@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
 //use rlp;
-use hex;
 use protobuf::Message;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -12,9 +11,6 @@ fn lock_err<T>(err: std::sync::PoisonError<T>) -> anyhow::Error {
     anyhow!("Mutex lock error: {}", err)
 }
 
-fn to_anyhow<T, E: std::fmt::Debug>(result: std::result::Result<T, E>) -> Result<T> {
-    result.map_err(|e| anyhow!("Conversion error: {:?}", e))
-}
 
 fn try_into_vec<const N: usize>(bytes: [u8; N]) -> Result<Vec<u8>> {
     Vec::<u8>::try_from(bytes).map_err(|e| anyhow!("Failed to convert bytes to Vec: {:?}", e))
@@ -145,7 +141,7 @@ pub fn db_annotate_value(v: &Vec<u8>, block_height: u32) -> Result<Vec<u8>> {
     Ok(entry)
 }
 
-pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v: T) -> i32 {
+pub fn to_signed_or_trap<'a, T: TryInto<i32>>(_caller: &mut Caller<'_, State>, v: T) -> i32 {
     return match <T as TryInto<i32>>::try_into(v) {
         Ok(v) => v,
         Err(_) => {
@@ -154,7 +150,7 @@ pub fn to_signed_or_trap<'a, T: TryInto<i32>>(caller: &mut Caller<'_, State>, v:
     };
 }
 
-pub fn to_usize_or_trap<'a, T: TryInto<usize>>(caller: &mut Caller<'_, State>, v: T) -> usize {
+pub fn to_usize_or_trap<'a, T: TryInto<usize>>(_caller: &mut Caller<'_, State>, v: T) -> usize {
     return match <T as TryInto<usize>>::try_into(v) {
         Ok(v) => v,
         Err(_) => {
@@ -940,7 +936,7 @@ where
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
                             ctx.state = 1;
-                            if let Err(e) = ctx.db.write(batch) {
+                            if let Err(_) = ctx.db.write(batch) {
                                 caller.data_mut().had_failure = true;
                                 return;
                             }

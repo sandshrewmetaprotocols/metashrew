@@ -7,7 +7,7 @@ use env_logger;
 use hex;
 use itertools::Itertools;
 use log::{debug, info};
-use metashrew_rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
+use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
 use rocksdb::{Options};
 use reqwest::{Response, Url};
@@ -383,6 +383,7 @@ async fn handle_jsonrpc(
     }
 }
 
+#[allow(deprecated)]
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();

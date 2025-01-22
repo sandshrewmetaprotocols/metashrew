@@ -1,24 +1,20 @@
 use actix_cors::Cors;
 use actix_web::error;
-use actix_web::http::{header::ContentType, StatusCode};
+use actix_web::http::{StatusCode};
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 use anyhow;
-use clap::{CommandFactory, Parser};
+use clap::{Parser};
 use lazy_static::lazy_static;
 use log::{debug, info};
-use metashrew_rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
+use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use metashrew_runtime::MetashrewRuntime;
 use rocksdb::Options;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::env;
-use std::fmt;
 use std::fs::File;
 use std::io::{prelude::*, BufReader};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use substring::Substring;
 use tiny_keccak::{Hasher, Sha3};
 use tokio::sync::RwLock;
 
@@ -464,6 +460,7 @@ async fn jsonrpc_call(
     }
 }
 
+#[allow(deprecated)]
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();

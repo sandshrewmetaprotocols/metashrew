@@ -1935,7 +1935,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "metashrew-mempool"
+name = "memshrew"
 version = "0.1.0"
 dependencies = [
  "actix-cors",
@@ -1952,21 +1952,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "metashrew-rockshrew-runtime"
-version = "8.0.5"
-dependencies = [
- "anyhow",
- "env_logger",
- "log",
- "metashrew-runtime",
- "rocksdb",
- "serde",
- "serde_json",
- "snap",
- "zstd 0.13.1",
 ]
 
 [[package]]
@@ -2654,11 +2639,11 @@ dependencies = [
  "http 1.1.0",
  "itertools 0.13.0",
  "log",
- "metashrew-rockshrew-runtime",
  "metashrew-runtime",
  "reqwest",
  "retry",
  "rocksdb",
+ "rockshrew-runtime",
  "serde",
  "serde_json",
  "snap",
@@ -2679,13 +2664,28 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "log",
- "metashrew-rockshrew-runtime",
  "metashrew-runtime",
  "reqwest",
  "rocksdb",
+ "rockshrew-runtime",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rockshrew-runtime"
+version = "8.0.5"
+dependencies = [
+ "anyhow",
+ "env_logger",
+ "log",
+ "metashrew-runtime",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "snap",
+ "zstd 0.13.1",
 ]
 
 [[package]]
@@ -2702,10 +2702,10 @@ dependencies = [
  "itertools 0.12.1",
  "lazy_static",
  "log",
- "metashrew-rockshrew-runtime",
  "metashrew-runtime",
  "rlp",
  "rocksdb",
+ "rockshrew-runtime",
  "serde",
  "serde_json",
  "snap",

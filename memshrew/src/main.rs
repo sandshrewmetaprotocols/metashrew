@@ -1,12 +1,11 @@
 use actix_cors::Cors;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result as ActixResult};
 use anyhow::{anyhow, Result};
-use bitcoin::consensus::encode::{deserialize, serialize};
+use bitcoin::consensus::encode::{deserialize};
 use bitcoin::hashes::Hash;
-use bitcoin::{Block, BlockHash, Transaction, Txid};
+use bitcoin::{Transaction, Txid};
 use clap::Parser;
 use env_logger;
-use futures::StreamExt;
 use itertools::Itertools;
 use log::{debug, info};
 use reqwest::Url;
@@ -34,7 +33,6 @@ impl FromHex for Txid {
 const UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_BLOCK_WEIGHT: u32 = 4_000_000;
 const MIN_FEE_RATE: f64 = 1.0; // sat/vB
-const MAX_TEMPLATE_COUNT: usize = 3;
 const TEMPLATE_CACHE_DURATION: Duration = Duration::from_secs(30);
 
 #[derive(Parser, Debug)]
@@ -113,6 +111,7 @@ struct JsonRpcErrorObject {
     data: Option<String>,
 }
 
+#[allow(dead_code)]
 impl MempoolTracker {
     pub fn new(daemon_url: String, auth: Option<String>) -> Self {
         MempoolTracker {
@@ -388,7 +387,7 @@ async fn handle_jsonrpc(
     );
 
     match body.method.as_str() {
-        "metashrew_getmempooltxs" => {
+        "memshrew_getmempooltxs" => {
             let txs = state.tracker.mempool_txs.read().await;
             let result = txs.iter()
                 .map(|(txid, info)| json!({
@@ -408,7 +407,7 @@ async fn handle_jsonrpc(
             }))
         }
 
-        "metashrew_getblocktemplates" => {
+        "memshrew_getblocktemplates" => {
             let templates = state.tracker.block_templates.read().await;
             let result = templates
                 .iter()

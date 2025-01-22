@@ -269,7 +269,7 @@ impl IndexerState {
             
             if let Err(_) = runtime.run() {
                 debug!("respawn cache");
-                runtime.refresh_memory();
+                runtime.refresh_memory()?;
                 runtime.run()?;
             }
             

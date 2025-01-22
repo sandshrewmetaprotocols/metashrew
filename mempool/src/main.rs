@@ -9,6 +9,7 @@ use env_logger;
 use futures::StreamExt;
 use itertools::Itertools;
 use log::{debug, info};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::cmp::Ordering;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
-use reqwest::Url;
 
 trait FromHex: Sized {
     fn from_hex(hex_str: &str) -> Result<Self>;
@@ -25,10 +25,11 @@ trait FromHex: Sized {
 
 impl FromHex for Txid {
     fn from_hex(hex_str: &str) -> Result<Self> {
-        Ok(Txid::from_byte_array(<&[u8] as TryInto<[u8; 32]>>::try_into(&hex::decode(hex_str)?)?))
+        Ok(Txid::from_byte_array(
+            <&[u8] as TryInto<[u8; 32]>>::try_into(&hex::decode(hex_str)?)?,
+        ))
     }
 }
-
 
 const UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_BLOCK_WEIGHT: u32 = 4_000_000;
@@ -45,7 +46,7 @@ struct Args {
     auth: Option<String>,
     #[arg(long, env = "HOST", default_value = "127.0.0.1")]
     host: String,
-    #[arg(long, env = "PORT", default_value_t = 8081)]  // Default to 8081 to avoid conflict
+    #[arg(long, env = "PORT", default_value_t = 8081)] // Default to 8081 to avoid conflict
     port: u16,
 }
 
@@ -124,15 +125,24 @@ impl MempoolTracker {
     }
 
     async fn make_rpc_call(&self, method: &str, params: Vec<Value>) -> Result<Value> {
+        let start_time = SystemTime::now();
+        debug!(
+            "Making RPC call to node - method: {}, params: {:?}",
+            method, params
+        );
+
         let client = reqwest::Client::new();
         let url = match self.auth.clone() {
             Some(auth) => {
                 let mut url = Url::parse(&self.daemon_url)?;
-                let (username, password) = auth.split(":").next_tuple().ok_or_else(|| {
-                    anyhow!("Invalid auth format - should be username:password")
-                })?;
-                url.set_username(username).map_err(|_| anyhow!("Invalid username"))?;
-                url.set_password(Some(password)).map_err(|_| anyhow!("Invalid password"))?;
+                let (username, password) = auth
+                    .split(":")
+                    .next_tuple()
+                    .ok_or_else(|| anyhow!("Invalid auth format - should be username:password"))?;
+                url.set_username(username)
+                    .map_err(|_| anyhow!("Invalid username"))?;
+                url.set_password(Some(password))
+                    .map_err(|_| anyhow!("Invalid password"))?;
                 url
             }
             None => Url::parse(&self.daemon_url)?,
@@ -151,43 +161,83 @@ impl MempoolTracker {
             .json::<Value>()
             .await?;
 
+        let duration = SystemTime::now()
+            .duration_since(start_time)
+            .unwrap_or(Duration::from_secs(0));
+
         if let Some(error) = response.get("error") {
+            info!(
+                "RPC call failed after {:.2}s - method: {}, error: {}",
+                duration.as_secs_f64(),
+                method,
+                error
+            );
             return Err(anyhow!("RPC error: {}", error));
         }
+
+        debug!(
+            "RPC call succeeded in {:.2}s - method: {}",
+            duration.as_secs_f64(),
+            method
+        );
 
         Ok(response["result"].clone())
     }
 
     async fn update_mempool(&self) -> Result<()> {
-        let mempool_info = self.make_rpc_call("getrawmempool", vec![json!(true)]).await?;
-        
+        let start_time = SystemTime::now();
+        info!("Starting mempool sync");
+
+        let mempool_info = self
+            .make_rpc_call("getrawmempool", vec![json!(true)])
+            .await?;
+
         let mut txs = self.mempool_txs.write().await;
-        
+        let initial_count = txs.len();
+
         // Remove stale transactions
         txs.retain(|txid, _| mempool_info[txid.to_string()].is_object());
-        
+        let removed_count = initial_count - txs.len();
+        if removed_count > 0 {
+            info!("Removed {} stale transactions", removed_count);
+        }
+
         // Add/update transactions
+        let mut added_count = 0;
         for (txid_str, info) in mempool_info.as_object().unwrap() {
             let txid = Txid::from_hex(txid_str)?;
-            
+
             if !txs.contains_key(&txid) {
-                let tx_hex = self.make_rpc_call("getrawtransaction", vec![json!(txid_str)]).await?;
+                let tx_hex = self
+                    .make_rpc_call("getrawtransaction", vec![json!(txid_str)])
+                    .await?;
                 let tx_bytes = hex::decode(tx_hex.as_str().unwrap())?;
                 let tx: Transaction = deserialize(&tx_bytes)?;
-                
-                txs.insert(txid, MempoolTxInfo {
-                    tx,
-                    fee: (info["fee"].as_f64().unwrap() * 100_000_000.0) as u64, // Convert BTC to sats
-                    vsize: info["vsize"].as_u64().unwrap(),
-                    fee_rate: info["fee"].as_f64().unwrap() * 100_000_000.0 / info["vsize"].as_f64().unwrap(),
-                    ancestors: info["depends"].as_array().unwrap()
-                        .iter()
-                        .filter_map(|v| Txid::from_hex(v.as_str()?).ok())
-                        .collect(),
-                    descendants: HashSet::new(),
-                    received_time: SystemTime::now(),
-                });
+
+                txs.insert(
+                    txid,
+                    MempoolTxInfo {
+                        tx,
+                        fee: (info["fees"]["base"].as_f64().unwrap() * 100_000_000.0) as u64, // Convert BTC to sats
+                        vsize: info["vsize"].as_u64().unwrap(),
+                        fee_rate: info["fees"]["base"].as_f64().unwrap() * 100_000_000.0
+                            / info["vsize"].as_f64().unwrap(),
+                        ancestors: info["depends"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .filter_map(|v| Txid::from_hex(v.as_str()?).ok())
+                            .collect(),
+                        descendants: HashSet::new(), // Will be populated later
+                        received_time: SystemTime::now(),
+                    },
+                );
+                added_count += 1;
             }
+        }
+
+        if added_count > 0 {
+            info!("Added {} new transactions", added_count);
         }
 
         // Update descendant sets
@@ -201,10 +251,23 @@ impl MempoolTracker {
             }
         }
 
+        let duration = SystemTime::now()
+            .duration_since(start_time)
+            .unwrap_or(Duration::from_secs(0));
+        info!(
+            "Mempool sync complete - {} total transactions in {:.2}s",
+            txs.len(),
+            duration.as_secs_f64()
+        );
+
         Ok(())
     }
 
-    fn get_ancestor_set_info(&self, txs: &HashMap<Txid, MempoolTxInfo>, txid: &Txid) -> (u64, u64, f64) {
+    fn get_ancestor_set_info(
+        &self,
+        txs: &HashMap<Txid, MempoolTxInfo>,
+        txid: &Txid,
+    ) -> (u64, u64, f64) {
         let mut total_fee = 0;
         let mut total_vsize = 0;
         let mut seen = HashSet::new();
@@ -238,7 +301,9 @@ impl MempoolTracker {
         // Basic high-fee template
         let mut tx_entries: Vec<_> = txs.iter().collect();
         tx_entries.sort_by(|a, b| {
-            b.1.fee_rate.partial_cmp(&a.1.fee_rate).unwrap_or(Ordering::Equal)
+            b.1.fee_rate
+                .partial_cmp(&a.1.fee_rate)
+                .unwrap_or(Ordering::Equal)
         });
 
         let mut template = BlockTemplate {
@@ -280,7 +345,7 @@ impl MempoolTracker {
         // Store templates
         let mut block_templates = self.block_templates.write().await;
         *block_templates = templates;
-        
+
         let mut last_update = self.last_template_update.write().await;
         *last_update = SystemTime::now();
 
@@ -298,7 +363,8 @@ impl MempoolTracker {
                 let last_update = *self.last_template_update.read().await;
                 if SystemTime::now()
                     .duration_since(last_update)
-                    .unwrap_or(Duration::from_secs(0)) >= TEMPLATE_CACHE_DURATION
+                    .unwrap_or(Duration::from_secs(0))
+                    >= TEMPLATE_CACHE_DURATION
                 {
                     if let Err(e) = self.generate_block_templates().await {
                         debug!("Error generating block templates: {}", e);
@@ -316,6 +382,11 @@ async fn handle_jsonrpc(
     body: web::Json<JsonRpcRequest>,
     state: web::Data<AppState>,
 ) -> ActixResult<impl Responder> {
+    debug!(
+        "Received JSON-RPC request - method: {}, params: {:?}",
+        body.method, body.params
+    );
+
     match body.method.as_str() {
         "metashrew_getmempooltxs" => {
             let txs = state.tracker.mempool_txs.read().await;
@@ -339,17 +410,20 @@ async fn handle_jsonrpc(
 
         "metashrew_getblocktemplates" => {
             let templates = state.tracker.block_templates.read().await;
-            let result = templates.iter()
-                .map(|template| json!({
-                    "txids": template.txids.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
-                    "total_fees": template.total_fees,
-                    "total_vsize": template.total_vsize,
-                    "expected_reward": template.expected_reward,
-                    "timestamp": template.timestamp
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::from_secs(0))
-                        .as_secs(),
-                }))
+            let result = templates
+                .iter()
+                .map(|template| {
+                    json!({
+                        "txids": template.txids.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
+                        "total_fees": template.total_fees,
+                        "total_vsize": template.total_vsize,
+                        "expected_reward": template.expected_reward,
+                        "timestamp": template.timestamp
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or(Duration::from_secs(0))
+                            .as_secs(),
+                    })
+                })
                 .collect::<Vec<_>>();
 
             Ok(HttpResponse::Ok().json(JsonRpcResponse {
@@ -367,7 +441,7 @@ async fn handle_jsonrpc(
                 data: None,
             },
             jsonrpc: "2.0".to_string(),
-        }))
+        })),
     }
 }
 
@@ -377,10 +451,7 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     // Create mempool tracker
-    let tracker = Arc::new(MempoolTracker::new(
-        args.daemon_rpc_url,
-        args.auth,
-    ));
+    let tracker = Arc::new(MempoolTracker::new(args.daemon_rpc_url, args.auth));
 
     // Start background tasks
     tracker.clone().start_background_tasks().await;
@@ -394,14 +465,13 @@ async fn main() -> Result<()> {
     info!("Starting server at http://{}:{}", args.host, args.port);
     HttpServer::new(move || {
         App::new()
-            .wrap(Cors::default()
-                .allowed_origin_fn(|origin, _| {
-                    if let Ok(origin_str) = origin.to_str() {
-                        origin_str.starts_with("http://localhost:")
-                    } else {
-                        false
-                    }
-                }))
+            .wrap(Cors::default().allowed_origin_fn(|origin, _| {
+                if let Ok(origin_str) = origin.to_str() {
+                    origin_str.starts_with("http://localhost:")
+                } else {
+                    false
+                }
+            }))
             .app_data(app_state.clone())
             .service(handle_jsonrpc)
     })

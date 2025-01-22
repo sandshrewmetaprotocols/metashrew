@@ -260,7 +260,7 @@ async fn jsonrpc_call(
         };
 
         match context.runtime.view(
-            view_name,
+            view_name.to_string(),
             &hex::decode(input_hex.trim_start_matches("0x"))
                 .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
             height,

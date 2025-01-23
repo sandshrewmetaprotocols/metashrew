@@ -1,6 +1,6 @@
 [package]
 name = "rockshrew-runtime"
-version = "8.0.5"
+version = "8.1.0"
 edition = "2021"
 
 [dependencies]

@@ -1936,7 +1936,7 @@ dependencies = [
 
 [[package]]
 name = "memshrew"
-version = "0.1.0"
+version = "8.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -1956,7 +1956,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-runtime"
-version = "8.0.5"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2628,7 +2628,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew"
-version = "8.0.5"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-mono"
-version = "0.1.0"
+version = "8.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -2675,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-runtime"
-version = "8.0.5"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -2690,7 +2690,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-view"
-version = "8.0.5"
+version = "8.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",

@@ -2,8 +2,10 @@ use actix_cors::Cors;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result as ActixResult};
 use anyhow::{anyhow, Result};
 use bitcoin::consensus::encode::deserialize;
+use bitcoin::consensus::Encodable;
 use bitcoin::hashes::Hash;
-use bitcoin::{Transaction, Txid};
+use bitcoin::absolute::LockTime;
+use bitcoin::{Amount, Transaction, Txid};
 use clap::Parser;
 use env_logger;
 use itertools::Itertools;
@@ -34,6 +36,9 @@ const UPDATE_INTERVAL: Duration = Duration::from_secs(2);
 const TEMPLATE_CACHE_DURATION: Duration = Duration::from_secs(30);
 const BLOCK_CONFIRM_TARGETS: [u32; 3] = [1, 2, 3]; // Number of blocks to target
 const MAX_BLOCK_WEIGHT: u32 = 4_000_000;
+// Block header constants
+const VERSION: i32 = 1;
+const BLOCK_HEADER_SIZE: usize = 80;
 const MIN_FEE_RATE: f64 = 1.0; // sat/vB
 
 #[derive(Parser, Debug)]
@@ -128,6 +133,69 @@ impl MempoolTracker {
             last_template_update: Arc::new(RwLock::new(SystemTime::UNIX_EPOCH)),
         }
     }
+fn build_block_header(&self) -> Vec<u8> {
+    let mut header = Vec::with_capacity(BLOCK_HEADER_SIZE);
+    
+    // Version
+    header.extend(&VERSION.to_le_bytes());
+    
+    // Previous block hash (zeros)
+    header.extend(&[0u8; 32]);
+    
+    // Merkle root (will be updated later)
+    header.extend(&[0u8; 32]);
+    
+    // Timestamp (current time)
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::from_secs(0))
+        .as_secs() as u32;
+    header.extend(&timestamp.to_le_bytes());
+    
+    // Bits (difficulty target - using testnet value)
+    header.extend(&0x1d00ffffu32.to_le_bytes());
+    
+    // Nonce
+    header.extend(&0u32.to_le_bytes());
+    
+    header
+}
+
+fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxInfo>) -> Result<String> {
+    let mut block_data = self.build_block_header();
+    
+    // Add transaction count as varint
+    let tx_count = template.txids.len() as u64 + 1; // +1 for coinbase
+    let mut varint = Vec::new();
+    bitcoin::consensus::encode::VarInt(tx_count).consensus_encode(&mut varint)?;
+    block_data.extend(varint);
+    
+    // Add dummy coinbase transaction
+    let coinbase_tx = Transaction {
+        version: bitcoin::transaction::Version(1),
+        lock_time: LockTime::ZERO,
+        input: vec![bitcoin::TxIn {
+            previous_output: bitcoin::OutPoint::default(),
+            script_sig: bitcoin::Script::new().into(),
+            sequence: bitcoin::Sequence(0xFFFFFFFF),
+            witness: bitcoin::Witness::default(),
+        }],
+        output: vec![bitcoin::TxOut {
+            value: Amount::from_sat(template.expected_reward),
+            script_pubkey: bitcoin::Script::new().into(),
+        }],
+    };
+    block_data.extend(bitcoin::consensus::encode::serialize(&coinbase_tx));
+    
+    // Add all other transactions
+    for txid in &template.txids {
+        if let Some(tx_info) = txs.get(txid) {
+            block_data.extend(bitcoin::consensus::encode::serialize(&tx_info.tx));
+        }
+    }
+    
+    Ok(hex::encode(block_data))
+}
 
     async fn make_rpc_call(&self, method: &str, params: Vec<Value>) -> Result<Value> {
         let start_time = SystemTime::now();
@@ -393,18 +461,36 @@ async fn handle_jsonrpc(
     );
 
     match body.method.as_str() {
+        "memshrew_build" => {
+            let txs = state.tracker.mempool_txs.read().await;
+            let templates = state.tracker.block_templates.read().await;
+            
+            let mut blocks = Vec::new();
+            for template in templates.iter() {
+                match state.tracker.encode_block(template, &txs) {
+                    Ok(hex) => blocks.push(hex),
+                    Err(e) => debug!("Error encoding block: {}", e),
+                }
+            }
+
+            Ok(HttpResponse::Ok().json(JsonRpcResponse {
+                id: body.id,
+                result: json!(blocks),
+                jsonrpc: "2.0".to_string(),
+            }))
+        }
         "memshrew_getmempooltxs" => {
             let txs = state.tracker.mempool_txs.read().await;
             let result = txs.iter()
-	                    .map(|(txid, info)| json!({
-	                        "txid": txid.to_string(),
-	                        "fee": info.fee,
-	                        "vsize": info.vsize,
-	                        "fee_rate": info.fee_rate,
-	                        "ancestors": info.ancestors.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
-	                        "descendants": info.descendants.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
-	                    }))
-	                    .collect::<Vec<_>>();
+                    .map(|(txid, info)| json!({
+                        "txid": txid.to_string(),
+                        "fee": info.fee,
+                        "vsize": info.vsize,
+                        "fee_rate": info.fee_rate,
+                        "ancestors": info.ancestors.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
+                        "descendants": info.descendants.iter().map(|tx| tx.to_string()).collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>();
 
             Ok(HttpResponse::Ok().json(JsonRpcResponse {
                 id: body.id,

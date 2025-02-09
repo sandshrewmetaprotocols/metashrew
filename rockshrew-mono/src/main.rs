@@ -80,6 +80,34 @@ struct JsonRpcErrorObject {
     data: Option<String>,
 }
 
+#[derive(Debug)]
+struct IndexerError(anyhow::Error);
+
+impl std::fmt::Display for IndexerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<anyhow::Error> for IndexerError {
+    fn from(err: anyhow::Error) -> Self {
+        IndexerError(err)
+    }
+}
+
+impl error::ResponseError for IndexerError {
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::Ok().json(JsonRpcError {
+            id: 0, // Generic ID since we lost context
+            error: JsonRpcErrorObject {
+                code: -32000,
+                message: self.0.to_string(),
+                data: None,
+            },
+            jsonrpc: "2.0".to_string(),
+        })
+    }
+}
 struct IndexerState {
     runtime: Arc<Mutex<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
     args: Arc<Args>,
@@ -370,6 +398,49 @@ async fn handle_jsonrpc(
             result: unsafe { _HEIGHT }.to_string(),
             jsonrpc: "2.0".to_string(),
         }))
+    } else if body.method == "metashrew_getblockhash" {
+        if body.params.len() != 1 {
+            return Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: "Invalid params: requires [block_number]".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            }));
+        }
+
+        let height = match &body.params[0] {
+            Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+            _ => return Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: "Invalid params: block_number must be a number".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
+        };
+
+        let key = (String::from(HEIGHT_TO_HASH) + &height.to_string()).into_bytes();
+        match runtime.context.lock().unwrap().db.get(&key).map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("DB connection error while fetching blockhash")))? {
+            Some(hash) => Ok(HttpResponse::Ok().json(JsonRpcResult {
+                id: body.id,
+                result: format!("0x{}", hex::encode(hash)),
+                jsonrpc: "2.0".to_string(),
+            })),
+            None => Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32000,
+                    message: "Block hash not found".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
+        }
     } else {
         Ok(HttpResponse::Ok().json(JsonRpcError {
             id: body.id,

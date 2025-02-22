@@ -216,19 +216,6 @@ where
     T: Sync + Send,
     T: Clone + 'static,
 {
-    thread_local! {
-        static INDEXER_PATH: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
-    }
-
-    pub fn set_indexer_path(path: PathBuf) {
-        Self::INDEXER_PATH.with(|p| *p.borrow_mut() = Some(path));
-    }
-
-    fn get_indexer_path() -> Result<PathBuf> {
-        Self::INDEXER_PATH
-            .with(|p| p.borrow().clone())
-            .ok_or_else(|| anyhow!("Indexer path not set"))
-    }
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string())
@@ -269,9 +256,6 @@ where
         input: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
-        // Store current module path for new_with_db
-        Self::set_indexer_path(std::env::current_exe().unwrap().parent().unwrap().join("indexer.wasm"));
-
         // Create preview context with wrapped DB
         let preview_db = {
             let guard = self.context.lock().map_err(lock_err)?;
@@ -282,7 +266,7 @@ where
         };
 
         // Create a new runtime with preview db
-        let mut runtime = Self::new_with_db(preview_db, height)?;
+        let mut runtime = Self::new_with_db(preview_db, height, self.engine.clone(), self.module.clone())?;
         runtime.context.lock().map_err(lock_err)?.block = block.clone();
 
         // Execute block via _start to populate preview db
@@ -302,7 +286,7 @@ where
         // Create new runtime just for the view using the same wrapped DB
         let mut view_runtime = {
             let context = runtime.context.lock().map_err(lock_err)?;
-            Self::new_with_db(context.db.clone(), height)?
+            Self::new_with_db(context.db.clone(), height, self.engine.clone(), self.module.clone())?
         };
         
         // Set block to input for view
@@ -885,12 +869,12 @@ where
 
         Ok(())
     }
-    fn new_with_db<U: KeyValueStoreLike + Clone + Sync + Send + 'static>(db: U, height: u32) -> Result<MetashrewRuntime<U>> {
-        let indexer_path = Self::get_indexer_path()?;
-
-        let engine = wasmtime::Engine::default();
-        let module = wasmtime::Module::from_file(&engine, indexer_path)
-            .context("Failed to load WASM module")?;
+    fn new_with_db<U: KeyValueStoreLike + Clone + Sync + Send + 'static>(
+        db: U,
+        height: u32,
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+    ) -> Result<MetashrewRuntime<U>> {
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<U>>>::new(Mutex::<
@@ -912,8 +896,8 @@ where
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
             wasmstore,
-            engine,
-            module,
+            engine: engine,
+            module: module,
             linker,
             context,
             instance,

@@ -43,6 +43,57 @@ pub struct State {
     had_failure: bool,
 }
 
+pub struct PreviewDBWrapper<T: KeyValueStoreLike + Clone> {
+    underlying_db: T,
+    overlay: std::collections::HashMap<Vec<u8>, Vec<u8>>,
+}
+
+impl<T: KeyValueStoreLike + Clone> Clone for PreviewDBWrapper<T> {
+    fn clone(&self) -> Self {
+        Self {
+            underlying_db: self.underlying_db.clone(),
+            overlay: self.overlay.clone(),
+        }
+    }
+}
+
+impl<T: KeyValueStoreLike + Clone> KeyValueStoreLike for PreviewDBWrapper<T> {
+    type Error = T::Error;
+    type Batch = T::Batch;
+
+    fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
+        // Write operations are captured in the overlay HashMap instead
+        // We'll need to extract k/v pairs from the batch and store them
+        Ok(())
+    }
+
+    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+        // Check overlay first
+        if let Some(value) = self.overlay.get(key.as_ref()) {
+            return Ok(Some(value.clone()));
+        }
+        // Fall back to underlying db
+        self.underlying_db.get(key)
+    }
+
+    fn delete<K: AsRef<[u8]>>(&mut self, _key: K) -> Result<(), Self::Error> {
+        // For preview we don't need to implement delete
+        Ok(())
+    }
+
+    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.overlay.insert(
+            key.as_ref().to_vec(),
+            value.as_ref().to_vec(),
+        );
+        Ok(())
+    }
+}
+
 pub struct MetashrewRuntimeContext<T: KeyValueStoreLike + Clone> {
     pub db: T,
     pub height: u32,
@@ -205,12 +256,17 @@ where
         input: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
-        // Create new isolated runtime with cloned context
-        let preview_context = {
+        // Create preview context with wrapped DB
+        let preview_db = {
             let guard = self.context.lock().map_err(lock_err)?;
-            MetashrewRuntimeContext::new(guard.db.clone(), height, block.clone())
+            PreviewDBWrapper {
+                underlying_db: guard.db.clone(),
+                overlay: std::collections::HashMap::new(),
+            }
         };
 
+        let preview_context = MetashrewRuntimeContext::new(preview_db, height, block.clone());
+        
         let mut linker = Linker::<State>::new(&self.engine);
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(preview_context));
@@ -222,8 +278,8 @@ where
         {
             Self::setup_linker(context.clone(), &mut linker)
                 .context("Failed to setup basic linker")?;
-            Self::setup_linker_indexer(context.clone(), &mut linker)
-                .context("Failed to setup indexer linker")?;
+            Self::setup_linker_preview(context.clone(), &mut linker)
+                .context("Failed to setup preview linker")?;
             linker.define_unknown_imports_as_traps(&self.module)?;
         }
 
@@ -840,6 +896,185 @@ where
 
         Ok(())
     }
+    fn setup_linker_preview(
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        linker: &mut Linker<State>,
+    ) -> Result<()> {
+        let context_ref = context.clone();
+        let context_get = context.clone();
+        let context_get_len = context.clone();
+        
+        linker
+            .func_wrap(
+                "env",
+                "__flush",
+                move |mut caller: Caller<'_, State>, encoded: i32| {
+                    let height = match context_ref.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    let data = mem.data(&caller);
+                    let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    // For preview, we'll store directly in the HashMap overlay
+                    let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
+                        Ok(d) => d,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    match context_ref.clone().lock() {
+                        Ok(mut ctx) => {
+                            ctx.state = 1;
+                            // Write directly to the overlay HashMap
+                            for (k, v) in decoded.list.iter().tuples() {
+                                let k_owned = <Vec<u8> as Clone>::clone(k);
+                                let v_owned = <Vec<u8> as Clone>::clone(v);
+                                
+                                let annotated = match db_annotate_value(&v_owned, height as u32) {
+                                    Ok(v) => v,
+                                    Err(_) => {
+                                        caller.data_mut().had_failure = true;
+                                        return;
+                                    }
+                                };
+
+                                // Store in overlay
+                                if let Err(_) = ctx.db.put(k_owned, annotated) {
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    }
+                },
+            )
+            .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
+
+        linker
+            .func_wrap(
+                "env",
+                "__get",
+                move |mut caller: Caller<'_, State>, key: i32, value: i32| {
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    let data = mem.data(&caller);
+                    let height = match context_get.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    match try_read_arraybuffer_as_vec(data, key) {
+                        Ok(key_vec) => {
+                            match Self::db_value_at_block(context_get.clone(), &key_vec, height) {
+                                Ok(lookup) => {
+                                    if let Err(_) = mem.write(&mut caller, value as usize, lookup.as_slice()) {
+                                        caller.data_mut().had_failure = true;
+                                    }
+                                }
+                                Err(_) => {
+                                    caller.data_mut().had_failure = true;
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            if let Ok(error_bits) = u32_to_vec(i32::MAX.try_into().unwrap()) {
+                                if let Err(_) = mem.write(
+                                    &mut caller,
+                                    (value - 4) as usize,
+                                    error_bits.as_slice(),
+                                ) {
+                                    caller.data_mut().had_failure = true;
+                                }
+                            } else {
+                                caller.data_mut().had_failure = true;
+                            }
+                        }
+                    }
+                },
+            )
+            .map_err(|e| anyhow!("Failed to wrap __get: {:?}", e))?;
+
+        linker
+            .func_wrap(
+                "env",
+                "__get_len",
+                move |mut caller: Caller<'_, State>, key: i32| -> i32 {
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => return i32::MAX,
+                        },
+                        None => return i32::MAX,
+                    };
+
+                    let data = mem.data(&caller);
+                    let height = match context_get_len.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => return i32::MAX,
+                    };
+
+                    match try_read_arraybuffer_as_vec(data, key) {
+                        Ok(key_vec) => {
+                            match Self::db_value_at_block(context_get_len.clone(), &key_vec, height) {
+                                Ok(value) => value.len() as i32,
+                                Err(_) => i32::MAX,
+                            }
+                        }
+                        Err(_) => i32::MAX,
+                    }
+                },
+            )
+            .map_err(|e| anyhow!("Failed to wrap __get_len: {:?}", e))?;
+
+        Ok(())
+    }
+
     pub fn setup_linker_indexer(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,

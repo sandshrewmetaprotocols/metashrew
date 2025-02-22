@@ -43,6 +43,7 @@ pub struct State {
     had_failure: bool,
 }
 
+#[derive(Debug)]
 pub struct PreviewDBWrapper<T: KeyValueStoreLike + Clone> {
     underlying_db: T,
     overlay: std::collections::HashMap<Vec<u8>, Vec<u8>>,
@@ -61,7 +62,7 @@ impl<T: KeyValueStoreLike + Clone> KeyValueStoreLike for PreviewDBWrapper<T> {
     type Error = T::Error;
     type Batch = T::Batch;
 
-    fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
+    fn write(&mut self, _batch: Self::Batch) -> Result<(), Self::Error> {
         // Write operations are captured in the overlay HashMap instead
         // We'll need to extract k/v pairs from the batch and store them
         Ok(())
@@ -212,10 +213,22 @@ pub fn to_usize_or_trap<'a, T: TryInto<usize>>(_caller: &mut Caller<'_, State>, 
 
 impl<T: KeyValueStoreLike> MetashrewRuntime<T>
 where
-    T: KeyValueStoreLike,
     T: Sync + Send,
-    T: Clone,
+    T: Clone + 'static,
 {
+    thread_local! {
+        static INDEXER_PATH: std::cell::RefCell<Option<PathBuf>> = std::cell::RefCell::new(None);
+    }
+
+    pub fn set_indexer_path(path: PathBuf) {
+        Self::INDEXER_PATH.with(|p| *p.borrow_mut() = Some(path));
+    }
+
+    fn get_indexer_path() -> Result<PathBuf> {
+        Self::INDEXER_PATH
+            .with(|p| p.borrow().clone())
+            .ok_or_else(|| anyhow!("Indexer path not set"))
+    }
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         let engine = wasmtime::Engine::default();
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string())
@@ -256,6 +269,9 @@ where
         input: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
+        // Store current module path for new_with_db
+        Self::set_indexer_path(std::env::current_exe().unwrap().parent().unwrap().join("indexer.wasm"));
+
         // Create preview context with wrapped DB
         let preview_db = {
             let guard = self.context.lock().map_err(lock_err)?;
@@ -265,75 +281,48 @@ where
             }
         };
 
-        let preview_context = MetashrewRuntimeContext::new(preview_db, height, block.clone());
-        
-        let mut linker = Linker::<State>::new(&self.engine);
-        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(preview_context));
+        // Create a new runtime with preview db
+        let mut runtime = Self::new_with_db(preview_db, height)?;
+        runtime.context.lock().map_err(lock_err)?.block = block.clone();
 
-        {
-            wasmstore.limiter(|state| &mut state.limits);
-        }
-
-        {
-            Self::setup_linker(context.clone(), &mut linker)
-                .context("Failed to setup basic linker")?;
-            Self::setup_linker_preview(context.clone(), &mut linker)
-                .context("Failed to setup preview linker")?;
-            linker.define_unknown_imports_as_traps(&self.module)?;
-        }
-
-        let instance = linker.instantiate(&mut wasmstore, &self.module)
-            .context("Failed to instantiate module for preview")?;
-
-        // Execute block via _start
-        let start = instance.get_typed_func::<(), ()>(&mut wasmstore, "_start")
+        // Execute block via _start to populate preview db
+        let start = runtime.instance.get_typed_func::<(), ()>(&mut runtime.wasmstore, "_start")
             .context("Failed to get _start function for preview")?;
             
-        match start.call(&mut wasmstore, ()) {
+        match start.call(&mut runtime.wasmstore, ()) {
             Ok(_) => {
-                let context_guard = context.lock().map_err(lock_err)?;
-                if context_guard.state != 1 && !wasmstore.data().had_failure {
+                let context_guard = runtime.context.lock().map_err(lock_err)?;
+                if context_guard.state != 1 && !runtime.wasmstore.data().had_failure {
                     return Err(anyhow!("indexer exited unexpectedly during preview"));
                 }
             }
             Err(e) => return Err(e).context("Error executing _start in preview"),
         }
 
-        // Now set up for view call
-        let mut view_linker = Linker::<State>::new(&self.engine);
-        let mut view_store = Store::<State>::new(&self.engine, State::new());
-
-        {
-            view_store.limiter(|state| &mut state.limits);
-        }
-
-        {
-            Self::setup_linker(context.clone(), &mut view_linker)
-                .context("Failed to setup basic linker for view")?;
-            Self::setup_linker_view(context.clone(), &mut view_linker)
-                .context("Failed to setup view linker")?;
-            view_linker.define_unknown_imports_as_traps(&self.module)?;
-        }
-
-        let view_instance = view_linker.instantiate(&mut view_store, &self.module)
-            .context("Failed to instantiate module for view")?;
-
-        // Execute view in same isolated context
-        context.lock().map_err(lock_err)?.block = input.clone();
-
-        let func = view_instance.get_typed_func::<(), i32>(&mut view_store, symbol.as_str())
+        // Create new runtime just for the view using the same wrapped DB
+        let mut view_runtime = {
+            let context = runtime.context.lock().map_err(lock_err)?;
+            Self::new_with_db(context.db.clone(), height)?
+        };
+        
+        // Set block to input for view
+        view_runtime.context.lock().map_err(lock_err)?.block = input.clone();
+        
+        // Execute view function
+        let func = view_runtime.instance
+            .get_typed_func::<(), i32>(&mut view_runtime.wasmstore, symbol.as_str())
             .context("Failed to get view function")?;
-            
-        let result = func.call(&mut view_store, ())
+        
+        let result = func.call(&mut view_runtime.wasmstore, ())
             .context("Failed to execute view function")?;
-
-        let memory = view_instance
-            .get_memory(&mut view_store, "memory")
+        
+        let memory = view_runtime.instance
+            .get_memory(&mut view_runtime.wasmstore, "memory")
             .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
-            
+        
+        // Get the final result
         Ok(read_arraybuffer_as_vec(
-            memory.data(&mut view_store),
+            memory.data(&mut view_runtime.wasmstore),
             result,
         ))
     }
@@ -896,6 +885,41 @@ where
 
         Ok(())
     }
+    fn new_with_db<U: KeyValueStoreLike + Clone + Sync + Send + 'static>(db: U, height: u32) -> Result<MetashrewRuntime<U>> {
+        let indexer_path = Self::get_indexer_path()?;
+
+        let engine = wasmtime::Engine::default();
+        let module = wasmtime::Module::from_file(&engine, indexer_path)
+            .context("Failed to load WASM module")?;
+        let mut linker = Linker::<State>::new(&engine);
+        let mut wasmstore = Store::<State>::new(&engine, State::new());
+        let context = Arc::<Mutex<MetashrewRuntimeContext<U>>>::new(Mutex::<
+            MetashrewRuntimeContext<U>,
+        >::new(
+            MetashrewRuntimeContext::<U>::new(db, height, vec![]),
+        ));
+        {
+            wasmstore.limiter(|state| &mut state.limits)
+        }
+        {
+            MetashrewRuntime::<U>::setup_linker(context.clone(), &mut linker)
+                .context("Failed to setup basic linker")?;
+            MetashrewRuntime::<U>::setup_linker_preview(context.clone(), &mut linker)
+                .context("Failed to setup preview linker")?;
+            linker.define_unknown_imports_as_traps(&module)?;
+        }
+        let instance = linker.instantiate(&mut wasmstore, &module)
+            .context("Failed to instantiate WASM module")?;
+        Ok(MetashrewRuntime {
+            wasmstore,
+            engine,
+            module,
+            linker,
+            context,
+            instance,
+        })
+    }
+
     fn setup_linker_preview(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,

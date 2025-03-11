@@ -25,3 +25,7 @@ MANIFEST-*
 CURRENT
 LOG*
 OPTIONS-*
+
+
+memory-bank/activeContext.md
+memory-bank/progress.md

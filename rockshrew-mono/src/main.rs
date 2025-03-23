@@ -44,6 +44,8 @@ struct Args {
     host: String,
     #[arg(long, env = "PORT", default_value_t = 8080)]
     port: u16,
+    #[arg(long, help = "CORS allowed origins (e.g., '*' for all origins, or specific domains)")]
+    cors: Option<String>,
 }
 
 #[derive(Clone)]
@@ -639,23 +641,46 @@ async fn main() -> Result<()> {
     });
 
     // Start the JSON-RPC server
-    let server_handle = tokio::spawn(
+    let server_handle = tokio::spawn({
+        let args_clone = args.clone();
         HttpServer::new(move || {
-            App::new()
-                .wrap(Cors::default().allowed_origin_fn(|origin, _| {
-                    if let Ok(origin_str) = origin.to_str() {
-                        origin_str.starts_with("http://localhost:")
-                    } else {
-                        false
+            let cors = match &args_clone.cors {
+                Some(cors_value) if cors_value == "*" => {
+                    // Allow all origins
+                    Cors::default()
+                        .allow_any_origin()
+                        .allow_any_method()
+                        .allow_any_header()
+                }
+                Some(cors_value) => {
+                    // Allow specific origins
+                    let mut cors_builder = Cors::default();
+                    for origin in cors_value.split(',') {
+                        cors_builder = cors_builder.allowed_origin(origin.trim());
                     }
-                }))
+                    cors_builder
+                }
+                None => {
+                    // Default: only allow localhost
+                    Cors::default()
+                        .allowed_origin_fn(|origin, _| {
+                            if let Ok(origin_str) = origin.to_str() {
+                                origin_str.starts_with("http://localhost:")
+                            } else {
+                                false
+                            }
+                        })
+                }
+            };
+
+            App::new()
+                .wrap(cors)
                 .app_data(app_state.clone())
                 .service(handle_jsonrpc)
         })
         .bind((args.host.as_str(), args.port))?
-        .run(),
-    );
-
+        .run()
+    });
     info!("Server running at http://{}:{}", args.host, args.port);
 
     // Wait for either component to finish (or fail)

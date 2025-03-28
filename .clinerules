@@ -126,9 +126,9 @@ flowchart TD
 
 Note: When triggered by update memory bank, I MUST review every memory bank file, even if some don't require updates. Focus particularly on `activeContext.md` and `progress.md` as they track current state.
 
-## Project Intelligence (projectJournal)
+## Project Intelligence
 
-The `projectJournal.md` file is my learning journal for each project. It captures important patterns, preferences, and project intelligence that help me work more effectively. As I work with you and the project, I'll discover and document key insights that aren't obvious from the code alone.
+This section captures important patterns, preferences, and project intelligence about the Metashrew project that help me work more effectively. These insights are not always obvious from the code alone.
 
 ```
 flowchart TD
@@ -150,15 +150,34 @@ flowchart TD
     Learn --> Apply
 ```
 
-### What to Capture
- - Critical implementation paths
- - User preferences and workflow
- - Project-specific patterns
- - Known challenges
- - Evolution of project decisions
- - Tool usage patterns
+### Project-Specific Patterns
 
+#### 1. Architecture Patterns
+- **WebAssembly Host Interface**: Metashrew uses a well-defined host interface for communication between the host (Metashrew) and guest (WASM modules).
+- **Append-Only Database**: The database is designed as append-only with height annotation for historical queries and chain reorganization handling.
+- **Actor Model**: Uses Tokio for asynchronous processing with mutex-protected shared state.
+- **Dependency Injection**: Uses traits like `KeyValueStoreLike` to abstract storage implementations.
 
-The format is flexible - focus on capturing valuable insights that help me work more effectively with you and the project. Think of .clinerules as a living document that grows smarter as we work together.
+#### 2. Development Workflows
+- **RocksDB Configuration**: Performance tuning of RocksDB is critical, especially for complex metaprotocols like ALKANES.
+- **Combined Binary Preference**: Using rockshrew-mono is recommended for stability, especially with large databases.
+- **Docker Deployment**: Docker and Docker Compose are the preferred deployment methods.
+
+#### 3. Critical Implementation Paths
+- **Block Processing Flow**: Bitcoin Node → Metashrew Indexer → WASM Module → Database Updates
+- **Query Flow**: Client Application → JSON-RPC Server → View Function → Database Query
+- **Chain Reorganization Flow**: Detect Divergence → Identify Affected Keys → Rollback State Changes → Reprocess New Blocks
+
+#### 4. Known Challenges
+- **View Layer Stability**: The view layer can be unstable when running as a separate process with large databases.
+- **Memory Usage Growth**: Memory usage can grow significantly over time, especially with complex metaprotocols.
+- **Database Size Growth**: The append-only design leads to continuous growth in database size.
+
+#### 5. Tool Usage Patterns
+- **RocksDB Optimization**: Regular tuning of RocksDB settings based on workload characteristics.
+- **Docker Compose**: Used for managing multi-container deployments.
+- **Bitcoin Core RPC**: Used for retrieving blockchain data.
+
+The format is flexible - focus on capturing valuable insights that help me work more effectively with the Metashrew project. This section will grow smarter as we work together.
 
 REMEMBER: After every memory reset, I begin completely fresh. The Memory Bank is my only link to previous work. It must be maintained with precision and clarity, as my effectiveness depends entirely on its accuracy.

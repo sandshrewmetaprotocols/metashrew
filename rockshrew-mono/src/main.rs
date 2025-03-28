@@ -153,10 +153,14 @@ async fn post(&self, body: String) -> Result<Response> {
     let mut retry_delay = Duration::from_millis(100);
     let max_delay = Duration::from_secs(30);
     let max_retries = 10;
+    let mut response = None;
     
     for attempt in 0..=max_retries {
         match self.post_once(body.clone()).await {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                response = Some(v);
+                return Ok(response.unwrap());
+            },
             Err(e) => {
                 if attempt == max_retries {
                     return Err(anyhow!("Max retries exceeded: {}", e));
@@ -177,7 +181,6 @@ async fn post(&self, body: String) -> Result<Response> {
     }
     
     Err(anyhow!("Unreachable: max retries exceeded"))
-        Ok(response.unwrap())
     }
 
     async fn fetch_blockcount(&self) -> Result<u32> {
@@ -347,6 +350,8 @@ async fn post(&self, body: String) -> Result<Response> {
         let fetcher_handle = {
             let args = self.args.clone();
             let indexer = self.clone();
+            let result_sender_clone = result_sender.clone();
+            let block_sender_clone = block_sender.clone();
             tokio::spawn(async move {
                 let mut current_height = height;
                 
@@ -365,7 +370,7 @@ async fn post(&self, body: String) -> Result<Response> {
                         Err(e) => {
                             error!("Failed to determine best height: {}", e);
                             // Send error result and continue
-                            if result_sender.send(BlockResult::Error(current_height, e)).await.is_err() {
+                            if result_sender_clone.send(BlockResult::Error(current_height, e)).await.is_err() {
                                 break;
                             }
                             sleep(Duration::from_secs(1)).await;
@@ -378,14 +383,14 @@ async fn post(&self, body: String) -> Result<Response> {
                         Ok(block_data) => {
                             debug!("Fetched block {} ({})", best_height, block_data.len());
                             // Send block to processor
-                            if block_sender.send((best_height, block_data)).await.is_err() {
+                            if block_sender_clone.send((best_height, block_data)).await.is_err() {
                                 break;
                             }
                         },
                         Err(e) => {
                             error!("Failed to fetch block {}: {}", best_height, e);
                             // Send error result
-                            if result_sender.send(BlockResult::Error(best_height, e)).await.is_err() {
+                            if result_sender_clone.send(BlockResult::Error(best_height, e)).await.is_err() {
                                 break;
                             }
                             sleep(Duration::from_secs(1)).await;
@@ -403,6 +408,7 @@ async fn post(&self, body: String) -> Result<Response> {
         // Spawn block processor task
         let processor_handle = {
             let indexer = self.clone();
+            let result_sender_clone = result_sender.clone();
             tokio::spawn(async move {
                 while let Some((block_height, block_data)) = block_receiver.recv().await {
                     debug!("Processing block {} ({})", block_height, block_data.len());
@@ -413,7 +419,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     };
                     
                     // Send result
-                    if result_sender.send(result).await.is_err() {
+                    if result_sender_clone.send(result).await.is_err() {
                         break;
                     }
                 }
@@ -496,21 +502,21 @@ async fn post(&self, body: String) -> Result<Response> {
                         run_err
                     })?;
                 }
-                
-                // Allow cloning for use in async tasks
-                impl Clone for IndexerState {
-                    fn clone(&self) -> Self {
-                        Self {
-                            runtime: self.runtime.clone(),
-                            args: self.args.clone(),
-                            start_block: self.start_block,
-                        }
-                    }
-                }
             }
 
             height = best + 1;
             CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+        }
+    }
+}
+
+// Allow cloning for use in async tasks
+impl Clone for IndexerState {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            args: self.args.clone(),
+            start_block: self.start_block,
         }
     }
 }

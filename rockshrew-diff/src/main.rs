@@ -3,17 +3,21 @@ use clap::{command, Parser};
 use env_logger;
 use hex;
 use itertools::Itertools;
-use log::info;
+use log::{debug, error, info};
 use metashrew_runtime::MetashrewRuntime;
+use rand::Rng;
 use rockshrew_runtime::{set_label, RocksDBRuntimeAdapter};
 use rocksdb::Options;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::sleep;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about = "Compare the output of two WASM modules in Metashrew", long_about = None)]
 struct Args {
     #[arg(long)]
@@ -42,9 +46,22 @@ struct Args {
     
     #[arg(long)]
     prefix: String,
+    
+    // Pipeline configuration
+    #[arg(long, default_value_t = 5)]
+    pipeline_size: usize,
 }
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
+static CURRENT_HEIGHT: AtomicU32 = AtomicU32::new(0);
+
+// Block processing result for the pipeline
+#[derive(Debug)]
+enum BlockResult {
+    Success(u32),  // Block height that was successfully processed
+    Error(u32, anyhow::Error),  // Block height and error
+    Difference(u32),  // Block height where a difference was found
+}
 
 // KeyTracker to monitor keys being written with a specific prefix
 struct KeyTracker {
@@ -174,22 +191,62 @@ impl RockshrewDiffRuntime {
     pub async fn process_block(&mut self, block_data: Vec<u8>, height: u32) -> Result<bool> {
         info!("Processing block {} with both runtimes", height);
         
-        // Set the block data and height for both runtimes
-        self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?.block = block_data.clone();
-        self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?.height = height;
-        self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?.db.set_height(height);
-        
-        self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?.block = block_data.clone();
-        self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?.height = height;
-        self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?.db.set_height(height);
-        
-        // Run both runtimes
-        if let Err(e) = self.primary_runtime.run() {
-            return Err(anyhow!("Error running primary WASM module: {}", e));
+        // Set the block data and height for primary runtime with efficient mutex locking
+        {
+            let mut context = self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+            context.block = block_data.clone();
+            context.height = height;
+            context.db.set_height(height);
         }
         
-        if let Err(e) = self.compare_runtime.run() {
-            return Err(anyhow!("Error running compare WASM module: {}", e));
+        // Set the block data and height for compare runtime with efficient mutex locking
+        {
+            let mut context = self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+            context.block = block_data.clone();
+            context.height = height;
+            context.db.set_height(height);
+        }
+        
+        // Run primary runtime with better error handling
+        match self.primary_runtime.run() {
+            Ok(_) => {
+                debug!("Successfully ran primary WASM module for block {}", height);
+            },
+            Err(e) => {
+                error!("Error running primary WASM module: {}, refreshing memory and retrying", e);
+                self.primary_runtime.refresh_memory().map_err(|refresh_err| {
+                    error!("Memory refresh failed for primary runtime: {}", refresh_err);
+                    anyhow!("Memory refresh failed for primary runtime: {}", refresh_err)
+                })?;
+                
+                self.primary_runtime.run().map_err(|run_err| {
+                    error!("Runtime execution failed after memory refresh for primary runtime: {}", run_err);
+                    anyhow!("Error running primary WASM module after memory refresh: {}", run_err)
+                })?;
+                
+                debug!("Successfully ran primary WASM module for block {} after memory refresh", height);
+            }
+        }
+        
+        // Run compare runtime with better error handling
+        match self.compare_runtime.run() {
+            Ok(_) => {
+                debug!("Successfully ran compare WASM module for block {}", height);
+            },
+            Err(e) => {
+                error!("Error running compare WASM module: {}, refreshing memory and retrying", e);
+                self.compare_runtime.refresh_memory().map_err(|refresh_err| {
+                    error!("Memory refresh failed for compare runtime: {}", refresh_err);
+                    anyhow!("Memory refresh failed for compare runtime: {}", refresh_err)
+                })?;
+                
+                self.compare_runtime.run().map_err(|run_err| {
+                    error!("Runtime execution failed after memory refresh for compare runtime: {}", run_err);
+                    anyhow!("Error running compare WASM module after memory refresh: {}", run_err)
+                })?;
+                
+                debug!("Successfully ran compare WASM module for block {} after memory refresh", height);
+            }
         }
         
         // Extract keys with the specified prefix from both runtimes
@@ -237,17 +294,59 @@ impl RockshrewDiffRuntime {
         Ok(keys)
     }
 
-    // Helper function to fetch a block from the Bitcoin node
-    async fn fetch_block(&self, height: u32) -> Result<Vec<u8>> {
-        use serde_json::{json, Value, Number};
-        use reqwest::{Client, Url};
+    // Helper function to send a request with exponential backoff and jitter
+    async fn send_request(&self, url: reqwest::Url, request_body: serde_json::Value) -> Result<serde_json::Value> {
+        use serde_json::Value;
+        use reqwest::Client;
         
-        // Create the JSON-RPC request
-        let blockhash = self.fetch_blockhash(height).await?;
-        
-        // Create the request to get the block data
         let client = Client::new();
-        let url = match self.args.auth.clone() {
+        let mut retry_delay = Duration::from_millis(100);
+        let max_delay = Duration::from_secs(30);
+        let max_retries = 10;
+        
+        for attempt in 0..=max_retries {
+            match client.post(url.clone())
+                .header("Content-Type", "application/json")
+                .json(&request_body)
+                .send()
+                .await {
+                    Ok(response) => {
+                        match response.json::<Value>().await {
+                            Ok(json) => return Ok(json),
+                            Err(e) => {
+                                if attempt == max_retries {
+                                    return Err(anyhow!("JSON parse error: {}", e));
+                                }
+                            }
+                        }
+                    },
+                    Err(e) => {
+                        if attempt == max_retries {
+                            return Err(anyhow!("Request error: {}", e));
+                        }
+                    }
+                }
+            
+            // Calculate exponential backoff with jitter
+            let jitter = rand::thread_rng().gen_range(0..=100) as u64;
+            retry_delay = std::cmp::min(
+                max_delay,
+                retry_delay * 2 + Duration::from_millis(jitter)
+            );
+            
+            debug!("Request failed (attempt {}), retrying in {:?}",
+                   attempt + 1, retry_delay);
+            sleep(retry_delay).await;
+        }
+        
+        Err(anyhow!("Unreachable: max retries exceeded"))
+    }
+    
+    // Helper function to get the URL with auth
+    fn get_url_with_auth(&self) -> Result<reqwest::Url> {
+        use reqwest::Url;
+        
+        match self.args.auth.clone() {
             Some(auth) => {
                 let mut url = Url::parse(&self.args.daemon_rpc_url)
                     .map_err(|e| anyhow!("Invalid URL: {}", e))?;
@@ -257,11 +356,22 @@ impl RockshrewDiffRuntime {
                     .map_err(|_| anyhow!("Failed to set username"))?;
                 url.set_password(Some(password))
                     .map_err(|_| anyhow!("Failed to set password"))?;
-                url
+                Ok(url)
             },
-            None => Url::parse(&self.args.daemon_rpc_url)
-                .map_err(|e| anyhow!("Invalid URL: {}", e))?,
-        };
+            None => Ok(Url::parse(&self.args.daemon_rpc_url)
+                .map_err(|e| anyhow!("Invalid URL: {}", e))?)
+        }
+    }
+    
+    // Helper function to fetch a block from the Bitcoin node
+    async fn fetch_block(&self, height: u32) -> Result<Vec<u8>> {
+        use serde_json::{json, Value, Number};
+        
+        // Create the JSON-RPC request
+        let blockhash = self.fetch_blockhash(height).await?;
+        
+        // Get URL with auth
+        let url = self.get_url_with_auth()?;
         
         let request_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -278,18 +388,8 @@ impl RockshrewDiffRuntime {
             ]
         });
         
-        // Send the request
-        let response = client.post(url)
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Request error: {}", e))?;
-            
-        // Parse the response
-        let response_json: Value = response.json()
-            .await
-            .map_err(|e| anyhow!("JSON parse error: {}", e))?;
+        // Send the request with retry logic
+        let response_json = self.send_request(url, request_body).await?;
             
         // Extract the block data
         let block_hex = response_json["result"]
@@ -306,25 +406,9 @@ impl RockshrewDiffRuntime {
     // Helper function to fetch a blockhash from the Bitcoin node
     async fn fetch_blockhash(&self, height: u32) -> Result<Vec<u8>> {
         use serde_json::{json, Value};
-        use reqwest::{Client, Url};
         
-        // Create the JSON-RPC request
-        let client = Client::new();
-        let url = match self.args.auth.clone() {
-            Some(auth) => {
-                let mut url = Url::parse(&self.args.daemon_rpc_url)
-                    .map_err(|e| anyhow!("Invalid URL: {}", e))?;
-                let (username, password) = auth.split(':').next_tuple()
-                    .ok_or_else(|| anyhow!("Invalid auth format, expected username:password"))?;
-                url.set_username(username)
-                    .map_err(|_| anyhow!("Failed to set username"))?;
-                url.set_password(Some(password))
-                    .map_err(|_| anyhow!("Failed to set password"))?;
-                url
-            },
-            None => Url::parse(&self.args.daemon_rpc_url)
-                .map_err(|e| anyhow!("Invalid URL: {}", e))?,
-        };
+        // Get URL with auth
+        let url = self.get_url_with_auth()?;
         
         let request_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -338,18 +422,8 @@ impl RockshrewDiffRuntime {
             "params": [height]
         });
         
-        // Send the request
-        let response = client.post(url)
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| anyhow!("Request error: {}", e))?;
-            
-        // Parse the response
-        let response_json: Value = response.json()
-            .await
-            .map_err(|e| anyhow!("JSON parse error: {}", e))?;
+        // Send the request with retry logic
+        let response_json = self.send_request(url, request_body).await?;
             
         // Extract the blockhash
         let blockhash_hex = response_json["result"]
@@ -363,9 +437,144 @@ impl RockshrewDiffRuntime {
         Ok(blockhash)
     }
 
-    // Main run function
+    
+    // Parallel processing with pipeline
+    pub async fn run_pipeline(&mut self) -> Result<()> {
+        let mut height = self.start_block;
+        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+        
+        // Create channels for the pipeline
+        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(self.args.pipeline_size);
+        let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(self.args.pipeline_size);
+        
+        // Spawn block fetcher task
+        let fetcher_handle = {
+            let args = self.args.clone();
+            let mut diff_runtime = self.clone();
+            let result_sender_clone = result_sender.clone();
+            let block_sender_clone = block_sender.clone();
+            
+            tokio::spawn(async move {
+                let mut current_height = height;
+                
+                loop {
+                    // Check if we should exit
+                    if let Some(exit_at) = args.exit_at {
+                        if current_height >= exit_at {
+                            info!("Fetcher reached exit-at block {}, shutting down", exit_at);
+                            break;
+                        }
+                    }
+                    
+                    // Fetch the block
+                    match diff_runtime.fetch_block(current_height).await {
+                        Ok(block_data) => {
+                            debug!("Fetched block {} ({})", current_height, block_data.len());
+                            // Send block to processor
+                            if block_sender_clone.send((current_height, block_data)).await.is_err() {
+                                break;
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to fetch block {}: {}", current_height, e);
+                            // Send error result
+                            if result_sender_clone.send(BlockResult::Error(current_height, e)).await.is_err() {
+                                break;
+                            }
+                            sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    }
+                    
+                    current_height += 1;
+                }
+                
+                debug!("Block fetcher task completed");
+            })
+        };
+        
+        // Spawn block processor task
+        let processor_handle = {
+            let mut diff_runtime = self.clone();
+            let result_sender_clone = result_sender.clone();
+            
+            tokio::spawn(async move {
+                while let Some((block_height, block_data)) = block_receiver.recv().await {
+                    debug!("Processing block {} ({})", block_height, block_data.len());
+                    
+                    match diff_runtime.process_block(block_data, block_height).await {
+                        Ok(has_diff) => {
+                            if has_diff {
+                                // If differences found, send a difference result
+                                if result_sender_clone.send(BlockResult::Difference(block_height)).await.is_err() {
+                                    break;
+                                }
+                            } else {
+                                // If no differences, send a success result
+                                if result_sender_clone.send(BlockResult::Success(block_height)).await.is_err() {
+                                    break;
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            // If error, send an error result
+                            if result_sender_clone.send(BlockResult::Error(block_height, e)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                
+                debug!("Block processor task completed");
+            })
+        };
+        
+        // Main loop to handle results
+        while let Some(result) = result_receiver.recv().await {
+            match result {
+                BlockResult::Success(processed_height) => {
+                    debug!("Successfully processed block {} with no differences", processed_height);
+                    height = processed_height + 1;
+                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+                },
+                BlockResult::Error(failed_height, error) => {
+                    error!("Failed to process block {}: {}", failed_height, error);
+                    // We could implement more sophisticated error handling here
+                    // For now, just wait and continue
+                    sleep(Duration::from_secs(5)).await;
+                },
+                BlockResult::Difference(diff_height) => {
+                    info!("Found differences at block {}, exiting", diff_height);
+                    // Clean up
+                    drop(block_sender);
+                    drop(result_sender);
+                    return Ok(());
+                }
+            }
+            
+            // Check if we should exit
+            if let Some(exit_at) = self.args.exit_at {
+                if height > exit_at {
+                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    break;
+                }
+            }
+        }
+        
+        // Clean up
+        drop(block_sender);
+        drop(result_sender);
+        
+        // Wait for tasks to complete
+        let _ = tokio::join!(fetcher_handle, processor_handle);
+        
+        Ok(())
+    }
+    
+    // Original run function
     pub async fn run(&mut self) -> Result<()> {
         let mut height = self.start_block;
+        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
         
         loop {
             // Check if we should exit before processing the next block
@@ -390,6 +599,36 @@ impl RockshrewDiffRuntime {
             
             // Move to the next block
             height += 1;
+            CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+        }
+    }
+}
+
+// Allow cloning for use in async tasks
+impl Clone for RockshrewDiffRuntime {
+    fn clone(&self) -> Self {
+        // We can't clone MetashrewRuntime directly, so we'll create new instances
+        // This is a simplified clone that only works for our specific use case
+        Self {
+            primary_runtime: MetashrewRuntime::load(
+                PathBuf::from(&self.args.indexer),
+                RocksDBRuntimeAdapter::open(
+                    format!("{}/primary", self.args.db_path),
+                    create_rocksdb_options()
+                ).unwrap()
+            ).unwrap(),
+            compare_runtime: MetashrewRuntime::load(
+                PathBuf::from(&self.args.compare),
+                RocksDBRuntimeAdapter::open(
+                    format!("{}/compare", self.args.db_path),
+                    create_rocksdb_options()
+                ).unwrap()
+            ).unwrap(),
+            args: self.args.clone(),
+            start_block: self.start_block,
+            prefix: self.prefix.clone(),
+            primary_tracker: KeyTracker::new(self.prefix.clone()),
+            compare_tracker: KeyTracker::new(self.prefix.clone()),
         }
     }
 }
@@ -484,7 +723,7 @@ async fn main() -> Result<()> {
         prefix,
     );
     
-    diff_runtime.run().await?;
+    diff_runtime.run_pipeline().await?;
     
     Ok(())
 }

@@ -2854,6 +2854,7 @@ dependencies = [
  "itertools 0.11.0",
  "log",
  "metashrew-runtime",
+ "rand 0.8.5",
  "reqwest 0.11.27",
  "rocksdb",
  "rockshrew-runtime",

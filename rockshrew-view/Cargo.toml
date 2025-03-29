@@ -13,7 +13,7 @@ serde = { version = "1.0.197", features = ["derive"] }
 substring = "1.4.5"
 tiny-keccak = {version = "2.0.2", features = ["sha3"]}
 wasmtime = "18.0.3"
-rockshrew-runtime = "8.4.0"
+rockshrew-runtime = { path = "../rockshrew-runtime" }
 metashrew-runtime = { path = "../runtime" }
 rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
 bitcoin = "0.32.1"

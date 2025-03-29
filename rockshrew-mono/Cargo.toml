@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 rand = "0.8"
 reqwest = { version = "0.12.12", features = ["json"] }
-rockshrew-runtime = { version = "../rockshrew-runtime" }
+rockshrew-runtime = { path = "../rockshrew-runtime" }
 metashrew-runtime = { path = "../runtime" }
 serde_json = "1.0.136"
 actix-web = "4.9.0"

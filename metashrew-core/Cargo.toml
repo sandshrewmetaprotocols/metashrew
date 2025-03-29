@@ -1,0 +1,47 @@
+[package]
+name = "metashrew-core"
+version = "8.4.0"
+edition = "2021"
+description = "Library for building Metashrew indexer programs"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+protobuf = "3.2"
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+wasm-bindgen = "0.2"
+metashrew-support = "8.4.0"
+# Dependencies for native runtime
+actix-web = { version = "4.5", optional = true }
+actix-cors = { version = "0.7", optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+tokio = { version = "1.43", features = ["full"], optional = true }
+reqwest = { version = "0.11", features = ["json"], optional = true }
+hex = { version = "0.4", optional = true }
+rand = { version = "0.8", optional = true }
+itertools = { version = "0.12", optional = true }
+env_logger = { version = "0.11", optional = true }
+
+[lib]
+name = "metashrew_lib"
+path = "src/lib.rs"
+
+[features]
+default = []
+test-utils = []
+native = [
+    "actix-web",
+    "actix-cors",
+    "clap",
+    "tokio",
+    "reqwest",
+    "hex",
+    "rand",
+    "itertools",
+    "env_logger",
+]

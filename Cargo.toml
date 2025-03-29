@@ -6,5 +6,7 @@ members = [
   "memshrew-p2p",
   "rockshrew",
   "rockshrew-runtime",
-  "rockshrew-view"
-, "rockshrew-mono"]
+  "rockshrew-view",
+  "rockshrew-mono",
+  "rockshrew-diff"
+]

@@ -6,8 +6,7 @@ use clap::Parser;
 use env_logger;
 use hex;
 use itertools::Itertools;
-use log::{debug, info, error, warn};
-use rand::Rng;
+use log::{debug, info};
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
 use reqwest::{Response, Url};
 use rocksdb::Options;
@@ -18,19 +17,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio;
-use tokio::sync::{Mutex, mpsc};
-use tokio::time::sleep;
+use tokio::sync::Mutex;
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
 use std::sync::atomic::{AtomicU32, Ordering};
 static CURRENT_HEIGHT: AtomicU32 = AtomicU32::new(0);
-
-// Block processing result for the pipeline
-#[derive(Debug)]
-enum BlockResult {
-    Success(u32),  // Block height that was successfully processed
-    Error(u32, anyhow::Error),  // Block height and error
-}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -56,9 +47,6 @@ struct Args {
     port: u16,
     #[arg(long, help = "CORS allowed origins (e.g., '*' for all origins, or specific domains)")]
     cors: Option<String>,
-    // Pipeline configuration
-    #[arg(long, default_value_t = 5)]
-    pipeline_size: usize,
 }
 
 #[derive(Clone)]
@@ -148,39 +136,20 @@ impl IndexerState {
             .await;
         return response;
     }
-#[allow(unused_assignments)]
-async fn post(&self, body: String) -> Result<Response> {
-    let mut retry_delay = Duration::from_millis(100);
-    let max_delay = Duration::from_secs(30);
-    let max_retries = 10;
-    let mut response = None;
-    
-    for attempt in 0..=max_retries {
-        match self.post_once(body.clone()).await {
-            Ok(v) => {
-                response = Some(v);
-                return Ok(response.unwrap());
-            },
-            Err(e) => {
-                if attempt == max_retries {
-                    return Err(anyhow!("Max retries exceeded: {}", e));
+
+    #[allow(unused_assignments)]
+                Err(e) => {
+                    if count > 10 {
+                        return Err(e.into());
+                    } else {
+                        count += 1;
+                    }
+                    debug!("err: retrying POST");
+                    tokio::time::sleep(Duration::from_millis(3000)).await;
                 }
-                
-                // Calculate exponential backoff with jitter
-                let jitter = rand::thread_rng().gen_range(0..=100) as u64;
-                retry_delay = std::cmp::min(
-                    max_delay,
-                    retry_delay * 2 + Duration::from_millis(jitter)
-                );
-                
-                debug!("Request failed (attempt {}): {}, retrying in {:?}",
-                       attempt + 1, e, retry_delay);
-                tokio::time::sleep(retry_delay).await;
             }
         }
-    }
-    
-    Err(anyhow!("Unreachable: max retries exceeded"))
+        Ok(response.unwrap())
     }
 
     async fn fetch_blockcount(&self) -> Result<u32> {
@@ -301,168 +270,6 @@ async fn post(&self, body: String) -> Result<Response> {
         Ok(hex::decode(block_hex)?)
     }
 
-    // Process a single block
-    async fn process_block(&self, height: u32, block_data: Vec<u8>) -> Result<()> {
-        let mut runtime = self.runtime.lock().await;
-        
-        // Improvement 1: More efficient mutex locking pattern
-        {
-            let mut context = runtime.context.lock().unwrap();
-            context.block = block_data;
-            context.height = height;
-            context.db.set_height(height);
-        }
-        
-        // Improvement 3: Better error handling in runtime execution
-        match runtime.run() {
-            Ok(_) => {
-                debug!("Successfully processed block {}", height);
-                Ok(())
-            },
-            Err(e) => {
-                info!("Runtime execution failed for block {}: {}, refreshing memory and retrying", height, e);
-                runtime.refresh_memory().map_err(|refresh_err| {
-                    error!("Memory refresh failed: {}", refresh_err);
-                    refresh_err
-                })?;
-                
-                runtime.run().map_err(|run_err| {
-                    error!("Runtime execution failed after memory refresh: {}", run_err);
-                    run_err
-                })?;
-                
-                debug!("Successfully processed block {} after memory refresh", height);
-                Ok(())
-            }
-        }
-    }
-
-    // Improvement 5: Parallel processing with pipeline
-    async fn run_pipeline(&mut self) -> Result<()> {
-        let mut height: u32 = self.query_height().await?;
-        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-        
-        // Create channels for the pipeline
-        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(self.args.pipeline_size);
-        let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(self.args.pipeline_size);
-        
-        // Spawn block fetcher task
-        let fetcher_handle = {
-            let args = self.args.clone();
-            let indexer = self.clone();
-            let result_sender_clone = result_sender.clone();
-            let block_sender_clone = block_sender.clone();
-            tokio::spawn(async move {
-                let mut current_height = height;
-                
-                loop {
-                    // Check if we should exit
-                    if let Some(exit_at) = args.exit_at {
-                        if current_height >= exit_at {
-                            info!("Fetcher reached exit-at block {}, shutting down", exit_at);
-                            break;
-                        }
-                    }
-                    
-                    // Find the best height considering potential reorgs
-                    let best_height = match indexer.best_height(current_height).await {
-                        Ok(h) => h,
-                        Err(e) => {
-                            error!("Failed to determine best height: {}", e);
-                            // Send error result and continue
-                            if result_sender_clone.send(BlockResult::Error(current_height, e)).await.is_err() {
-                                break;
-                            }
-                            sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
-                    };
-                    
-                    // Fetch the block
-                    match indexer.pull_block(best_height).await {
-                        Ok(block_data) => {
-                            debug!("Fetched block {} ({})", best_height, block_data.len());
-                            // Send block to processor
-                            if block_sender_clone.send((best_height, block_data)).await.is_err() {
-                                break;
-                            }
-                        },
-                        Err(e) => {
-                            error!("Failed to fetch block {}: {}", best_height, e);
-                            // Send error result
-                            if result_sender_clone.send(BlockResult::Error(best_height, e)).await.is_err() {
-                                break;
-                            }
-                            sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
-                    }
-                    
-                    current_height = best_height + 1;
-                }
-                
-                debug!("Block fetcher task completed");
-            })
-        };
-        
-        // Spawn block processor task
-        let processor_handle = {
-            let indexer = self.clone();
-            let result_sender_clone = result_sender.clone();
-            tokio::spawn(async move {
-                while let Some((block_height, block_data)) = block_receiver.recv().await {
-                    debug!("Processing block {} ({})", block_height, block_data.len());
-                    
-                    let result = match indexer.process_block(block_height, block_data).await {
-                        Ok(_) => BlockResult::Success(block_height),
-                        Err(e) => BlockResult::Error(block_height, e),
-                    };
-                    
-                    // Send result
-                    if result_sender_clone.send(result).await.is_err() {
-                        break;
-                    }
-                }
-                
-                debug!("Block processor task completed");
-            })
-        };
-        
-        // Main loop to handle results
-        while let Some(result) = result_receiver.recv().await {
-            match result {
-                BlockResult::Success(processed_height) => {
-                    debug!("Successfully processed block {}", processed_height);
-                    height = processed_height + 1;
-                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-                },
-                BlockResult::Error(failed_height, error) => {
-                    error!("Failed to process block {}: {}", failed_height, error);
-                    // We could implement more sophisticated error handling here
-                    // For now, just wait and continue
-                    sleep(Duration::from_secs(5)).await;
-                }
-            }
-            
-            // Check if we should exit
-            if let Some(exit_at) = self.args.exit_at {
-                if height > exit_at {
-                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
-                    break;
-                }
-            }
-        }
-        
-        // Clean up
-        drop(block_sender);
-        drop(result_sender);
-        
-        // Wait for tasks to complete
-        let _ = tokio::join!(fetcher_handle, processor_handle);
-        
-        Ok(())
-    }
-
     async fn run(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
 
@@ -505,18 +312,9 @@ async fn post(&self, body: String) -> Result<Response> {
             }
 
             height = best + 1;
-            CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-        }
-    }
-}
-
-// Allow cloning for use in async tasks
-impl Clone for IndexerState {
-    fn clone(&self) -> Self {
-        Self {
-            runtime: self.runtime.clone(),
-            args: self.args.clone(),
-            start_block: self.start_block,
+            unsafe {
+                _HEIGHT = height;
+            }
         }
     }
 }
@@ -842,7 +640,7 @@ async fn main() -> Result<()> {
 
     // Start the indexer in a separate task
     let indexer_handle = tokio::spawn(async move {
-        if let Err(e) = indexer.run_pipeline().await {
+        if let Err(e) = indexer.run().await {
             log::error!("Indexer error: {}", e);
         }
     });

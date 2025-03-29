@@ -15,7 +15,7 @@ proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full", "extra-traits"] }
 wasm-bindgen = "0.2"
-metashrew-support = "8.4.0"
+metashrew-support = { path = "../metashrew-support" }
 # Dependencies for native runtime
 actix-web = { version = "4.5", optional = true }
 actix-cors = { version = "0.7", optional = true }

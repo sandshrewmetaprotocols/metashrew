@@ -1,16 +1,26 @@
-//! An example of a Metashrew indexer program using Protocol Buffers.
+//! An example of a native Metashrew indexer program.
 
+#[cfg(feature = "native")]
 use anyhow::Result;
-use metashrew_lib::{declare_indexer, indexer::{Indexer, KeyValueStore}};
+#[cfg(feature = "native")]
+use metashrew_core::{
+    indexer::{Indexer, KeyValueStore, NativeIndexer, ProtoViewFunctionWrapper, ViewFunctionWrapper},
+    native_binary,
+    view::ProtoViewFunction,
+};
+#[cfg(feature = "native")]
 use protobuf::Message;
+#[cfg(feature = "native")]
+use std::collections::HashMap;
 
-// Define Protocol Buffer messages
+#[cfg(feature = "native")]
 #[derive(Clone, PartialEq, Message)]
 pub struct GetBalanceRequest {
     #[prost(string, tag = "1")]
     pub address: String,
 }
 
+#[cfg(feature = "native")]
 #[derive(Clone, PartialEq, Message)]
 pub struct GetBalanceResponse {
     #[prost(uint64, tag = "1")]
@@ -19,34 +29,43 @@ pub struct GetBalanceResponse {
     pub last_updated: u32,
 }
 
+#[cfg(feature = "native")]
 #[derive(Clone, PartialEq, Message)]
 pub struct GetTotalSupplyRequest {
     // Empty request
 }
 
+#[cfg(feature = "native")]
 #[derive(Clone, PartialEq, Message)]
 pub struct GetTotalSupplyResponse {
     #[prost(uint64, tag = "1")]
     pub total_supply: u64,
 }
 
+#[cfg(feature = "native")]
 /// A simple token indexer
+#[derive(Clone)]
 struct TokenIndexer {
     store: KeyValueStore,
+    height: u32,
 }
 
+#[cfg(feature = "native")]
 impl Default for TokenIndexer {
     fn default() -> Self {
         Self {
             store: KeyValueStore::new(),
+            height: 0,
         }
     }
 }
 
+#[cfg(feature = "native")]
 impl Indexer for TokenIndexer {
     fn index_block(&mut self, height: u32, block: &[u8]) -> Result<()> {
         // In a real implementation, we would parse the block and extract token transfers
         // For this example, we'll just simulate some token activity
+        self.height = height;
         
         // Update the balance for an example address
         let address = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq";
@@ -94,6 +113,7 @@ impl Indexer for TokenIndexer {
     }
 }
 
+#[cfg(feature = "native")]
 impl TokenIndexer {
     /// Get the balance for an address
     fn get_balance(&self, request: GetBalanceRequest) -> Result<GetBalanceResponse> {
@@ -148,27 +168,55 @@ impl TokenIndexer {
     }
 }
 
-// Define the Metashrew indexer program with Protocol Buffer messages
-declare_indexer! {
-    struct TokenIndexerProgram {
-        indexer: TokenIndexer,
-        views: {
-            "get_balance" => {
-                fn get_balance(&self, request: GetBalanceRequest) -> Result<GetBalanceResponse> {
-                    self.get_balance(request)
-                }
-            },
-            "get_total_supply" => {
-                fn get_total_supply(&self, request: GetTotalSupplyRequest) -> Result<GetTotalSupplyResponse> {
-                    self.get_total_supply(request)
-                }
-            }
-        }
+#[cfg(feature = "native")]
+impl ProtoViewFunction<GetBalanceRequest, GetBalanceResponse> for TokenIndexer {
+    fn execute_proto(&self, request: GetBalanceRequest) -> Result<GetBalanceResponse> {
+        self.get_balance(request)
     }
 }
 
-// This is just for the example to compile
+#[cfg(feature = "native")]
+impl ProtoViewFunction<GetTotalSupplyRequest, GetTotalSupplyResponse> for TokenIndexer {
+    fn execute_proto(&self, request: GetTotalSupplyRequest) -> Result<GetTotalSupplyResponse> {
+        self.get_total_supply(request)
+    }
+}
+
+#[cfg(feature = "native")]
+impl NativeIndexer for TokenIndexer {
+    fn view_functions(&self) -> HashMap<String, Box<dyn ViewFunctionWrapper>> {
+        let mut map = HashMap::new();
+        
+        // Add the get_balance view function
+        map.insert(
+            "get_balance".to_string(),
+            Box::new(ProtoViewFunctionWrapper::<Self, GetBalanceRequest, GetBalanceResponse>::new(
+                self.clone(),
+            )),
+        );
+        
+        // Add the get_total_supply view function
+        map.insert(
+            "get_total_supply".to_string(),
+            Box::new(ProtoViewFunctionWrapper::<Self, GetTotalSupplyRequest, GetTotalSupplyResponse>::new(
+                self.clone(),
+            )),
+        );
+        
+        map
+    }
+}
+
+#[cfg(feature = "native")]
+native_binary! {
+    indexer: TokenIndexer,
+    name: "token-indexer",
+    version: "0.1.0",
+    about: "A simple token indexer",
+}
+
+#[cfg(not(feature = "native"))]
 fn main() {
-    println!("This is an example of a Metashrew indexer program using Protocol Buffers.");
-    println!("It should be compiled to WebAssembly and loaded by Metashrew.");
+    println!("This example requires the 'native' feature to be enabled.");
+    println!("Run with: cargo run --example native_indexer --features native");
 }

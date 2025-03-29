@@ -1,6 +1,6 @@
 [package]
 name = "rockshrew"
-version = "8.2.0"
+version = "8.4.0"
 edition = "2021"
 
 [dependencies]
@@ -12,7 +12,7 @@ rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
 reqwest = { version = "0.12.5", features = ["json"] }
 serde = { version = "1.0.205", features = ["derive"] }
 serde_json = "1.0.122"
-rockshrew-runtime = { path = "../rockshrew-runtime" }
+rockshrew-runtime = "8.4.0"
 metashrew-runtime = { path = "../runtime" }
 tokio = { version = "1.43.0", features = ["full"] }
 tokio-macros = "2.4.0"

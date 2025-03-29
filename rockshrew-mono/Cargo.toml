@@ -1,12 +1,12 @@
 [package]
 name = "rockshrew-mono"
-version = "8.2.0"
+version = "8.4.0"
 edition = "2021"
 
 [dependencies]
 rand = "0.8"
 reqwest = { version = "0.12.12", features = ["json"] }
-rockshrew-runtime = { path = "../rockshrew-runtime" }
+rockshrew-runtime = { version = "../rockshrew-runtime" }
 metashrew-runtime = { path = "../runtime" }
 serde_json = "1.0.136"
 actix-web = "4.9.0"

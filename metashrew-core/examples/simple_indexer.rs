@@ -1,7 +1,7 @@
 //! A simple example of a Metashrew indexer program.
 
 use anyhow::Result;
-use metashrew_lib::{metashrew_indexer, indexer::{Indexer, KeyValueStore}};
+use metashrew_core::{metashrew_indexer, indexer::{Indexer, KeyValueStore}};
 use serde::{Deserialize, Serialize};
 
 /// A simple indexer that counts blocks

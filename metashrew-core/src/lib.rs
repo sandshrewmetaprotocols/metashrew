@@ -10,8 +10,8 @@ pub mod macros;
 pub mod host;
 pub mod indexer;
 pub mod view;
-pub mod proto;
 pub mod utils;
+#[cfg(feature = "native")]
 pub mod native;
 
 /// Re-export key components for easier access

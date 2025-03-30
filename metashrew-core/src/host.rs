@@ -3,6 +3,7 @@
 //! This module provides safe wrappers around the raw host functions provided by the Metashrew runtime.
 
 use anyhow::{anyhow, Result};
+use protobuf::{Message};
 
 /// External host functions provided by the Metashrew runtime
 extern "C" {
@@ -75,7 +76,7 @@ pub fn get(key: &[u8]) -> Result<Vec<u8>> {
 
 /// Flush key-value pairs to the database
 pub fn flush(pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
-    use crate::proto::metashrew::KeyValueFlush;
+    use metashrew_support::proto::metashrew::KeyValueFlush;
     
     let mut flush = KeyValueFlush::new();
     for (key, value) in pairs {

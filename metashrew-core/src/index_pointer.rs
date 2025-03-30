@@ -1,58 +1,8 @@
-use crate::{get, set};
-use crate::byte_view::ByteView;
+use crate::wasm::{get, set};
+use metashrew_support::byte_view::ByteView;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-
-// Define our own KeyValuePointer trait
-pub trait KeyValuePointer {
-    fn wrap(word: &Vec<u8>) -> Self;
-    fn unwrap(&self) -> Arc<Vec<u8>>;
-    fn inherits(&mut self, v: &Self);
-    fn set(&mut self, v: Arc<Vec<u8>>);
-    fn get(&self) -> Arc<Vec<u8>>;
-    
-    fn select(&self, word: &Vec<u8>) -> Self
-    where
-        Self: Sized,
-    {
-        let mut key = (*self.unwrap()).clone();
-        key.extend(word);
-        let mut ptr = Self::wrap(&key);
-        ptr.inherits(self);
-        ptr
-    }
-    
-    fn from_keyword(word: &str) -> Self
-    where
-        Self: Sized,
-    {
-        Self::wrap(&word.as_bytes().to_vec())
-    }
-    
-    fn keyword(&self, word: &str) -> Self
-    where
-        Self: Sized,
-    {
-        let mut key = (*self.unwrap()).clone();
-        key.extend(word.to_string().into_bytes());
-        let mut ptr = Self::wrap(&key);
-        ptr.inherits(self);
-        ptr
-    }
-
-    fn set_value<T: ByteView>(&mut self, v: T) {
-        self.set(Arc::new(v.to_bytes()));
-    }
-
-    fn get_value<T: ByteView>(&self) -> T {
-        let cloned = self.get().as_ref().clone();
-        if cloned.is_empty() {
-            T::zero()
-        } else {
-            T::from_bytes(cloned)
-        }
-    }
-}
+use metashrew_support::index_pointer::KeyValuePointer;
 
 #[derive(Debug, Clone, Default)]
 pub struct IndexPointer(Arc<Vec<u8>>);
@@ -67,14 +17,14 @@ impl KeyValuePointer for IndexPointer {
     }
     fn inherits(&mut self, _v: &Self) {}
     fn set(&mut self, v: Arc<Vec<u8>>) {
-        set(self.unwrap(), v)
+        set(self.unwrap(), v);
     }
     fn get(&self) -> Arc<Vec<u8>> {
         get(self.unwrap())
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug)]
 pub struct IndexCheckpoint(pub HashMap<Arc<Vec<u8>>, Arc<Vec<u8>>>);
 
 impl IndexCheckpoint {

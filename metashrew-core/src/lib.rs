@@ -7,10 +7,14 @@
 extern crate log;
 
 pub mod macros;
+pub mod index_pointer;
 pub mod host;
 pub mod indexer;
+pub mod stdio;
 pub mod view;
 pub mod utils;
+pub mod wasm;
+pub mod wasm_exports;
 #[cfg(feature = "native")]
 pub mod native;
 
@@ -19,6 +23,8 @@ pub use macros::*;
 pub use host::*;
 pub use indexer::*;
 pub use view::*;
+pub use wasm::{get, set, input, flush, initialize, reset, clear};
+// wasm_exports is already available as a module
 
 // Re-export the declare_indexer macro for backward compatibility
 #[doc(hidden)]

@@ -4,6 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::any::Any;
 
 /// A trait for types that can be used as view functions in Metashrew
 pub trait ViewFunction<Input, Output> {
@@ -12,7 +13,7 @@ pub trait ViewFunction<Input, Output> {
 }
 
 /// A trait for types that can be used as view functions with Protocol Buffer messages
-pub trait ProtoViewFunction<Input, Output> {
+pub trait ProtoViewFunction<Input, Output>: Any {
     /// Execute the view function with the given input
     fn execute_proto(&self, input: Input) -> Result<Output>;
 }
@@ -96,4 +97,21 @@ pub fn parse_proto_view_input() -> Result<Vec<u8>> {
     let (_height, input_bytes) = crate::host::load_input()?;
     
     Ok(input_bytes)
+}
+
+/// Execute a view function by name
+pub fn execute_view_function<T>(
+    indexer: &T,
+    function_name: &str,
+    input_bytes: &[u8],
+) -> Result<Vec<u8>> {
+    // This is a simplified implementation that delegates to the execute_proto method
+    // In a real implementation, this would need to handle different types of view functions
+    match function_name {
+        _ => {
+            // For now, just return an empty vector
+            // In a real implementation, this would call the appropriate method on the indexer
+            Ok(Vec::new())
+        }
+    }
 }

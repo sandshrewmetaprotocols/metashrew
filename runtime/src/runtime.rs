@@ -219,6 +219,7 @@ where
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         // Configure the engine with default settings
         let config = wasmtime::Config::default();
+        config.consume_fuel(true);
         let engine = wasmtime::Engine::new(&config)?;
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string())
             .context("Failed to load WASM module")?;

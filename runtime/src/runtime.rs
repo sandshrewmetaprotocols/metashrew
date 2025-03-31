@@ -216,7 +216,7 @@ where
     T: Sync + Send,
     T: Clone + 'static,
 {
-    pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
+    pub async fn load(indexer: PathBuf, store: T) -> Result<Self> {
         // Configure the engine with async support enabled
         let mut config = wasmtime::Config::default();
         config.async_support(true);
@@ -242,7 +242,8 @@ where
                 .context("Failed to setup indexer linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
-        let instance = linker.instantiate(&mut wasmstore, &module)
+        let instance = linker.instantiate_async(&mut wasmstore, &module)
+            .await
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
             wasmstore,
@@ -254,7 +255,7 @@ where
         })
     }
 
-    pub fn preview(
+    pub async fn preview(
         &self,
         block: &Vec<u8>,
         symbol: String,
@@ -271,14 +272,14 @@ where
         };
 
         // Create a new runtime with preview db
-        let mut runtime = Self::new_with_db(preview_db, height, self.engine.clone(), self.module.clone())?;
+        let mut runtime = Self::new_with_db(preview_db, height, self.engine.clone(), self.module.clone()).await?;
         runtime.context.lock().map_err(lock_err)?.block = block.clone();
 
         // Execute block via _start to populate preview db
         let start = runtime.instance.get_typed_func::<(), ()>(&mut runtime.wasmstore, "_start")
             .context("Failed to get _start function for preview")?;
             
-        match start.call(&mut runtime.wasmstore, ()) {
+        match start.call_async(&mut runtime.wasmstore, ()).await {
             Ok(_) => {
                 let context_guard = runtime.context.lock().map_err(lock_err)?;
                 if context_guard.state != 1 && !runtime.wasmstore.data().had_failure {
@@ -291,7 +292,7 @@ where
         // Create new runtime just for the view using the same wrapped DB
         let mut view_runtime = {
             let context = runtime.context.lock().map_err(lock_err)?;
-            Self::new_with_db(context.db.clone(), height, self.engine.clone(), self.module.clone())?
+            Self::new_with_db(context.db.clone(), height, self.engine.clone(), self.module.clone()).await?
         };
         
         // Set block to input for view
@@ -302,7 +303,7 @@ where
             .get_typed_func::<(), i32>(&mut view_runtime.wasmstore, symbol.as_str())
             .context("Failed to get view function")?;
         
-        let result = func.call(&mut view_runtime.wasmstore, ())
+        let result = func.call_async(&mut view_runtime.wasmstore, ()).await
             .context("Failed to execute view function")?;
         
         let memory = view_runtime.instance
@@ -388,16 +389,16 @@ where
         batch.put(&key, &value_vec);
         Ok(())
     }
-    pub fn run(&mut self) -> Result<(), anyhow::Error> {
+    pub async fn run(&mut self) -> Result<(), anyhow::Error> {
         self.context.lock().map_err(lock_err)?.state = 0;
         let start = self
             .instance
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .context("Failed to get _start function")?;
         
-        self.handle_reorg()?;
+        self.handle_reorg().await?;
         
-        match start.call(&mut self.wasmstore, ()) {
+        match start.call_async(&mut self.wasmstore, ()).await {
             Ok(_) => {
                 if self.context.lock().map_err(lock_err)?.state != 1 && !self.wasmstore.data().had_failure {
                     return Err(anyhow!("indexer exited unexpectedly"));
@@ -608,7 +609,7 @@ where
         Ok(())
     }
 
-    pub fn handle_reorg(&mut self) -> Result<()> {
+    pub async fn handle_reorg(&mut self) -> Result<()> {
         let context = self.context.clone();
         let height = { context.lock().map_err(lock_err)?.height };
         let latest = Self::check_latest_block_for_reorg(context.clone(), height)?;
@@ -882,7 +883,7 @@ where
 
         Ok(())
     }
-    fn new_with_db<U: KeyValueStoreLike + Clone + Sync + Send + 'static>(
+    async fn new_with_db<U: KeyValueStoreLike + Clone + Sync + Send + 'static>(
         db: U,
         height: u32,
         engine: wasmtime::Engine,
@@ -905,7 +906,8 @@ where
                 .context("Failed to setup preview linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
-        let instance = linker.instantiate(&mut wasmstore, &module)
+        let instance = linker.instantiate_async(&mut wasmstore, &module)
+            .await
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
             wasmstore,

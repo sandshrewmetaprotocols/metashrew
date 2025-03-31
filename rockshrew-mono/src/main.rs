@@ -314,7 +314,7 @@ async fn post(&self, body: String) -> Result<Response> {
         }
         
         // Improvement 3: Better error handling in runtime execution
-        match runtime.run() {
+        match runtime.run().await {
             Ok(_) => {
                 debug!("Successfully processed block {}", height);
                 Ok(())
@@ -326,7 +326,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     refresh_err
                 })?;
                 
-                runtime.run().map_err(|run_err| {
+                runtime.run().await.map_err(|run_err| {
                     error!("Runtime execution failed after memory refresh: {}", run_err);
                     run_err
                 })?;
@@ -488,7 +488,7 @@ async fn post(&self, body: String) -> Result<Response> {
                 context.db.set_height(best);
             }
 
-            match runtime.run() {
+            match runtime.run().await {
                 Ok(_) => {},
                 Err(e) => {
                     info!("Runtime execution failed: {}, refreshing memory and retrying", e);
@@ -497,7 +497,7 @@ async fn post(&self, body: String) -> Result<Response> {
                         refresh_err
                     })?;
                     
-                    runtime.run().map_err(|run_err| {
+                    runtime.run().await.map_err(|run_err| {
                         error!("Runtime execution failed after memory refresh: {}", run_err);
                         run_err
                     })?;
@@ -703,12 +703,12 @@ async fn handle_jsonrpc(
         };
 
         match runtime.preview(
-            &block_data,
-            view_name,
-            &hex::decode(input_hex.trim_start_matches("0x"))
-                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-            height,
-        ) {
+          &block_data,
+          view_name,
+          &hex::decode(input_hex.trim_start_matches("0x"))
+              .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+          height,
+      ).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(result)),
@@ -825,9 +825,9 @@ async fn main() -> Result<()> {
 
     // Create runtime with RocksDB adapter
     let runtime = Arc::new(Mutex::new(MetashrewRuntime::load(
-        PathBuf::from(&args.indexer),
-        RocksDBRuntimeAdapter::open(args.db_path.clone(), opts)?,
-    )?));
+      PathBuf::from(&args.indexer),
+      RocksDBRuntimeAdapter::open(args.db_path.clone(), opts)?,
+  ).await?));
 
     // Create indexer state
     let mut indexer = IndexerState {

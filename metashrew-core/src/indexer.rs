@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use std::collections::HashMap;
+use std::any::Any;
 use crate::view::{ViewFunction, ProtoViewFunction};
 
 /// A trait for types that can be indexed by Metashrew
@@ -13,6 +14,9 @@ pub trait Indexer {
     
     /// Get the current state as key-value pairs
     fn flush(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    
+    /// Convert to Any for dynamic casting
+    fn as_any(&self) -> &dyn Any;
 }
 
 /// A struct for building Metashrew indexer programs
@@ -39,6 +43,11 @@ impl<T: Indexer> MetashrewIndexer<T> {
         crate::host::flush(&pairs)?;
         
         Ok(())
+    }
+    
+    /// Get a reference to the indexer
+    pub fn get_indexer(&self) -> &T {
+        &self.indexer
     }
 }
 

@@ -463,6 +463,7 @@ async fn post(&self, body: String) -> Result<Response> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn run(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
 

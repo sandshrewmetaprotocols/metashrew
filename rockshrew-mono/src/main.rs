@@ -6,7 +6,7 @@ use clap::Parser;
 use env_logger;
 use hex;
 use itertools::Itertools;
-use log::{debug, info, error, warn};
+use log::{debug, info, error};
 use rand::Rng;
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
 use reqwest::{Response, Url};

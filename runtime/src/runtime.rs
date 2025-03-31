@@ -321,8 +321,8 @@ where
         input: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
-        // Use the synchronous preview function for now
-        // This is a temporary solution until we can properly implement the async version
+        // For now, use the synchronous version
+        // TODO: Implement a fully async version in the future
         self.preview(block, symbol, input, height)
     }
     

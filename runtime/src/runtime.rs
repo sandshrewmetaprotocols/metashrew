@@ -217,7 +217,12 @@ where
     T: Clone + 'static,
 {
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
-        let engine = wasmtime::Engine::default();
+        // Configure the engine with async support enabled
+        let mut config = wasmtime::Config::default();
+        config.async_support(true);
+        config.consume_fuel(true);
+        
+        let engine = wasmtime::Engine::new(&config)?;
         let module = wasmtime::Module::from_file(&engine, indexer.into_os_string())
             .context("Failed to load WASM module")?;
         let mut linker = Linker::<State>::new(&engine);
@@ -310,7 +315,7 @@ where
             result,
         ))
     }
-    pub fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
+    pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
         let mut linker = Linker::<State>::new(&self.engine);
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
         
@@ -325,6 +330,10 @@ where
             guard.block = input.clone();
         }
         
+        // Set fuel for cooperative yielding
+        wasmstore.set_fuel(u64::MAX)?;
+        wasmstore.fuel_async_yield_interval(Some(10000))?;
+        
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -337,14 +346,18 @@ where
             linker.define_unknown_imports_as_traps(&self.module)?;
         }
         
-        let instance = linker.instantiate(&mut wasmstore, &self.module)
+        // Use async instantiation
+        let instance = linker.instantiate_async(&mut wasmstore, &self.module)
+            .await
             .context("Failed to instantiate module for view")?;
             
         let func = instance
             .get_typed_func::<(), i32>(&mut wasmstore, symbol.as_str())
             .with_context(|| format!("Failed to get view function '{}'", symbol))?;
             
-        let result = func.call(&mut wasmstore, ())
+        // Use async call
+        let result = func.call_async(&mut wasmstore, ())
+            .await
             .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
             
         let memory = instance

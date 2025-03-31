@@ -254,13 +254,14 @@ async fn jsonrpc_call(
                 return Ok(HttpResponse::Ok().json(error));
             }
         };
-
-        match context.runtime.view(
-            view_name,
-            &hex::decode(input_hex.trim_start_matches("0x"))
-                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-            height,
-        ) {
+// Use await with the async view function
+match context.runtime.view(
+    view_name,
+    &hex::decode(input_hex.trim_start_matches("0x"))
+        .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+    height,
+).await {
+    Ok(res_string) => {
             Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,

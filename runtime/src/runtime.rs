@@ -127,7 +127,9 @@ impl<T: KeyValueStoreLike + Clone> MetashrewRuntimeContext<T> {
 pub struct MetashrewRuntime<T: KeyValueStoreLike + Clone + 'static> {
     pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
     pub engine: wasmtime::Engine,
+    pub async_engine: wasmtime::Engine,
     pub wasmstore: wasmtime::Store<State>,
+    pub async_module: wasmtime::Module,
     pub module: wasmtime::Module,
     pub linker: wasmtime::Linker<State>,
     pub instance: wasmtime::Instance,
@@ -218,11 +220,14 @@ where
 {
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         // Configure the engine with default settings
+        let mut async_config = wasmtime::Config::default();
+        async_config.consume_fuel(true);
+        async_config.async_support(true);
         let config = wasmtime::Config::default();
-        config.consume_fuel(true);
         let engine = wasmtime::Engine::new(&config)?;
-        let module = wasmtime::Module::from_file(&engine, indexer.into_os_string())
-            .context("Failed to load WASM module")?;
+        let async_engine = wasmtime::Engine::new(&async_config)?;
+        let module = wasmtime::Module::from_file(&engine, indexer.clone().into_os_string()).context("Failed to load WASM module")?;
+        let async_module = wasmtime::Module::from_file(&async_engine, indexer.into_os_string()).context("Failed to load WASM module")?;
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
@@ -244,7 +249,9 @@ where
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
             wasmstore,
+            async_engine,
             engine,
+            async_module,
             module,
             linker,
             context,
@@ -269,7 +276,7 @@ where
         };
 
         // Create a new runtime with preview db
-        let mut runtime = Self::new_with_db(preview_db, height, self.engine.clone(), self.module.clone())?;
+        let mut runtime = Self::new_with_db(preview_db, height, self.async_engine.clone(), self.async_module.clone())?;
         runtime.context.lock().map_err(lock_err)?.block = block.clone();
 
         // Execute block via _start to populate preview db
@@ -289,7 +296,7 @@ where
         // Create new runtime just for the view using the same wrapped DB
         let mut view_runtime = {
             let context = runtime.context.lock().map_err(lock_err)?;
-            Self::new_with_db(context.db.clone(), height, self.engine.clone(), self.module.clone())?
+            Self::new_with_db(context.db.clone(), height, self.async_engine.clone(), self.async_module.clone())?
         };
         
         // Set block to input for view
@@ -328,8 +335,8 @@ where
     }
     
     pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
-        let mut linker = Linker::<State>::new(&self.engine);
-        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        let mut linker = Linker::<State>::new(&self.async_engine);
+        let mut wasmstore = Store::<State>::new(&self.async_engine, State::new());
         
         let context = {
             let guard = self.context.lock().map_err(lock_err)?;
@@ -359,7 +366,7 @@ where
         }
         
         // Use async instantiation
-        let instance = linker.instantiate_async(&mut wasmstore, &self.module)
+        let instance = linker.instantiate_async(&mut wasmstore, &self.async_module)
             .await
             .context("Failed to instantiate module for view")?;
             
@@ -921,8 +928,10 @@ where
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
             wasmstore,
-            engine: engine,
-            module: module,
+            engine: engine.clone(),
+            async_engine: engine,
+            module: module.clone(),
+            async_module: module.clone(),
             linker,
             context,
             instance,

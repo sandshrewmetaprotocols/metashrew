@@ -370,12 +370,13 @@ where
             result,
         ))
     }
-    pub fn refresh_memory(&mut self) -> Result<()> {
+    pub async fn refresh_memory(&mut self) -> Result<()> {
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
         wasmstore.limiter(|state| &mut state.limits);
         self.instance = self
             .linker
-            .instantiate(&mut wasmstore, &self.module)
+            .instantiate_async(&mut wasmstore, &self.module)
+            .await
             .context("Failed to instantiate module during memory refresh")?;
         self.wasmstore = wasmstore;
         Ok(())
@@ -620,7 +621,7 @@ where
         
         let set = Self::db_updated_keys_for_block_range(context.clone(), height, latest)?;
         if !set.is_empty() {
-            self.refresh_memory()?;
+            self.refresh_memory().await?;
         }
         
         for key in &set {

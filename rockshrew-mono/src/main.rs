@@ -321,7 +321,7 @@ async fn post(&self, body: String) -> Result<Response> {
             },
             Err(e) => {
                 info!("Runtime execution failed for block {}: {}, refreshing memory and retrying", height, e);
-                runtime.refresh_memory().map_err(|refresh_err| {
+                runtime.refresh_memory().await.map_err(|refresh_err| {
                     error!("Memory refresh failed: {}", refresh_err);
                     refresh_err
                 })?;
@@ -492,7 +492,7 @@ async fn post(&self, body: String) -> Result<Response> {
                 Ok(_) => {},
                 Err(e) => {
                     info!("Runtime execution failed: {}, refreshing memory and retrying", e);
-                    runtime.refresh_memory().map_err(|refresh_err| {
+                    runtime.refresh_memory().await.map_err(|refresh_err| {
                         error!("Memory refresh failed: {}", refresh_err);
                         refresh_err
                     })?;

@@ -262,7 +262,6 @@ match context.runtime.view(
     height,
 ).await {
     Ok(res_string) => {
-            Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
                     result: String::from("0x") + hex::encode(res_string).as_str(),
@@ -425,7 +424,7 @@ match context.runtime.view(
             &hex::decode(input_hex.trim_start_matches("0x"))
                 .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
             height,
-        ) {
+        ).await {
             Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
@@ -538,7 +537,7 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    HttpServer::new(move || {
+    HttpServer::new(async move || {
         App::new()
             .wrap(Cors::default().allowed_origin_fn(|origin, _| {
                 if let Ok(origin_str) = origin.to_str() {
@@ -558,8 +557,7 @@ async fn main() -> std::io::Result<()> {
                         opts.clone(),
                     )
                     .unwrap(),
-                )
-                .unwrap(),
+                ).await.unwrap(),
             }))
             .service(jsonrpc_call)
     })

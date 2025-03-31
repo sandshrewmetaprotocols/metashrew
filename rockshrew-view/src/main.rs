@@ -418,7 +418,7 @@ match context.runtime.view(
             }
         };
 
-        match context.runtime.preview(
+        match context.runtime.preview_async(
             &block_data,
             view_name,
             &hex::decode(input_hex.trim_start_matches("0x"))
@@ -537,7 +537,7 @@ async fn main() -> std::io::Result<()> {
         }
     });
 
-    HttpServer::new(async move || {
+    HttpServer::new(move || {
         App::new()
             .wrap(Cors::default().allowed_origin_fn(|origin, _| {
                 if let Ok(origin_str) = origin.to_str() {
@@ -557,7 +557,7 @@ async fn main() -> std::io::Result<()> {
                         opts.clone(),
                     )
                     .unwrap(),
-                ).await.unwrap(),
+                ).unwrap(),
             }))
             .service(jsonrpc_call)
     })

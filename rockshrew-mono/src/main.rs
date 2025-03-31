@@ -6,7 +6,7 @@ use clap::Parser;
 use env_logger;
 use hex;
 use itertools::Itertools;
-use log::{debug, info, error, warn};
+use log::{debug, info, error};
 use rand::Rng;
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
 use reqwest::{Response, Url};
@@ -463,6 +463,7 @@ async fn post(&self, body: String) -> Result<Response> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn run(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
 

@@ -314,19 +314,19 @@ async fn post(&self, body: String) -> Result<Response> {
         }
         
         // Improvement 3: Better error handling in runtime execution
-        match runtime.run().await {
+        match runtime.run() {
             Ok(_) => {
                 debug!("Successfully processed block {}", height);
                 Ok(())
             },
             Err(e) => {
                 info!("Runtime execution failed for block {}: {}, refreshing memory and retrying", height, e);
-                runtime.refresh_memory().await.map_err(|refresh_err| {
+                runtime.refresh_memory().map_err(|refresh_err| {
                     error!("Memory refresh failed: {}", refresh_err);
                     refresh_err
                 })?;
                 
-                runtime.run().await.map_err(|run_err| {
+                runtime.run().map_err(|run_err| {
                     error!("Runtime execution failed after memory refresh: {}", run_err);
                     run_err
                 })?;
@@ -488,16 +488,16 @@ async fn post(&self, body: String) -> Result<Response> {
                 context.db.set_height(best);
             }
 
-            match runtime.run().await {
+            match runtime.run() {
                 Ok(_) => {},
                 Err(e) => {
                     info!("Runtime execution failed: {}, refreshing memory and retrying", e);
-                    runtime.refresh_memory().await.map_err(|refresh_err| {
+                    runtime.refresh_memory().map_err(|refresh_err| {
                         error!("Memory refresh failed: {}", refresh_err);
                         refresh_err
                     })?;
                     
-                    runtime.run().await.map_err(|run_err| {
+                    runtime.run().map_err(|run_err| {
                         error!("Runtime execution failed after memory refresh: {}", run_err);
                         run_err
                     })?;
@@ -702,7 +702,7 @@ async fn handle_jsonrpc(
             }
         };
 
-        match runtime.preview(
+        match runtime.preview_async(
           &block_data,
           view_name,
           &hex::decode(input_hex.trim_start_matches("0x"))
@@ -827,7 +827,7 @@ async fn main() -> Result<()> {
     let runtime = Arc::new(Mutex::new(MetashrewRuntime::load(
       PathBuf::from(&args.indexer),
       RocksDBRuntimeAdapter::open(args.db_path.clone(), opts)?,
-  ).await?));
+  )?));
 
     // Create indexer state
     let mut indexer = IndexerState {

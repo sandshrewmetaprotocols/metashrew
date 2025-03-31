@@ -254,14 +254,14 @@ async fn jsonrpc_call(
                 return Ok(HttpResponse::Ok().json(error));
             }
         };
-
-        match context.runtime.view(
-            view_name,
-            &hex::decode(input_hex.trim_start_matches("0x"))
-                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-            height,
-        ) {
-            Ok(res_string) => {
+// Use await with the async view function
+match context.runtime.view(
+    view_name,
+    &hex::decode(input_hex.trim_start_matches("0x"))
+        .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+    height,
+).await {
+    Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
                     result: String::from("0x") + hex::encode(res_string).as_str(),
@@ -418,13 +418,13 @@ async fn jsonrpc_call(
             }
         };
 
-        match context.runtime.preview(
+        match context.runtime.preview_async(
             &block_data,
             view_name,
             &hex::decode(input_hex.trim_start_matches("0x"))
                 .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
             height,
-        ) {
+        ).await {
             Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
@@ -557,8 +557,7 @@ async fn main() -> std::io::Result<()> {
                         opts.clone(),
                     )
                     .unwrap(),
-                )
-                .unwrap(),
+                ).unwrap(),
             }))
             .service(jsonrpc_call)
     })

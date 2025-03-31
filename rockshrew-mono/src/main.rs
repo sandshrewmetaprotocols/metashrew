@@ -6,7 +6,7 @@ use clap::Parser;
 use env_logger;
 use hex;
 use itertools::Itertools;
-use log::{debug, info, error, warn};
+use log::{debug, info, error};
 use rand::Rng;
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
 use reqwest::{Response, Url};
@@ -463,6 +463,7 @@ async fn post(&self, body: String) -> Result<Response> {
         Ok(())
     }
 
+    #[allow(dead_code)]
     async fn run(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
 
@@ -589,12 +590,13 @@ async fn handle_jsonrpc(
             }
         };
 
+        // Use await with the async view function
         match runtime.view(
             view_name,
             &hex::decode(input_hex.trim_start_matches("0x"))
                 .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
             height,
-        ) {
+        ).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(result)),
@@ -701,13 +703,13 @@ async fn handle_jsonrpc(
             }
         };
 
-        match runtime.preview(
-            &block_data,
-            view_name,
-            &hex::decode(input_hex.trim_start_matches("0x"))
-                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-            height,
-        ) {
+        match runtime.preview_async(
+          &block_data,
+          view_name,
+          &hex::decode(input_hex.trim_start_matches("0x"))
+              .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+          height,
+      ).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(result)),
@@ -824,9 +826,9 @@ async fn main() -> Result<()> {
 
     // Create runtime with RocksDB adapter
     let runtime = Arc::new(Mutex::new(MetashrewRuntime::load(
-        PathBuf::from(&args.indexer),
-        RocksDBRuntimeAdapter::open(args.db_path.clone(), opts)?,
-    )?));
+      PathBuf::from(&args.indexer),
+      RocksDBRuntimeAdapter::open(args.db_path.clone(), opts)?,
+  )?));
 
     // Create indexer state
     let mut indexer = IndexerState {

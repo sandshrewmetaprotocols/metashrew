@@ -1,11 +1,12 @@
 [package]
 name = "metashrew-core"
-version = "8.4.0"
+version = "8.4.1"
 edition = "2021"
 description = "Library for building Metashrew indexer programs"
 license = "MIT"
 
 [dependencies]
+tokio = { version = "1.43.0", features = ["full"], optional = true }
 anyhow = "1.0"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
@@ -19,16 +20,21 @@ metashrew-support = { path = "../metashrew-support" }
 # Dependencies for native runtime
 actix-web = { version = "4.5", optional = true }
 actix-cors = { version = "0.7", optional = true }
-clap = { version = "4.5", features = ["derive"], optional = true }
-tokio = { version = "1.43", features = ["full"], optional = true }
+clap = { version = "4.5", features = ["unstable-doc", "derive"], optional = true }
 reqwest = { version = "0.11", features = ["json"], optional = true }
 hex = { version = "0.4", optional = true }
 rand = { version = "0.8", optional = true }
 itertools = { version = "0.12", optional = true }
 env_logger = { version = "0.11", optional = true }
 
+[build-dependencies]
+protobuf-codegen = "3.4.0"
+protoc-rust = { version = "2.28.0" }
+protoc-bin-vendored = "3.0.0"
+
+
 [lib]
-name = "metashrew_lib"
+name = "metashrew_core"
 path = "src/lib.rs"
 
 [features]
@@ -45,3 +51,6 @@ native = [
     "itertools",
     "env_logger",
 ]
+hex = ["dep:hex"]
+actix-web = ["dep:actix-web"]
+clap = ["dep:clap"]

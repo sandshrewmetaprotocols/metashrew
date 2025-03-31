@@ -1,6 +1,6 @@
 [package]
 name = "rockshrew-mono"
-version = "8.4.0"
+version = "8.4.1"
 edition = "2021"
 
 [dependencies]
@@ -16,7 +16,7 @@ env_logger = "0.11.6"
 hex = "0.4.3"
 rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
 tokio = { version = "1.43.0", features = ["full"] }
-clap = { version = "4.5.26", features = ["unstable-doc"] }
+clap = { version = "4.5", features = ["unstable-doc", "derive"] }
 actix-cors = "0.7.0"
 itertools = "0.14.0"
 anyhow = "1.0.95"

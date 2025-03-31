@@ -131,6 +131,7 @@ async fn view(
             }
             h
         };
+        // Use await with the async view function
         let (res_string, err) = match context.runtime.view(
             body.params[0].clone(),
             &hex::decode(
@@ -140,7 +141,7 @@ async fn view(
             )
             .unwrap(),
             height,
-        ) {
+        ).await {
             Ok(str) => (str, "".to_string()),
             Err(err) => {
                 println!("{:#?}", err);

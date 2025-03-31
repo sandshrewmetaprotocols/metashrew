@@ -3,6 +3,8 @@
 //! This module provides safe wrappers around the raw host functions provided by the Metashrew runtime.
 
 use anyhow::{anyhow, Result};
+use protobuf::{Message};
+use std::sync::Arc;
 
 /// External host functions provided by the Metashrew runtime
 extern "C" {
@@ -75,7 +77,7 @@ pub fn get(key: &[u8]) -> Result<Vec<u8>> {
 
 /// Flush key-value pairs to the database
 pub fn flush(pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
-    use crate::proto::metashrew::KeyValueFlush;
+    use metashrew_support::proto::metashrew::KeyValueFlush;
     
     let mut flush = KeyValueFlush::new();
     for (key, value) in pairs {
@@ -92,4 +94,12 @@ pub fn flush(pairs: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
     
     unsafe { __flush(buffer.as_ptr() as i32) };
     Ok(())
+}
+
+/// Set a value in the database
+pub fn set(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
+    let pairs = vec![(key.as_ref().clone(), value.as_ref().clone())];
+    if let Err(e) = flush(&pairs) {
+        log(&format!("Error setting value: {}", e));
+    }
 }

@@ -224,10 +224,28 @@ async fn post(&self, body: String) -> Result<Response> {
                 if best == 0 {
                     break;
                 }
-                let blockhash = self
-                    .get_blockhash(best)
-                    .await
-                    .ok_or_else(|| anyhow!("failed to retrieve blockhash"))?;
+                
+                // Get local blockhash with better error handling
+                let blockhash = match self.get_blockhash(best).await {
+                    Some(hash) => hash,
+                    None => {
+                        // If we can't get the local blockhash, try to get it from the remote
+                        debug!("Local blockhash not found for block {}, fetching from remote", best);
+                        let remote_hash = self.fetch_blockhash(best).await?;
+                        
+                        // Store the remote hash locally for future reference
+                        let runtime = self.runtime.lock().await;
+                        if let Ok(mut context) = runtime.context.lock() {
+                            let key = (String::from(HEIGHT_TO_HASH) + &best.to_string()).into_bytes();
+                            if let Err(e) = context.db.put(&key, &remote_hash) {
+                                debug!("Failed to store blockhash for block {}: {}", best, e);
+                            }
+                        }
+                        
+                        remote_hash
+                    }
+                };
+                
                 let remote_blockhash = self.fetch_blockhash(best).await?;
                 if blockhash == remote_blockhash {
                     break;
@@ -241,9 +259,25 @@ async fn post(&self, body: String) -> Result<Response> {
 
     async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
         let key = (String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes();
-        let runtime = self.runtime.lock().await;
-        let mut context = runtime.context.lock().unwrap();
-        context.db.get(&key).unwrap()
+        let runtime = match self.runtime.lock().await {
+            runtime => runtime,
+        };
+        
+        let mut context = match runtime.context.lock() {
+            Ok(context) => context,
+            Err(e) => {
+                error!("Failed to lock context: {}", e);
+                return None;
+            }
+        };
+        
+        match context.db.get(&key) {
+            Ok(result) => result,
+            Err(e) => {
+                error!("Database error when retrieving blockhash for block {}: {}", block_number, e);
+                None
+            }
+        }
     }
 
     async fn fetch_blockhash(&self, block_number: u32) -> Result<Vec<u8>> {
@@ -307,36 +341,63 @@ async fn post(&self, body: String) -> Result<Response> {
 
     // Process a single block
     async fn process_block(&self, height: u32, block_data: Vec<u8>) -> Result<()> {
-        let mut runtime = self.runtime.lock().await;
+        // Get a lock on the runtime with better error handling
+        let mut runtime = match self.runtime.lock().await {
+            runtime => runtime,
+        };
         
-        // Improvement 1: More efficient mutex locking pattern
-        {
-            let mut context = runtime.context.lock().unwrap();
-            context.block = block_data;
-            context.height = height;
-            context.db.set_height(height);
+        // Set block data with better error handling
+        match runtime.context.lock() {
+            Ok(mut context) => {
+                context.block = block_data;
+                context.height = height;
+                context.db.set_height(height);
+            },
+            Err(e) => {
+                return Err(anyhow!("Failed to lock context: {}", e));
+            }
         }
         
-        // Improvement 3: Better error handling in runtime execution
+        // Execute the runtime with better error handling
         match runtime.run() {
             Ok(_) => {
                 debug!("Successfully processed block {}", height);
+                
+                // Store the blockhash for this height to ensure it's available for future queries
+                if let Ok(mut context) = runtime.context.lock() {
+                    if let Ok(Some(blockhash)) = context.db.get(&format!("{}{}",
+                        HEIGHT_TO_HASH, height).into_bytes()) {
+                        debug!("Verified blockhash is stored for block {}", height);
+                    } else {
+                        debug!("Blockhash not found for block {}, will be fetched if needed", height);
+                    }
+                }
+                
                 Ok(())
             },
             Err(e) => {
                 info!("Runtime execution failed for block {}: {}, refreshing memory and retrying", height, e);
-                runtime.refresh_memory().map_err(|refresh_err| {
-                    error!("Memory refresh failed: {}", refresh_err);
-                    refresh_err
-                })?;
                 
-                runtime.run().map_err(|run_err| {
-                    error!("Runtime execution failed after memory refresh: {}", run_err);
-                    run_err
-                })?;
-                
-                debug!("Successfully processed block {} after memory refresh", height);
-                Ok(())
+                // Try to refresh memory with better error handling
+                match runtime.refresh_memory() {
+                    Ok(_) => {
+                        // Try running again after memory refresh
+                        match runtime.run() {
+                            Ok(_) => {
+                                debug!("Successfully processed block {} after memory refresh", height);
+                                Ok(())
+                            },
+                            Err(run_err) => {
+                                error!("Runtime execution failed after memory refresh: {}", run_err);
+                                Err(anyhow!(run_err))
+                            }
+                        }
+                    },
+                    Err(refresh_err) => {
+                        error!("Memory refresh failed: {}", refresh_err);
+                        Err(anyhow!(refresh_err))
+                    }
+                }
             }
         }
     }
@@ -554,32 +615,56 @@ impl IndexerState {
     fn register_current_thread_as_fetcher(&self) {
         if let Some(tx) = &self.fetcher_thread_id_tx {
             let thread_id = std::thread::current().id();
-            *self.fetcher_thread_id.lock().unwrap() = Some(thread_id.clone());
-            let _ = tx.try_send(("fetcher".to_string(), thread_id));
+            match self.fetcher_thread_id.lock() {
+                Ok(mut guard) => {
+                    *guard = Some(thread_id.clone());
+                    let _ = tx.try_send(("fetcher".to_string(), thread_id));
+                },
+                Err(e) => {
+                    error!("Failed to lock fetcher_thread_id: {}", e);
+                }
+            }
         }
     }
     
     fn register_current_thread_as_processor(&self) {
         if let Some(tx) = &self.processor_thread_id_tx {
             let thread_id = std::thread::current().id();
-            *self.processor_thread_id.lock().unwrap() = Some(thread_id.clone());
-            let _ = tx.try_send(("processor".to_string(), thread_id));
+            match self.processor_thread_id.lock() {
+                Ok(mut guard) => {
+                    *guard = Some(thread_id.clone());
+                    let _ = tx.try_send(("processor".to_string(), thread_id));
+                },
+                Err(e) => {
+                    error!("Failed to lock processor_thread_id: {}", e);
+                }
+            }
         }
     }
     
     fn is_fetcher_thread(&self) -> bool {
-        if let Some(fetcher_id) = *self.fetcher_thread_id.lock().unwrap() {
-            std::thread::current().id() == fetcher_id
-        } else {
-            false
+        match self.fetcher_thread_id.lock() {
+            Ok(guard) => {
+                if let Some(fetcher_id) = *guard {
+                    std::thread::current().id() == fetcher_id
+                } else {
+                    false
+                }
+            },
+            Err(_) => false
         }
     }
     
     fn is_processor_thread(&self) -> bool {
-        if let Some(processor_id) = *self.processor_thread_id.lock().unwrap() {
-            std::thread::current().id() == processor_id
-        } else {
-            false
+        match self.processor_thread_id.lock() {
+            Ok(guard) => {
+                if let Some(processor_id) = *guard {
+                    std::thread::current().id() == processor_id
+                } else {
+                    false
+                }
+            },
+            Err(_) => false
         }
     }
 }

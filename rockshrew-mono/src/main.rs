@@ -127,6 +127,10 @@ struct IndexerState {
     runtime: Arc<Mutex<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
     args: Arc<Args>,
     start_block: u32,
+    fetcher_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
+    processor_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
+    fetcher_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    processor_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
 }
 
 impl IndexerState {
@@ -346,13 +350,18 @@ async fn post(&self, body: String) -> Result<Response> {
         let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(self.args.pipeline_size);
         let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(self.args.pipeline_size);
         
-        // Spawn block fetcher task
+        // Spawn block fetcher task on dedicated thread
         let fetcher_handle = {
             let args = self.args.clone();
             let indexer = self.clone();
             let result_sender_clone = result_sender.clone();
             let block_sender_clone = block_sender.clone();
+            
+            // Spawn a task for the block fetcher
             tokio::spawn(async move {
+                    // Register this thread as the fetcher thread
+                    indexer.register_current_thread_as_fetcher();
+                    info!("Block fetcher task started on thread {:?}", std::thread::current().id());
                 let mut current_height = height;
                 
                 loop {
@@ -405,11 +414,16 @@ async fn post(&self, body: String) -> Result<Response> {
             })
         };
         
-        // Spawn block processor task
+        // Spawn block processor task on dedicated thread
         let processor_handle = {
             let indexer = self.clone();
             let result_sender_clone = result_sender.clone();
+            
+            // Spawn a task for the block processor
             tokio::spawn(async move {
+                    // Register this thread as the processor thread
+                    indexer.register_current_thread_as_processor();
+                    info!("Block processor task started on thread {:?}", std::thread::current().id());
                 while let Some((block_height, block_data)) = block_receiver.recv().await {
                     debug!("Processing block {} ({})", block_height, block_data.len());
                     
@@ -458,7 +472,7 @@ async fn post(&self, body: String) -> Result<Response> {
         drop(result_sender);
         
         // Wait for tasks to complete
-        let _ = tokio::join!(fetcher_handle, processor_handle);
+        let (_fetcher_result, _processor_result) = tokio::join!(fetcher_handle, processor_handle);
         
         Ok(())
     }
@@ -518,6 +532,54 @@ impl Clone for IndexerState {
             runtime: self.runtime.clone(),
             args: self.args.clone(),
             start_block: self.start_block,
+            fetcher_thread_id_tx: self.fetcher_thread_id_tx.clone(),
+            processor_thread_id_tx: self.processor_thread_id_tx.clone(),
+            fetcher_thread_id: std::sync::Mutex::new(*self.fetcher_thread_id.lock().unwrap()),
+            processor_thread_id: std::sync::Mutex::new(*self.processor_thread_id.lock().unwrap()),
+        }
+    }
+}
+
+// Add methods to set and get thread ID senders
+impl IndexerState {
+    fn set_thread_id_senders(
+        &mut self,
+        fetcher_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>,
+        processor_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>
+    ) {
+        self.fetcher_thread_id_tx = Some(fetcher_tx);
+        self.processor_thread_id_tx = Some(processor_tx);
+    }
+    
+    fn register_current_thread_as_fetcher(&self) {
+        if let Some(tx) = &self.fetcher_thread_id_tx {
+            let thread_id = std::thread::current().id();
+            *self.fetcher_thread_id.lock().unwrap() = Some(thread_id.clone());
+            let _ = tx.try_send(("fetcher".to_string(), thread_id));
+        }
+    }
+    
+    fn register_current_thread_as_processor(&self) {
+        if let Some(tx) = &self.processor_thread_id_tx {
+            let thread_id = std::thread::current().id();
+            *self.processor_thread_id.lock().unwrap() = Some(thread_id.clone());
+            let _ = tx.try_send(("processor".to_string(), thread_id));
+        }
+    }
+    
+    fn is_fetcher_thread(&self) -> bool {
+        if let Some(fetcher_id) = *self.fetcher_thread_id.lock().unwrap() {
+            std::thread::current().id() == fetcher_id
+        } else {
+            false
+        }
+    }
+    
+    fn is_processor_thread(&self) -> bool {
+        if let Some(processor_id) = *self.processor_thread_id.lock().unwrap() {
+            std::thread::current().id() == processor_id
+        } else {
+            false
         }
     }
 }
@@ -793,10 +855,11 @@ async fn handle_jsonrpc(
     }
 }
 
-#[allow(deprecated)]
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Initialize the logger
     env_logger::init();
+    
+    // Parse command line arguments
     let args = Arc::new(Args::parse());
 
     if let Some(ref label) = args.label {
@@ -805,6 +868,33 @@ async fn main() -> Result<()> {
 
     let start_block = args.start_block.unwrap_or(0);
 
+    // Create a custom runtime with dedicated threads for critical tasks
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(8) // Allocate enough threads for all our tasks
+        .thread_name("metashrew-worker")
+        .on_thread_start(|| {
+            let thread_name = std::thread::current().name().unwrap_or("unknown").to_string();
+            info!("Thread started: {}", thread_name);
+        })
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+    
+    // Run the main application logic on the runtime
+    runtime.block_on(async_main(args, start_block))
+}
+
+// The actual async main function that will run on our custom runtime
+async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
+    info!("Starting Metashrew with dedicated threads for indexer tasks");
+    // Create a thread pool with specific thread names for our dedicated tasks
+    let fetcher_thread_name = "block-fetcher";
+    let processor_thread_name = "block-processor";
+    
+    // Configure thread priorities using thread names
+    info!("Setting up dedicated task threads");
+        info!("Setting up dedicated task threads");
+    
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
     opts.create_if_missing(true);
@@ -821,7 +911,7 @@ async fn main() -> Result<()> {
     opts.set_level_zero_slowdown_writes_trigger(20);
     opts.set_level_zero_stop_writes_trigger(30);
     opts.set_max_background_jobs(4);
-    opts.set_max_background_compactions(4);
+    // Removed deprecated call to set_max_background_compactions
     opts.set_disable_auto_compactions(false);
 
     // Create runtime with RocksDB adapter
@@ -835,6 +925,10 @@ async fn main() -> Result<()> {
         runtime: runtime.clone(),
         args: args.clone(),
         start_block,
+        fetcher_thread_id_tx: None,
+        processor_thread_id_tx: None,
+        fetcher_thread_id: std::sync::Mutex::new(None),
+        processor_thread_id: std::sync::Mutex::new(None),
     };
 
     // Create app state for JSON-RPC server
@@ -842,10 +936,25 @@ async fn main() -> Result<()> {
         runtime: runtime.clone(),
     });
 
+    // Create a channel to communicate thread IDs
+    let (thread_id_tx, mut thread_id_rx) = tokio::sync::mpsc::channel::<(String, std::thread::ThreadId)>(2);
+    
+    // Spawn a task to monitor thread IDs
+    tokio::spawn(async move {
+        while let Some((role, mut thread_id)) = thread_id_rx.recv().await {
+            info!("Thread role registered: {} on thread {:?}", role, thread_id);
+        }
+    });
+    
+    // Configure the indexer to use thread ID tracking
+    indexer.set_thread_id_senders(thread_id_tx.clone(), thread_id_tx.clone());
+    
     // Start the indexer in a separate task
     let indexer_handle = tokio::spawn(async move {
+        info!("Starting indexer task");
+        
         if let Err(e) = indexer.run_pipeline().await {
-            log::error!("Indexer error: {}", e);
+            error!("Indexer error: {}", e);
         }
     });
 

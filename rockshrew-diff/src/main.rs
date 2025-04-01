@@ -607,23 +607,34 @@ impl RockshrewDiffRuntime {
 // Allow cloning for use in async tasks
 impl Clone for RockshrewDiffRuntime {
     fn clone(&self) -> Self {
-        // We can't clone MetashrewRuntime directly, so we'll create new instances
-        // This is a simplified clone that only works for our specific use case
+        // Instead of creating new database connections, we'll clone the existing runtimes
+        // by creating new instances that share the same database connections
+        
+        // Get the database adapters from the existing runtimes
+        let primary_db = {
+            let context = self.primary_runtime.context.lock().unwrap();
+            context.db.clone()
+        };
+        
+        let compare_db = {
+            let context = self.compare_runtime.context.lock().unwrap();
+            context.db.clone()
+        };
+        
+        // Create new runtime instances with the cloned database adapters
+        let primary_runtime = MetashrewRuntime::load(
+            PathBuf::from(&self.args.indexer),
+            primary_db
+        ).unwrap_or_else(|_| panic!("Failed to clone primary runtime"));
+        
+        let compare_runtime = MetashrewRuntime::load(
+            PathBuf::from(&self.args.compare),
+            compare_db
+        ).unwrap_or_else(|_| panic!("Failed to clone compare runtime"));
+        
         Self {
-            primary_runtime: MetashrewRuntime::load(
-                PathBuf::from(&self.args.indexer),
-                RocksDBRuntimeAdapter::open(
-                    format!("{}/primary", self.args.db_path),
-                    create_rocksdb_options()
-                ).unwrap()
-            ).unwrap(),
-            compare_runtime: MetashrewRuntime::load(
-                PathBuf::from(&self.args.compare),
-                RocksDBRuntimeAdapter::open(
-                    format!("{}/compare", self.args.db_path),
-                    create_rocksdb_options()
-                ).unwrap()
-            ).unwrap(),
+            primary_runtime,
+            compare_runtime,
             args: self.args.clone(),
             start_block: self.start_block,
             prefix: self.prefix.clone(),

@@ -47,30 +47,10 @@ done
 
 echo "Updated $UPDATED Cargo.toml files to version $NEW_VERSION"
 
-# Now update dependencies within the project
-echo "Updating internal dependencies..."
+# We're not updating internal dependencies to avoid breaking path references
+echo "Skipping internal dependency updates to preserve path references"
 
-for CARGO_FILE in $CARGO_FILES; do
-    # Get the directory name to identify the crate
-    DIR_NAME=$(dirname "$CARGO_FILE")
-    CRATE_NAME=$(basename "$DIR_NAME")
-    
-    # Update dependencies on this crate in all other Cargo.toml files
-    for OTHER_CARGO in $CARGO_FILES; do
-        if [ "$CARGO_FILE" != "$OTHER_CARGO" ]; then
-            # Look for dependencies like: crate_name = { version = "x.y.z", ... }
-            # or crate_name = "x.y.z"
-            sed -i -E "s/^($CRATE_NAME = \\{ version = ).*/\\1\"$NEW_VERSION\", path = \"..\\/$CRATE_NAME\" \\}/" "$OTHER_CARGO"
-            sed -i -E "s/^($CRATE_NAME = ).*/\\1\"$NEW_VERSION\"/" "$OTHER_CARGO"
-            
-            # Also handle metashrew-specific crates with hyphens that become underscores in dependency names
-            UNDERSCORE_NAME=$(echo "$CRATE_NAME" | tr '-' '_')
-            if [ "$CRATE_NAME" != "$UNDERSCORE_NAME" ]; then
-                sed -i -E "s/^($UNDERSCORE_NAME = \\{ version = ).*/\\1\"$NEW_VERSION\", path = \"..\\/$CRATE_NAME\" \\}/" "$OTHER_CARGO"
-                sed -i -E "s/^($UNDERSCORE_NAME = ).*/\\1\"$NEW_VERSION\"/" "$OTHER_CARGO"
-            fi
-        fi
-    done
-done
+# The script now only updates the version field in each crate's Cargo.toml
+# and does not modify dependency specifications between sibling crates
 
 echo "Version update complete!"

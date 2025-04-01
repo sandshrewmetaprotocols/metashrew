@@ -65,6 +65,51 @@ Configuration options:
 - `--label`: Optional database label
 - `--exit-at`: Optional block height to stop at
 
+## Comparing Indexers with rockshrew-diff
+
+The `rockshrew-diff` tool allows you to compare the output of two different WASM modules processing the same blockchain data. This is particularly useful for:
+
+- Validating changes to metaprotocol implementations
+- Ensuring upgrades don't introduce financial side effects
+- Debugging differences between implementations
+- Testing compatibility between versions
+
+### How It Works
+
+1. `rockshrew-diff` processes blocks with both WASM modules
+2. It compares key-value pairs with a specified prefix
+3. When differences are found, it prints a detailed report and exits
+4. If no differences are found, it continues to the next block
+
+### Example Usage
+
+Compare balance changes indexed by two versions of the ALKANES metaprotocol:
+
+```sh
+./target/release/rockshrew-diff \
+  --daemon-rpc-url http://localhost:8332 \
+  --auth bitcoinrpc:bitcoinrpc \
+  --indexer /home/ubuntu/primary.wasm \
+  --compare /home/ubuntu/alkanes-rs/target/wasm32-unknown-unknown/release/alkanes.wasm \
+  --db-path /home/ubuntu/.rockshrew-diff \
+  --prefix 0x2f72756e65732f70726f746f2f312f62796f7574706f696e742f \
+  --start-block 880000
+```
+
+This example compares how two versions of the ALKANES metaprotocol index balance changes at the key prefix `/runes/proto/1/byoutpoint/`. This ensures that protocol upgrades don't introduce destructive financial side effects - a major benefit of using a metashrew-based index for metaprotocol development.
+
+### Configuration Options
+
+- `--daemon-rpc-url`: Bitcoin Core RPC URL
+- `--auth`: RPC credentials (username:password)
+- `--indexer`: Path to primary WASM module
+- `--compare`: Path to comparison WASM module
+- `--db-path`: Database directory for both modules
+- `--prefix`: Hex-encoded key prefix to compare (must start with 0x)
+- `--start-block`: Block height to start comparison
+- `--exit-at`: Optional block height to stop at
+- `--pipeline-size`: Optional pipeline size for parallel processing (default: 5)
+
 ## WASM Runtime Environment
 
 ### Host Functions

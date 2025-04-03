@@ -105,7 +105,9 @@ macro_rules! metashrew_indexer {
                             if input_bytes.len() >= 4 {
                                 let mut bytes = [0u8; 4];
                                 bytes.copy_from_slice(&input_bytes[0..4]);
-                                u32::from_le_bytes(bytes)
+                                let value = u32::from_le_bytes(bytes);
+                                // Convert u32 to Vec<u8> to match the expected type
+                                value.to_le_bytes().to_vec()
                             } else {
                                 $crate::host::log("Error: input bytes too short for u32");
                                 return $crate::view::return_view_result(&[]);
@@ -337,7 +339,9 @@ macro_rules! declare_indexer {
                                 if input_bytes.len() >= 4 {
                                     let mut bytes = [0u8; 4];
                                     bytes.copy_from_slice(&input_bytes[0..4]);
-                                    u32::from_le_bytes(bytes)
+                                    let value = u32::from_le_bytes(bytes);
+                                    // Convert u32 to Vec<u8> to match the expected type
+                                    value.to_le_bytes().to_vec()
                                 } else {
                                     $crate::host::log("Error: input bytes too short for u32");
                                     return $crate::view::return_view_result(&[]);

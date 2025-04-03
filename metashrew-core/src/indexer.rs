@@ -13,7 +13,9 @@ pub trait Indexer {
     fn index_block(&mut self, height: u32, block: &[u8]) -> Result<()>;
     
     /// Get the current state as key-value pairs
-    fn flush(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>>;
+    fn flush(&self) {
+      crate::wasm::flush();
+    }
     
     /// Convert to Any for dynamic casting
     fn as_any(&self) -> &dyn Any;
@@ -38,10 +40,7 @@ impl<T: Indexer> MetashrewIndexer<T> {
         // Process the block
         self.indexer.index_block(height, &block)?;
         
-        // Flush the state
-        let pairs = self.indexer.flush()?;
-        crate::host::flush(&pairs)?;
-        
+        crate::wasm::flush();
         Ok(())
     }
     

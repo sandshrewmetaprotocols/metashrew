@@ -321,17 +321,30 @@ macro_rules! declare_indexer {
                                 // Convert all responses to Vec<u8> for consistency
                                 let bytes: Vec<u8> = if std::any::TypeId::of::<$response_type>() == std::any::TypeId::of::<Vec<u8>>() {
                                     // For Vec<u8>, just use the bytes directly
-                                    // We need to use unsafe to convert between types
-                                    unsafe { std::mem::transmute_copy(&response) }
+                                    response
                                 } else if std::any::TypeId::of::<$response_type>() == std::any::TypeId::of::<u32>() {
                                     // For u32, convert to bytes
                                     // We need to use unsafe to convert between types
                                     let value: u32 = unsafe { std::mem::transmute_copy(&response) };
                                     value.to_le_bytes().to_vec()
+                                } else if std::any::TypeId::of::<$response_type>() == std::any::TypeId::of::<String>() {
+                                    // For String, convert to bytes
+                                    let value: String = unsafe { std::mem::transmute_copy(&response) };
+                                    value.into_bytes()
                                 } else {
-                                    // For all other types, try to serialize using protobuf
-                                    // or fall back to string representation
-                                    format!("{:?}", response).into_bytes()
+                                    // Try to serialize using protobuf if the type implements Message
+                                    match (|| -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
+                                        // This is a bit of a hack, but we need to check if the type implements Message
+                                        // We can't use a trait bound because we're in a macro
+                                        let message = unsafe { &*((&response as *const $response_type) as *const dyn protobuf::Message) };
+                                        Ok(message.write_to_bytes()?)
+                                    })() {
+                                        Ok(bytes) => bytes,
+                                        Err(_) => {
+                                            // Fall back to string representation
+                                            format!("{:?}", response).into_bytes()
+                                        }
+                                    }
                                 };
                                 
                                 $crate::view::return_view_result(&bytes)

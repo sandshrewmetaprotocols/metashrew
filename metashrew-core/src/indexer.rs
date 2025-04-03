@@ -21,7 +21,7 @@ pub trait Indexer {
 
 /// A struct for building Metashrew indexer programs
 pub struct MetashrewIndexer<T: Indexer> {
-    indexer: T,
+    pub indexer: T,
 }
 
 impl<T: Indexer> MetashrewIndexer<T> {

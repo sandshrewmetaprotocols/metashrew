@@ -88,18 +88,65 @@ macro_rules! metashrew_indexer {
                     }
 
                     if let Some(indexer) = &INDEXER_INSTANCE {
-                        match $crate::view::parse_view_input::<$input_type>() {
-                            Ok(input) => {
-                                match indexer.indexer.$view_method(input) {
-                                    Ok(output) => $crate::view::return_view_result(&output),
-                                    Err(e) => {
-                                        $crate::host::log(&format!("Error executing view function: {}", e));
-                                        $crate::view::return_view_result(&[])
-                                    }
+                        let (_height, input_bytes) = match $crate::host::load_input() {
+                            Ok(input) => input,
+                            Err(e) => {
+                                $crate::host::log(&format!("Error loading input: {}", e));
+                                return $crate::view::return_view_result(&[]);
+                            }
+                        };
+
+                        // Parse the input based on its type
+                        let input: $input_type = if std::any::TypeId::of::<$input_type>() == std::any::TypeId::of::<Vec<u8>>() {
+                            // For Vec<u8>, just use the input bytes directly
+                            input_bytes
+                        } else if std::any::TypeId::of::<$input_type>() == std::any::TypeId::of::<u32>() {
+                            // For u32, convert from bytes
+                            if input_bytes.len() >= 4 {
+                                let mut bytes = [0u8; 4];
+                                bytes.copy_from_slice(&input_bytes[0..4]);
+                                u32::from_le_bytes(bytes)
+                            } else {
+                                $crate::host::log("Error: input bytes too short for u32");
+                                return $crate::view::return_view_result(&[]);
+                            }
+                        } else {
+                            // Try to parse as JSON
+                            match serde_json::from_slice(&input_bytes) {
+                                Ok(parsed) => parsed,
+                                Err(e) => {
+                                    $crate::host::log(&format!("Error parsing input: {}", e));
+                                    return $crate::view::return_view_result(&[]);
                                 }
+                            }
+                        };
+
+                        // Call the view method
+                        match <$indexer_type>::$view_method(&indexer.get_indexer(), input) {
+                            Ok(output) => {
+                                // Convert the output to bytes
+                                let bytes: Vec<u8> = if std::any::TypeId::of::<$output_type>() == std::any::TypeId::of::<Vec<u8>>() {
+                                    // For Vec<u8>, just use the bytes directly
+                                    output
+                                } else if std::any::TypeId::of::<$output_type>() == std::any::TypeId::of::<u32>() {
+                                    // For u32, convert to bytes
+                                    let value: u32 = unsafe { std::mem::transmute_copy(&output) };
+                                    value.to_le_bytes().to_vec()
+                                } else {
+                                    // Try to serialize as JSON
+                                    match serde_json::to_vec(&output) {
+                                        Ok(serialized) => serialized,
+                                        Err(e) => {
+                                            $crate::host::log(&format!("Error serializing output: {}", e));
+                                            return $crate::view::return_view_result(&[]);
+                                        }
+                                    }
+                                };
+
+                                $crate::view::return_view_result(&bytes)
                             },
                             Err(e) => {
-                                $crate::host::log(&format!("Error parsing view input: {}", e));
+                                $crate::host::log(&format!("Error executing view function: {}", e));
                                 $crate::view::return_view_result(&[])
                             }
                         }

@@ -366,7 +366,7 @@ async fn post(&self, body: String) -> Result<Response> {
                 
                 // Store the blockhash for this height to ensure it's available for future queries
                 if let Ok(mut context) = runtime.context.lock() {
-                    if let Ok(Some(blockhash)) = context.db.get(&format!("{}{}",
+                    if let Ok(Some(_blockhash)) = context.db.get(&format!("{}{}",
                         HEIGHT_TO_HASH, height).into_bytes()) {
                         debug!("Verified blockhash is stored for block {}", height);
                     } else {
@@ -425,7 +425,6 @@ async fn post(&self, body: String) -> Result<Response> {
         // Create channels for the pipeline
         let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(pipeline_size);
         let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(pipeline_size);
-        let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(self.args.pipeline_size);
         
         // Spawn block fetcher task on dedicated thread
         let fetcher_handle = {
@@ -658,6 +657,8 @@ impl IndexerState {
         }
     }
     
+    // These methods might be useful in the future, so we'll keep them but mark them as allowed dead code
+    #[allow(dead_code)]
     fn is_fetcher_thread(&self) -> bool {
         match self.fetcher_thread_id.lock() {
             Ok(guard) => {
@@ -671,6 +672,7 @@ impl IndexerState {
         }
     }
     
+    #[allow(dead_code)]
     fn is_processor_thread(&self) -> bool {
         match self.processor_thread_id.lock() {
             Ok(guard) => {
@@ -994,9 +996,7 @@ fn main() -> Result<()> {
 // The actual async main function that will run on our custom runtime
 async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     info!("Starting Metashrew with dedicated threads for indexer tasks");
-    // Create a thread pool with specific thread names for our dedicated tasks
-    let fetcher_thread_name = "block-fetcher";
-    let processor_thread_name = "block-processor";
+    // No longer need thread names as they're set directly in the registration functions
     
     // Configure thread priorities using thread names
     info!("Setting up dedicated task threads");
@@ -1010,16 +1010,16 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     
     // Calculate optimal background jobs - use approximately 1/4 of available cores
     // with a minimum of 4 and a reasonable maximum to avoid excessive context switching
-    let background_jobs = std::cmp::min(
+    let background_jobs: i32 = std::cmp::min(
         std::cmp::max(4, available_cpus / 4),
         16  // Cap at a reasonable maximum
-    );
+    ).try_into().unwrap();
     
     // Calculate write buffer number based on available cores
-    let write_buffer_number = std::cmp::min(
+    let write_buffer_number: i32 = std::cmp::min(
         std::cmp::max(6, available_cpus / 6),
         12  // Cap at a reasonable maximum
-    );
+    ).try_into().unwrap();
     
     info!("Configuring RocksDB with {} background jobs and {} write buffers", background_jobs, write_buffer_number);
     
@@ -1080,7 +1080,7 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     
     // Spawn a task to monitor thread IDs
     tokio::spawn(async move {
-        while let Some((role, mut thread_id)) = thread_id_rx.recv().await {
+        while let Some((role, thread_id)) = thread_id_rx.recv().await {
             info!("Thread role registered: {} on thread {:?}", role, thread_id);
         }
     });

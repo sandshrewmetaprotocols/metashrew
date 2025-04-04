@@ -1,6 +1,6 @@
-use bitcoin::sighash::Prevouts;
 
 use crate::byte_view::ByteView;
+#[allow(unused_imports)]
 use core::prelude;
 use std::sync::Arc;
 

@@ -9,6 +9,7 @@ use itertools::Itertools;
 use log::{debug, info, error};
 use rand::Rng;
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
+use num_cpus;
 use reqwest::{Response, Url};
 use rocksdb::Options;
 use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
@@ -57,8 +58,8 @@ struct Args {
     #[arg(long, help = "CORS allowed origins (e.g., '*' for all origins, or specific domains)")]
     cors: Option<String>,
     // Pipeline configuration
-    #[arg(long, default_value_t = 5)]
-    pipeline_size: usize,
+    #[arg(long, help = "Size of the processing pipeline (default: auto-determined based on CPU cores)")]
+    pipeline_size: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -406,9 +407,24 @@ async fn post(&self, body: String) -> Result<Response> {
     async fn run_pipeline(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
         CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+        // Determine optimal pipeline size based on CPU cores if not specified
+        let pipeline_size = match self.args.pipeline_size {
+            Some(size) => size,
+            None => {
+                let available_cpus = num_cpus::get();
+                // Use approximately 1/2 of available cores for pipeline size, with reasonable min/max
+                let auto_size = std::cmp::min(
+                    std::cmp::max(5, available_cpus / 2),
+                    16  // Cap at a reasonable maximum
+                );
+                info!("Auto-configuring pipeline size to {} based on {} available CPU cores", auto_size, available_cpus);
+                auto_size
+            }
+        };
         
         // Create channels for the pipeline
-        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(self.args.pipeline_size);
+        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(pipeline_size);
+        let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(pipeline_size);
         let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(self.args.pipeline_size);
         
         // Spawn block fetcher task on dedicated thread
@@ -954,8 +970,14 @@ fn main() -> Result<()> {
     let start_block = args.start_block.unwrap_or(0);
 
     // Create a custom runtime with dedicated threads for critical tasks
+    // Dynamically determine the number of worker threads based on available CPUs
+    let available_cpus = num_cpus::get();
+    let worker_threads = std::cmp::max(8, available_cpus); // Use at least 8 threads, or more if available
+    
+    info!("Detected {} CPU cores, configuring tokio runtime with {} worker threads", available_cpus, worker_threads);
+    
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(8) // Allocate enough threads for all our tasks
+        .worker_threads(worker_threads)
         .thread_name("metashrew-worker")
         .on_thread_start(|| {
             let thread_name = std::thread::current().name().unwrap_or("unknown").to_string();
@@ -982,20 +1004,39 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
+    
+    // Dynamically configure RocksDB based on available CPU cores
+    let available_cpus = num_cpus::get();
+    
+    // Calculate optimal background jobs - use approximately 1/4 of available cores
+    // with a minimum of 4 and a reasonable maximum to avoid excessive context switching
+    let background_jobs = std::cmp::min(
+        std::cmp::max(4, available_cpus / 4),
+        16  // Cap at a reasonable maximum
+    );
+    
+    // Calculate write buffer number based on available cores
+    let write_buffer_number = std::cmp::min(
+        std::cmp::max(6, available_cpus / 6),
+        12  // Cap at a reasonable maximum
+    );
+    
+    info!("Configuring RocksDB with {} background jobs and {} write buffers", background_jobs, write_buffer_number);
+    
     opts.create_if_missing(true);
     opts.set_max_open_files(10000);
     opts.set_use_fsync(false);
     opts.set_bytes_per_sync(8388608); // 8MB
     opts.optimize_for_point_lookup(1024);
     opts.set_table_cache_num_shard_bits(6);
-    opts.set_max_write_buffer_number(6);
+    opts.set_max_write_buffer_number(write_buffer_number);
     opts.set_write_buffer_size(256 * 1024 * 1024);
     opts.set_target_file_size_base(256 * 1024 * 1024);
     opts.set_min_write_buffer_number_to_merge(2);
     opts.set_level_zero_file_num_compaction_trigger(4);
     opts.set_level_zero_slowdown_writes_trigger(20);
     opts.set_level_zero_stop_writes_trigger(30);
-    opts.set_max_background_jobs(4);
+    opts.set_max_background_jobs(background_jobs);
     // Removed deprecated call to set_max_background_compactions
     opts.set_disable_auto_compactions(false);
 
@@ -1015,6 +1056,19 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
         fetcher_thread_id: std::sync::Mutex::new(None),
         processor_thread_id: std::sync::Mutex::new(None),
     };
+    
+    // Log the pipeline size configuration
+    match args.pipeline_size {
+        Some(size) => info!("Using user-specified pipeline size: {}", size),
+        None => {
+            let available_cpus = num_cpus::get();
+            let auto_size = std::cmp::min(
+                std::cmp::max(5, available_cpus / 2),
+                16
+            );
+            info!("Using auto-configured pipeline size: {} (based on {} CPU cores)", auto_size, available_cpus);
+        }
+    }
 
     // Create app state for JSON-RPC server
     let app_state = web::Data::new(AppState {

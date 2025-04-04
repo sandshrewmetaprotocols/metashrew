@@ -2,10 +2,6 @@ syntax = "proto3";
 
 package metashrew;
 
-message KeyValueFlush {
-  repeated bytes list = 1;
-}
-
 // Metadata about a view function
 message ViewFunction {
   // Name of the view function

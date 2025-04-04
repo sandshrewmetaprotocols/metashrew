@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub mod compat;
 pub mod imports;
 pub mod index_pointer;
+pub mod macros;
 pub mod stdio;
 #[cfg(test)]
 pub mod tests;
@@ -19,7 +20,8 @@ pub mod tests;
 use crate::compat::panic_hook;
 use crate::imports::{__flush, __get, __get_len, __host_len, __load_input};
 pub use crate::stdio::stdout;
-use metashrew_support::{proto::metashrew::KeyValueFlush, compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr}};
+#[allow(unused_imports)]
+use metashrew_support::{proto::metashrew::{KeyValueFlush, IndexerMetadata, ViewFunction}, compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr}};
 
 static mut CACHE: Option<HashMap<Arc<Vec<u8>>, Arc<Vec<u8>>>> = None;
 static mut TO_FLUSH: Option<Vec<Arc<Vec<u8>>>> = None;
@@ -99,6 +101,18 @@ pub fn initialize() -> () {
             panic::set_hook(Box::new(panic_hook));
         }
     }
+}
+
+/// Export bytes to the host with proper length prefix
+pub fn export_bytes(bytes: Vec<u8>) -> i32 {
+    // Create a buffer with the length prefix
+    let mut buffer = Vec::with_capacity(bytes.len() + 4);
+    let len = bytes.len() as u32;
+    buffer.extend_from_slice(&len.to_le_bytes());
+    buffer.extend_from_slice(&bytes);
+    
+    // Return a pointer to the buffer
+    to_ptr(&mut buffer)
 }
 
 pub fn reset() -> () {

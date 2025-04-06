@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::sleep;
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
@@ -64,7 +64,7 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
-    runtime: Arc<Mutex<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
+    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -125,7 +125,7 @@ impl error::ResponseError for IndexerError {
     }
 }
 struct IndexerState {
-    runtime: Arc<Mutex<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
+    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
     args: Arc<Args>,
     start_block: u32,
     fetcher_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
@@ -209,7 +209,7 @@ async fn post(&self, body: String) -> Result<Response> {
 
     async fn query_height(&self) -> Result<u32> {
         let (db, start_block) = {
-            let runtime = self.runtime.lock().await;
+            let runtime = self.runtime.read().await;
             let context = runtime.context.lock().unwrap();
             (context.db.db.clone(), self.start_block)
         };
@@ -235,7 +235,7 @@ async fn post(&self, body: String) -> Result<Response> {
                         let remote_hash = self.fetch_blockhash(best).await?;
                         
                         // Store the remote hash locally for future reference
-                        let runtime = self.runtime.lock().await;
+                        let runtime = self.runtime.write().await;
                         if let Ok(mut context) = runtime.context.lock() {
                             let key = (String::from(HEIGHT_TO_HASH) + &best.to_string()).into_bytes();
                             if let Err(e) = context.db.put(&key, &remote_hash) {
@@ -260,7 +260,7 @@ async fn post(&self, body: String) -> Result<Response> {
 
     async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
         let key = (String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes();
-        let runtime = match self.runtime.lock().await {
+        let runtime = match self.runtime.read().await {
             runtime => runtime,
         };
         
@@ -312,7 +312,7 @@ async fn post(&self, body: String) -> Result<Response> {
         }
         let blockhash = self.fetch_blockhash(block_number).await?;
 
-        let runtime = self.runtime.lock().await;
+        let runtime = self.runtime.write().await;
         runtime.context.lock().unwrap().db.put(
             &(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes(),
             &blockhash,
@@ -343,7 +343,7 @@ async fn post(&self, body: String) -> Result<Response> {
     // Process a single block
     async fn process_block(&self, height: u32, block_data: Vec<u8>) -> Result<()> {
         // Get a lock on the runtime with better error handling
-        let mut runtime = match self.runtime.lock().await {
+        let mut runtime = match self.runtime.write().await {
             runtime => runtime,
         };
         
@@ -571,7 +571,7 @@ async fn post(&self, body: String) -> Result<Response> {
             let best: u32 = self.best_height(height).await.unwrap_or(height);
             let block_data = self.pull_block(best).await?;
 
-            let mut runtime = self.runtime.lock().await;
+            let mut runtime = self.runtime.write().await;
             {
                 let mut context = runtime.context.lock().unwrap();
                 context.block = block_data;
@@ -694,8 +694,6 @@ async fn handle_jsonrpc(
 ) -> ActixResult<impl Responder> {
     debug!("RPC request: {}", serde_json::to_string(&body).unwrap());
 
-    let runtime = state.runtime.lock().await;
-
     if body.method == "metashrew_view" {
         if body.params.len() < 3 {
             return Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -755,11 +753,27 @@ async fn handle_jsonrpc(
             }
         };
 
+        // Acquire a read lock on the runtime - this allows multiple readers
+        let runtime = state.runtime.read().await;
+        
+        // Decode input data outside the lock if possible
+        let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
+            Ok(data) => data,
+            Err(e) => return Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: format!("Invalid hex input: {}", e),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
+        };
+
         // Use await with the async view function
         match runtime.view(
             view_name,
-            &hex::decode(input_hex.trim_start_matches("0x"))
-                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+            &input_data,
             height,
         ).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
@@ -778,6 +792,8 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_preview" {
+        // Acquire a read lock on the runtime - this allows multiple readers
+        let runtime = state.runtime.read().await;
         // Ensure we have required params
         if body.params.len() < 4 {
             return Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -853,6 +869,7 @@ async fn handle_jsonrpc(
             }
         };
 
+        // Decode input data outside the lock if possible
         let block_data = match hex::decode(block_hex.trim_start_matches("0x")) {
             Ok(data) => data,
             Err(e) => {
@@ -867,12 +884,24 @@ async fn handle_jsonrpc(
                 }))
             }
         };
-
+        
+        let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
+            Ok(data) => data,
+            Err(e) => return Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: format!("Invalid hex input: {}", e),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
+        };
+        
         match runtime.preview_async(
           &block_data,
           view_name,
-          &hex::decode(input_hex.trim_start_matches("0x"))
-              .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+          &input_data,
           height,
       ).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
@@ -891,12 +920,15 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_height" {
+        // No need to lock the runtime for this operation
         Ok(HttpResponse::Ok().json(JsonRpcResult {
             id: body.id,
             result: CURRENT_HEIGHT.load(Ordering::SeqCst).to_string(),
             jsonrpc: "2.0".to_string(),
         }))
     } else if body.method == "metashrew_getblockhash" {
+        // Acquire a read lock on the runtime
+        let runtime = state.runtime.read().await;
         if body.params.len() != 1 {
             return Ok(HttpResponse::Ok().json(JsonRpcError {
                 id: body.id,
@@ -925,11 +957,16 @@ async fn handle_jsonrpc(
         };
 
         let key = (String::from(HEIGHT_TO_HASH) + &height.to_string()).into_bytes();
-        match runtime.context.lock().unwrap().db.get(&key).map_err(|_| {
+        
+        // Fix lifetime issue by storing the context in a variable
+        let mut context = runtime.context.lock().unwrap();
+        let result = context.db.get(&key).map_err(|_| {
             <anyhow::Error as Into<IndexerError>>::into(anyhow!(
                 "DB connection error while fetching blockhash"
             ))
-        })? {
+        })?;
+        
+        match result {
             Some(hash) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(hash)),
@@ -1041,7 +1078,7 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     opts.set_disable_auto_compactions(false);
 
     // Create runtime with RocksDB adapter
-    let runtime = Arc::new(Mutex::new(MetashrewRuntime::load(
+    let runtime = Arc::new(RwLock::new(MetashrewRuntime::load(
       PathBuf::from(&args.indexer),
       RocksDBRuntimeAdapter::open(args.db_path.clone(), opts)?,
   )?));

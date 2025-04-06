@@ -83,7 +83,7 @@ struct Context {
     hash: [u8; 32],
     #[allow(dead_code)]
     program: Vec<u8>,
-    runtime: MetashrewRuntime<RedisRuntimeAdapter>,
+    runtime: std::sync::Mutex<MetashrewRuntime<RedisRuntimeAdapter>>,
 }
 
 static mut _HEIGHT: u32 = 0;
@@ -123,25 +123,27 @@ async fn view(
         return Ok(HttpResponse::Ok().json(resp));
     } else {
         let height: u32 = if body.params[2] == "latest" {
-            fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+            fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?
         } else {
             let h = body.params[2].parse::<u32>().unwrap();
             if h > height() {
-                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+                fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?;
             }
             h
         };
         // Use await with the async view function
-        let (res_string, err) = match context.runtime.view(
-            body.params[0].clone(),
-            &hex::decode(
-                body.params[1]
-                    .to_string()
-                    .substring(2, body.params[1].len()),
-            )
-            .unwrap(),
-            height,
-        ).await {
+        let (res_string, err) = match context.runtime.lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock runtime: {}", e))?
+            .view(
+                body.params[0].clone(),
+                &hex::decode(
+                    body.params[1]
+                        .to_string()
+                        .substring(2, body.params[1].len()),
+                )
+                .unwrap(),
+                height,
+            ).await {
             Ok(str) => (str, "".to_string()),
             Err(err) => {
                 println!("{:#?}", err);
@@ -200,7 +202,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                runtime: MetashrewRuntime::load(
+                runtime: std::sync::Mutex::new(MetashrewRuntime::load(
                     path_clone.clone(),
                     RedisRuntimeAdapter(
                         redis_uri.clone(),
@@ -213,7 +215,7 @@ async fn main() -> std::io::Result<()> {
                         0,
                     ),
                 )
-                .unwrap(),
+                .unwrap()),
             }))
             .service(view)
     })

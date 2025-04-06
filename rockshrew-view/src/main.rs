@@ -125,7 +125,7 @@ struct Context {
     hash: [u8; 32],
     #[allow(dead_code)]
     program: Vec<u8>,
-    runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
+    runtime: std::sync::Mutex<MetashrewRuntime<RocksDBRuntimeAdapter>>,
 }
 
 static mut _HEIGHT: u32 = 0;
@@ -156,7 +156,7 @@ async fn jsonrpc_call(
     debug!("{}", serde_json::to_string(&body).unwrap());
 
     // Ensure we're caught up with primary before processing request
-    if let Err(e) = synchronized_catch_up(&context.runtime.context.lock().unwrap().db.db).await {
+    if let Err(e) = synchronized_catch_up(&context.runtime.lock().unwrap().context.lock().unwrap().db.db).await {
         log::warn!("Failed to catch up with primary before request: {}", e);
         // Continue processing despite catch-up failure
     }
@@ -209,12 +209,12 @@ async fn jsonrpc_call(
 
         let height: u32 = match &body.params[2] {
             serde_json::Value::String(s) if s == "latest" => {
-                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?
             }
             serde_json::Value::Number(n) => {
                 let h = n.as_u64().unwrap_or(0) as u32;
                 if h > height() {
-                    fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                    fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?
                 } else {
                     h
                 }
@@ -222,7 +222,7 @@ async fn jsonrpc_call(
             serde_json::Value::String(s) => match s.parse::<u32>() {
                 Ok(h) => {
                     if h > height() {
-                        fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                        fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?
                     } else {
                         h
                     }
@@ -255,12 +255,14 @@ async fn jsonrpc_call(
             }
         };
 // Use await with the async view function
-match context.runtime.view(
-    view_name,
-    &hex::decode(input_hex.trim_start_matches("0x"))
-        .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-    height,
-).await {
+match context.runtime.lock()
+    .map_err(|e| error::ErrorInternalServerError(format!("Failed to lock runtime: {}", e)))?
+    .view(
+        view_name,
+        &hex::decode(input_hex.trim_start_matches("0x"))
+            .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+        height,
+    ).await {
     Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
@@ -283,7 +285,7 @@ match context.runtime.view(
             }
         }
     } else if body.method == "metashrew_height" {
-        let height = fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+        let height = fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?;
         let result = JsonRpcResult {
             id: body.id,
             result: height.to_string(),
@@ -356,12 +358,12 @@ match context.runtime.view(
 
         let height: u32 = match &body.params[3] {
             serde_json::Value::String(s) if s == "latest" => {
-                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?
             }
             serde_json::Value::Number(n) => {
                 let h = n.as_u64().unwrap_or(0) as u32;
                 if h > height() {
-                    fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                    fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?
                 } else {
                     h
                 }
@@ -369,7 +371,7 @@ match context.runtime.view(
             serde_json::Value::String(s) => match s.parse::<u32>() {
                 Ok(h) => {
                     if h > height() {
-                        fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                        fetch_and_set_height(&context.runtime.lock().unwrap().context.lock().unwrap().db).await?
                     } else {
                         h
                     }
@@ -418,13 +420,15 @@ match context.runtime.view(
             }
         };
 
-        match context.runtime.preview_async(
-            &block_data,
-            view_name,
-            &hex::decode(input_hex.trim_start_matches("0x"))
-                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-            height,
-        ).await {
+        match context.runtime.lock()
+            .map_err(|e| error::ErrorInternalServerError(format!("Failed to lock runtime: {}", e)))?
+            .preview_async(
+                &block_data,
+                view_name,
+                &hex::decode(input_hex.trim_start_matches("0x"))
+                    .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+                height,
+            ).await {
             Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
@@ -549,7 +553,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(Context {
                 hash: output,
                 program: bytes.clone(),
-                runtime: MetashrewRuntime::load(
+                runtime: std::sync::Mutex::new(MetashrewRuntime::load(
                     args.indexer.clone(),
                     RocksDBRuntimeAdapter::open_secondary(
                         args.db_path.clone(),
@@ -557,7 +561,7 @@ async fn main() -> std::io::Result<()> {
                         opts.clone(),
                     )
                     .unwrap(),
-                ).unwrap(),
+                ).unwrap()),
             }))
             .service(jsonrpc_call)
     })

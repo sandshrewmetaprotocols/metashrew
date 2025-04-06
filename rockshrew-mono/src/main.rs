@@ -694,7 +694,7 @@ async fn handle_jsonrpc(
 ) -> ActixResult<impl Responder> {
     debug!("RPC request: {}", serde_json::to_string(&body).unwrap());
 
-    let runtime = state.runtime.lock().await;
+    let mut runtime = state.runtime.lock().await;
 
     if body.method == "metashrew_view" {
         if body.params.len() < 3 {

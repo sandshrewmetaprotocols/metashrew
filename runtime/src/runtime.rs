@@ -133,6 +133,10 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike + Clone + 'static> {
     pub module: wasmtime::Module,
     pub linker: wasmtime::Linker<State>,
     pub instance: wasmtime::Instance,
+    // Cache for the highest seen height
+    pub highest_height: u32,
+    pub cached_async_instance: Option<wasmtime::Instance>,
+    pub cached_async_store: Option<wasmtime::Store<State>>,
 }
 
 impl State {
@@ -256,18 +260,22 @@ where
             linker,
             context,
             instance,
+            highest_height: 0,
+            cached_async_instance: None,
+            cached_async_store: None,
         })
     }
 
     pub fn preview(
-        &self,
+        &mut self,
         block: &Vec<u8>,
         symbol: String,
         input: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
-        // Create preview context with wrapped DB
+        // Clone the context once at the beginning to avoid locking the same mutex multiple times
         let preview_db = {
+            // Create a clone of the context to avoid holding the lock during operations
             let guard = self.context.lock().map_err(lock_err)?;
             PreviewDBWrapper {
                 underlying_db: guard.db.clone(),
@@ -277,7 +285,12 @@ where
 
         // Create a new runtime with preview db
         let mut runtime = Self::new_with_db(preview_db, height, self.async_engine.clone(), self.async_module.clone())?;
-        runtime.context.lock().map_err(lock_err)?.block = block.clone();
+        
+        // Update the block in the runtime context
+        {
+            let mut guard = runtime.context.lock().map_err(lock_err)?;
+            guard.block = block.clone();
+        }
 
         // Execute block via _start to populate preview db
         let start = runtime.instance.get_typed_func::<(), ()>(&mut runtime.wasmstore, "_start")
@@ -323,7 +336,7 @@ where
     
     // Async version of preview for use with the view server
     pub async fn preview_async(
-        &self,
+        &mut self,
         block: &Vec<u8>,
         symbol: String,
         input: &Vec<u8>,
@@ -334,59 +347,147 @@ where
         self.preview(block, symbol, input, height)
     }
     
-    pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
-        let mut linker = Linker::<State>::new(&self.async_engine);
-        let mut wasmstore = Store::<State>::new(&self.async_engine, State::new());
-        
-        let context = {
+    pub async fn view(&mut self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
+        // Clone the context once at the beginning to avoid locking the same mutex multiple times
+        let context_clone = {
+            // Create a clone of the context to avoid holding the lock during async operations
             let guard = self.context.lock().map_err(lock_err)?;
-            Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(guard.clone()))
+            let mut ctx = guard.clone();
+            // Update the cloned context with the current height and input
+            ctx.height = height;
+            ctx.block = input.clone();
+            Arc::new(Mutex::new(ctx))
         };
         
-        {
-            let mut guard = context.lock().map_err(lock_err)?;
-            guard.height = height;
-            guard.block = input.clone();
+        // Check if we're using the cached instance or need to create a new one
+        if height >= self.highest_height {
+            // If this is a higher height than we've seen before, update our cache
+            if height > self.highest_height {
+                debug!("Updating cached instance for new height: {} (previous: {})", height, self.highest_height);
+                self.highest_height = height;
+                
+                // If we have a cached instance, refresh it instead of creating a new one
+                if self.cached_async_instance.is_some() && self.cached_async_store.is_some() {
+                    // Create a new store with the same engine
+                    let mut new_store = Store::<State>::new(&self.async_engine, State::new());
+                    new_store.set_fuel(u64::MAX)?;
+                    new_store.fuel_async_yield_interval(Some(10000))?;
+                    new_store.limiter(|state| &mut state.limits);
+                    
+                    // Replace the cached store
+                    self.cached_async_store = Some(new_store);
+                    
+                    // Re-instantiate the module with the new store
+                    let mut linker = Linker::<State>::new(&self.async_engine);
+                    
+                    Self::setup_linker(context_clone.clone(), &mut linker)
+                        .context("Failed to setup basic linker for view")?;
+                    Self::setup_linker_view(context_clone.clone(), &mut linker)
+                        .context("Failed to setup view linker")?;
+                    linker.define_unknown_imports_as_traps(&self.module)?;
+                    
+                    // Get a mutable reference to the store
+                    let store = self.cached_async_store.as_mut().unwrap();
+                    
+                    // Re-instantiate the module
+                    let new_instance = linker.instantiate_async(store, &self.async_module)
+                        .await
+                        .context("Failed to instantiate module for view when refreshing")?;
+                    
+                    self.cached_async_instance = Some(new_instance);
+                }
+                else {
+                    // No cached instance yet, create one
+                    let mut new_store = Store::<State>::new(&self.async_engine, State::new());
+                    new_store.set_fuel(u64::MAX)?;
+                    new_store.fuel_async_yield_interval(Some(10000))?;
+                    new_store.limiter(|state| &mut state.limits);
+                    
+                    let mut linker = Linker::<State>::new(&self.async_engine);
+                    
+                    Self::setup_linker(context_clone.clone(), &mut linker)
+                        .context("Failed to setup basic linker for view")?;
+                    Self::setup_linker_view(context_clone.clone(), &mut linker)
+                        .context("Failed to setup view linker")?;
+                    linker.define_unknown_imports_as_traps(&self.module)?;
+                    
+                    let new_instance = linker.instantiate_async(&mut new_store, &self.async_module)
+                        .await
+                        .context("Failed to instantiate module for view when creating first cache")?;
+                    
+                    self.cached_async_instance = Some(new_instance);
+                    self.cached_async_store = Some(new_store);
+                }
+            }
+            
+            // Use the cached instance and store
+            let instance = self.cached_async_instance.as_ref().unwrap().clone();
+            let store = self.cached_async_store.as_mut().unwrap();
+            
+            // Execute the view function
+            let func = instance
+                .get_typed_func::<(), i32>(&mut *store, symbol.as_str())
+                .with_context(|| format!("Failed to get view function '{}'", symbol))?;
+                
+            // Use async call
+            let result = func.call_async(&mut *store, ())
+                .await
+                .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
+                
+            let memory = instance
+                .get_memory(&mut *store, "memory")
+                .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
+                
+            Ok(read_arraybuffer_as_vec(
+                memory.data(&mut *store),
+                result,
+            ))
+        } else {
+            // For historical heights, create a new instance as before
+            debug!("Creating new instance for historical height: {} (cached height: {})", height, self.highest_height);
+            let mut new_wasmstore = Store::<State>::new(&self.async_engine, State::new());
+            
+            // Set fuel for cooperative yielding
+            new_wasmstore.set_fuel(u64::MAX)?;
+            new_wasmstore.fuel_async_yield_interval(Some(10000))?;
+            
+            {
+                new_wasmstore.limiter(|state| &mut state.limits)
+            }
+            
+            let mut linker = Linker::<State>::new(&self.async_engine);
+            {
+                Self::setup_linker(context_clone.clone(), &mut linker)
+                    .context("Failed to setup basic linker for view")?;
+                Self::setup_linker_view(context_clone.clone(), &mut linker)
+                    .context("Failed to setup view linker")?;
+                linker.define_unknown_imports_as_traps(&self.module)?;
+            }
+            
+            // Use async instantiation
+            let new_instance = linker.instantiate_async(&mut new_wasmstore, &self.async_module)
+                .await
+                .context("Failed to instantiate module for view")?;
+                
+            // Execute the view function
+            let func = new_instance
+                .get_typed_func::<(), i32>(&mut new_wasmstore, symbol.as_str())
+                .with_context(|| format!("Failed to get view function '{}'", symbol))?;
+                
+            // Use async call
+            let result = func.call_async(&mut new_wasmstore, ())
+                .await
+                .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
+                
+            let memory = new_instance
+                .get_memory(&mut new_wasmstore, "memory")
+                .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
+                
+            Ok(read_arraybuffer_as_vec(
+                memory.data(&mut new_wasmstore),
+                result,
+            ))
         }
-        
-        // Set fuel for cooperative yielding
-        wasmstore.set_fuel(u64::MAX)?;
-        wasmstore.fuel_async_yield_interval(Some(10000))?;
-        
-        {
-            wasmstore.limiter(|state| &mut state.limits)
-        }
-        
-        {
-            Self::setup_linker(context.clone(), &mut linker)
-                .context("Failed to setup basic linker for view")?;
-            Self::setup_linker_view(context.clone(), &mut linker)
-                .context("Failed to setup view linker")?;
-            linker.define_unknown_imports_as_traps(&self.module)?;
-        }
-        
-        // Use async instantiation
-        let instance = linker.instantiate_async(&mut wasmstore, &self.async_module)
-            .await
-            .context("Failed to instantiate module for view")?;
-            
-        let func = instance
-            .get_typed_func::<(), i32>(&mut wasmstore, symbol.as_str())
-            .with_context(|| format!("Failed to get view function '{}'", symbol))?;
-            
-        // Use async call
-        let result = func.call_async(&mut wasmstore, ())
-            .await
-            .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
-            
-        let memory = instance
-            .get_memory(&mut wasmstore, "memory")
-            .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
-            
-        Ok(read_arraybuffer_as_vec(
-            memory.data(&mut wasmstore),
-            result,
-        ))
     }
     pub fn refresh_memory(&mut self) -> Result<()> {
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
@@ -935,6 +1036,9 @@ where
             linker,
             context,
             instance,
+            highest_height: height,
+            cached_async_instance: None,
+            cached_async_store: None,
         })
     }
 

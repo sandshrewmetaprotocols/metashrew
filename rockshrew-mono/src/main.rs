@@ -388,8 +388,16 @@ async fn post(&self, body: String) -> Result<Response> {
                 Ok(())
             },
             Err(e) => {
-                info!("Runtime execution failed for block {}: {}, refreshing memory and retrying", height, e);
+                // Log detailed memory stats when runtime execution fails
+                let memory_stats = self.get_memory_stats(&mut runtime);
+                error!("CRITICAL: Runtime execution failed for block {}: {}", height, e);
+                error!("Memory stats at failure: {}", memory_stats);
                 
+                // Crash the process to force a restart and make the issue more visible
+                panic!("Runtime execution failed with memory stats: {}", memory_stats);
+                
+                // The code below is unreachable due to the panic, but kept for reference
+                /*
                 // Try to refresh memory with better error handling
                 match runtime.refresh_memory() {
                     Ok(_) => {
@@ -410,6 +418,7 @@ async fn post(&self, body: String) -> Result<Response> {
                         Err(anyhow!(refresh_err))
                     }
                 }
+                */
             }
         }
     }
@@ -629,6 +638,29 @@ impl Clone for IndexerState {
 
 // Add methods to set and get thread ID senders
 impl IndexerState {
+    // Helper method to get detailed memory statistics as a string
+    fn get_memory_stats(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>) -> String {
+        if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
+            let memory_size = memory.data_size(&mut runtime.wasmstore);
+            let memory_size_gb = memory_size as f64 / 1_073_741_824.0;
+            let memory_size_mb = memory_size as f64 / 1_048_576.0;
+            
+            // Get additional memory information if available
+            let memory_pages = memory.size(&mut runtime.wasmstore);
+            
+            format!(
+                "Memory size: {} bytes ({:.2} GB, {:.2} MB), Pages: {}, Usage: {:.2}%",
+                memory_size,
+                memory_size_gb,
+                memory_size_mb,
+                memory_pages,
+                (memory_size as f64 / 4_294_967_296.0) * 100.0 // Percentage of 4GB limit
+            )
+        } else {
+            "Could not access memory instance".to_string()
+        }
+    }
+    
     // Helper method to check if memory needs to be refreshed based on its size
     fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>, height: u32) -> bool {
         // Get the memory instance
@@ -639,11 +671,17 @@ impl IndexerState {
             // 3GB in bytes = 3 * 1024 * 1024 * 1024
             let three_gb = 3 * 1024 * 1024 * 1024;
             
+            // Get detailed memory stats for logging
+            let memory_stats = self.get_memory_stats(runtime);
+            
             // Check if memory size is approaching the limit
             if memory_size >= three_gb {
-                info!("Memory usage approaching limit ({} bytes, {:.2}GB), preemptively refreshing memory for block {}",
-                      memory_size, memory_size as f64 / 1_073_741_824.0, height);
+                info!("Memory usage approaching limit for block {}: {}", height, memory_stats);
+                info!("Preemptively refreshing memory to avoid OOM errors");
                 return true;
+            } else if height % 1000 == 0 {
+                // Log memory stats periodically for monitoring
+                info!("Memory stats at block {}: {}", height, memory_stats);
             }
         } else {
             debug!("Could not get memory instance for block {}", height);

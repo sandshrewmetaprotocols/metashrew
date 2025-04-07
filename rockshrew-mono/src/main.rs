@@ -668,15 +668,16 @@ impl IndexerState {
             // Get the memory size in bytes
             let memory_size = memory.data_size(&mut runtime.wasmstore);
             
-            // 3GB in bytes = 3 * 1024 * 1024 * 1024
-            let three_gb = 3 * 1024 * 1024 * 1024;
+            // 1.75GB in bytes = 1.75 * 1024 * 1024 * 1024
+            let threshold_gb = 1.75;
+            let threshold_bytes = (threshold_gb * 1024.0 * 1024.0 * 1024.0) as usize;
             
             // Get detailed memory stats for logging
             let memory_stats = self.get_memory_stats(runtime);
             
             // Check if memory size is approaching the limit
-            if memory_size >= three_gb {
-                info!("Memory usage approaching limit for block {}: {}", height, memory_stats);
+            if memory_size >= threshold_bytes {
+                info!("Memory usage approaching threshold of {:.2}GB for block {}: {}", threshold_gb, height, memory_stats);
                 info!("Preemptively refreshing memory to avoid OOM errors");
                 return true;
             } else if height % 1000 == 0 {

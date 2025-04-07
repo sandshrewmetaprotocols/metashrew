@@ -359,6 +359,23 @@ async fn post(&self, body: String) -> Result<Response> {
             }
         }
         
+        // Use a simple heuristic to periodically refresh memory to prevent OOM errors
+        // Refresh memory every 100 blocks as a preventive measure
+        // This avoids the need to directly check memory size, which causes borrow checker issues
+        let should_refresh_memory = height % 100 == 0;
+        
+        // Preemptively refresh memory based on our heuristic
+        if should_refresh_memory {
+            info!("Performing periodic memory refresh at block {} to prevent potential OOM errors", height);
+            match runtime.refresh_memory() {
+                Ok(_) => debug!("Successfully refreshed memory preemptively for block {}", height),
+                Err(e) => {
+                    error!("Failed to preemptively refresh memory: {}", e);
+                    // Continue with execution even if preemptive refresh fails
+                }
+            }
+        }
+        
         // Execute the runtime with better error handling
         match runtime.run() {
             Ok(_) => {

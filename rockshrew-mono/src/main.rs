@@ -359,14 +359,8 @@ async fn post(&self, body: String) -> Result<Response> {
             }
         }
         
-        // Use a simple heuristic to periodically refresh memory to prevent OOM errors
-        // Refresh memory every 100 blocks as a preventive measure
-        // This avoids the need to directly check memory size, which causes borrow checker issues
-        let should_refresh_memory = height % 100 == 0;
-        
-        // Preemptively refresh memory based on our heuristic
-        if should_refresh_memory {
-            info!("Performing periodic memory refresh at block {} to prevent potential OOM errors", height);
+        // Check if memory usage is approaching the limit and refresh if needed
+        if self.should_refresh_memory(&mut runtime, height) {
             match runtime.refresh_memory() {
                 Ok(_) => debug!("Successfully refreshed memory preemptively for block {}", height),
                 Err(e) => {
@@ -635,6 +629,28 @@ impl Clone for IndexerState {
 
 // Add methods to set and get thread ID senders
 impl IndexerState {
+    // Helper method to check if memory needs to be refreshed based on its size
+    fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>, height: u32) -> bool {
+        // Get the memory instance
+        if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
+            // Get the memory size in bytes
+            let memory_size = memory.data_size(&mut runtime.wasmstore);
+            
+            // 3GB in bytes = 3 * 1024 * 1024 * 1024
+            let three_gb = 3 * 1024 * 1024 * 1024;
+            
+            // Check if memory size is approaching the limit
+            if memory_size >= three_gb {
+                info!("Memory usage approaching limit ({} bytes, {:.2}GB), preemptively refreshing memory for block {}",
+                      memory_size, memory_size as f64 / 1_073_741_824.0, height);
+                return true;
+            }
+        } else {
+            debug!("Could not get memory instance for block {}", height);
+        }
+        
+        false
+    }
     fn set_thread_id_senders(
         &mut self,
         fetcher_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>,

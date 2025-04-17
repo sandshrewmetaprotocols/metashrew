@@ -1083,7 +1083,7 @@ fn main() -> Result<()> {
     // Create a custom runtime with dedicated threads for critical tasks
     // Dynamically determine the number of worker threads based on available CPUs
     let available_cpus = num_cpus::get();
-    let worker_threads = std::cmp::max(8, available_cpus); // Use at least 8 threads, or more if available
+    let worker_threads = std::cmp::max(4, available_cpus / 2); // Use at least 4 threads, or more if available
     
     info!("Detected {} CPU cores, configuring tokio runtime with {} worker threads", available_cpus, worker_threads);
     

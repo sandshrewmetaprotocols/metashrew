@@ -111,7 +111,7 @@ impl MetashrewKeyDBSync {
                     } else {
                         count = count + 1;
                     }
-                    debug!("err: retrying POST");
+                    // debug!("err: retrying POST");
                     sleep(Duration::from_millis(3000)).await;
                 }
             }
@@ -127,7 +127,7 @@ impl MetashrewKeyDBSync {
                     let (username, password) = self.args.auth.as_ref().unwrap().split(":").next_tuple().unwrap();
                     url.set_username(username);
                     url.set_password(Some(password));
-                    info!("url: {}", url);
+                    // info!("url: {}", url);
                     url
                 }
                 None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
@@ -151,7 +151,7 @@ impl MetashrewKeyDBSync {
                 params: vec![],
             }).unwrap())
             .await.unwrap();
-          info!("blockcount response: {}", response);
+          // info!("blockcount response: {}", response);
     }
     */
     async fn fetch_blockcount(&self) -> Result<u32> {
@@ -182,14 +182,14 @@ impl MetashrewKeyDBSync {
             let connected: Option<redis::Connection> =
                 match self.runtime.context.lock().unwrap().db.connect() {
                     Err(_) => {
-                        debug!("KeyDB connection failure -- retrying in 3s ...");
+                        // debug!("KeyDB connection failure -- retrying in 3s ...");
                         sleep(Duration::from_millis(3000)).await;
                         None
                     }
                     Ok(mut v) => match v.get::<Vec<u8>, Vec<u8>>("POLL".into()) {
                         Ok(_) => Some(v),
                         Err(_) => {
-                            debug!("KeyDB connection failure -- retrying in 3s ...");
+                            // debug!("KeyDB connection failure -- retrying in 3s ...");
                             sleep(Duration::from_millis(3000)).await;
                             None
                         }
@@ -268,7 +268,7 @@ impl MetashrewKeyDBSync {
                     } else {
                         count = count + 1;
                     }
-                    debug!("err: retrying GET");
+                    // debug!("err: retrying GET");
                 }
             }
         }
@@ -324,7 +324,7 @@ impl MetashrewKeyDBSync {
                     } else {
                         count = count + 1;
                     }
-                    debug!("err: retrying GET");
+                    // debug!("err: retrying GET");
                 }
             }
         }
@@ -380,7 +380,7 @@ impl MetashrewKeyDBSync {
             self.runtime.context.lock().unwrap().height = best;
             self.runtime.context.lock().unwrap().db.2 = best;
             if let Err(_) = self.runtime.run() {
-                debug!("respawn cache");
+                // debug!("respawn cache");
                 self.runtime.refresh_memory();
                 if let Err(e) = self.runtime.run() {
                     panic!("runtime run failed after retry: {}", e);

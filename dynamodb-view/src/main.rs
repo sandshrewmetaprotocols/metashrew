@@ -112,7 +112,7 @@ async fn view(
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
     {
-        debug!("{}", serde_json::to_string(&body).unwrap());
+        // debug!("{}", serde_json::to_string(&body).unwrap());
     }
     if body.method != "metashrew_view" {
         let resp = JsonRpcError {
@@ -178,7 +178,7 @@ async fn main() -> std::io::Result<()> {
     let mut output = [0; 32];
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
-    info!("program hash: 0x{}", hex::encode(output));
+    // info!("program hash: 0x{}", hex::encode(output));
     let path_clone: PathBuf = path.into();
     if let Ok(label) = env::var("REDIS_LABEL") {
         set_label(label.clone());

@@ -189,7 +189,7 @@ impl RockshrewDiffRuntime {
 
     // Main function to process a block and compare the results
     pub async fn process_block(&mut self, block_data: Vec<u8>, height: u32) -> Result<bool> {
-        info!("Processing block {} with both runtimes", height);
+        // info!("Processing block {} with both runtimes", height);
         
         // Set the block data and height for primary runtime with efficient mutex locking
         {
@@ -210,7 +210,7 @@ impl RockshrewDiffRuntime {
         // Run primary runtime with better error handling
         match self.primary_runtime.run() {
             Ok(_) => {
-                debug!("Successfully ran primary WASM module for block {}", height);
+                // debug!("Successfully ran primary WASM module for block {}", height);
             },
             Err(e) => {
                 error!("Error running primary WASM module: {}, refreshing memory and retrying", e);
@@ -224,14 +224,14 @@ impl RockshrewDiffRuntime {
                     anyhow!("Error running primary WASM module after memory refresh: {}", run_err)
                 })?;
                 
-                debug!("Successfully ran primary WASM module for block {} after memory refresh", height);
+                // debug!("Successfully ran primary WASM module for block {} after memory refresh", height);
             }
         }
         
         // Run compare runtime with better error handling
         match self.compare_runtime.run() {
             Ok(_) => {
-                debug!("Successfully ran compare WASM module for block {}", height);
+                // debug!("Successfully ran compare WASM module for block {}", height);
             },
             Err(e) => {
                 error!("Error running compare WASM module: {}, refreshing memory and retrying", e);
@@ -245,7 +245,7 @@ impl RockshrewDiffRuntime {
                     anyhow!("Error running compare WASM module after memory refresh: {}", run_err)
                 })?;
                 
-                debug!("Successfully ran compare WASM module for block {} after memory refresh", height);
+                // debug!("Successfully ran compare WASM module for block {} after memory refresh", height);
             }
         }
         
@@ -334,7 +334,7 @@ impl RockshrewDiffRuntime {
                 retry_delay * 2 + Duration::from_millis(jitter)
             );
             
-            debug!("Request failed (attempt {}), retrying in {:?}",
+            // debug!("Request failed (attempt {}), retrying in {:?}",
                    attempt + 1, retry_delay);
             sleep(retry_delay).await;
         }
@@ -461,7 +461,7 @@ impl RockshrewDiffRuntime {
                     // Check if we should exit
                     if let Some(exit_at) = args.exit_at {
                         if current_height >= exit_at {
-                            info!("Fetcher reached exit-at block {}, shutting down", exit_at);
+                            // info!("Fetcher reached exit-at block {}, shutting down", exit_at);
                             break;
                         }
                     }
@@ -469,7 +469,7 @@ impl RockshrewDiffRuntime {
                     // Fetch the block
                     match diff_runtime.fetch_block(current_height).await {
                         Ok(block_data) => {
-                            debug!("Fetched block {} ({})", current_height, block_data.len());
+                            // debug!("Fetched block {} ({})", current_height, block_data.len());
                             // Send block to processor
                             if block_sender_clone.send((current_height, block_data)).await.is_err() {
                                 break;
@@ -489,7 +489,7 @@ impl RockshrewDiffRuntime {
                     current_height += 1;
                 }
                 
-                debug!("Block fetcher task completed");
+                // debug!("Block fetcher task completed");
             })
         };
         
@@ -500,7 +500,7 @@ impl RockshrewDiffRuntime {
             
             tokio::spawn(async move {
                 while let Some((block_height, block_data)) = block_receiver.recv().await {
-                    debug!("Processing block {} ({})", block_height, block_data.len());
+                    // debug!("Processing block {} ({})", block_height, block_data.len());
                     
                     match diff_runtime.process_block(block_data, block_height).await {
                         Ok(has_diff) => {
@@ -525,7 +525,7 @@ impl RockshrewDiffRuntime {
                     }
                 }
                 
-                debug!("Block processor task completed");
+                // debug!("Block processor task completed");
             })
         };
         
@@ -533,7 +533,7 @@ impl RockshrewDiffRuntime {
         while let Some(result) = result_receiver.recv().await {
             match result {
                 BlockResult::Success(processed_height) => {
-                    debug!("Successfully processed block {} with no differences", processed_height);
+                    // debug!("Successfully processed block {} with no differences", processed_height);
                     height = processed_height + 1;
                     CURRENT_HEIGHT.store(height, Ordering::SeqCst);
                 },
@@ -544,7 +544,7 @@ impl RockshrewDiffRuntime {
                     sleep(Duration::from_secs(5)).await;
                 },
                 BlockResult::Difference(diff_height) => {
-                    info!("Found differences at block {}, exiting", diff_height);
+                    // info!("Found differences at block {}, exiting", diff_height);
                     // Clean up
                     drop(block_sender);
                     drop(result_sender);
@@ -555,7 +555,7 @@ impl RockshrewDiffRuntime {
             // Check if we should exit
             if let Some(exit_at) = self.args.exit_at {
                 if height > exit_at {
-                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    // info!("Reached exit-at block {}, shutting down gracefully", exit_at);
                     break;
                 }
             }
@@ -580,7 +580,7 @@ impl RockshrewDiffRuntime {
             // Check if we should exit before processing the next block
             if let Some(exit_at) = self.args.exit_at {
                 if height >= exit_at {
-                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    // info!("Reached exit-at block {}, shutting down gracefully", exit_at);
                     return Ok(());
                 }
             }
@@ -593,7 +593,7 @@ impl RockshrewDiffRuntime {
             
             // If there are differences, exit
             if has_diff {
-                info!("Found differences at block {}, exiting", height);
+                // info!("Found differences at block {}, exiting", height);
                 return Ok(());
             }
             

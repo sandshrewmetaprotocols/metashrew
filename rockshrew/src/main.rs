@@ -4,19 +4,19 @@ use env_logger;
 use hex;
 use itertools::Itertools;
 use log::debug;
-use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use metashrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::MetashrewRuntime;
-use rocksdb::{Options};
 use reqwest::{Response, Url};
+use rocksdb::Options;
+use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use serde_json::{Number, Value};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio;
 use tokio::time::{sleep, Duration};
-use std::sync::{Arc};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -80,9 +80,7 @@ impl MetashrewRocksDBSync {
                     url.set_password(Some(password)).unwrap();
                     url
                 }
-                None => {
-                    Url::parse(self.args.daemon_rpc_url.as_str()).unwrap()
-                }
+                None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
             })
             .header("Content-Type", "application/json")
             .body(body)
@@ -107,7 +105,7 @@ impl MetashrewRocksDBSync {
                     } else {
                         count = count + 1;
                     }
-                    debug!("err: retrying POST");
+                    // debug!("err: retrying POST");
                     sleep(Duration::from_millis(3000)).await;
                 }
             }
@@ -213,7 +211,7 @@ impl MetashrewRocksDBSync {
                     } else {
                         count = count + 1;
                     }
-                    debug!("err: retrying GET");
+                    // debug!("err: retrying GET");
                 }
             }
         }
@@ -271,7 +269,7 @@ impl MetashrewRocksDBSync {
                     } else {
                         count = count + 1;
                     }
-                    debug!("err: retrying PUT");
+                    // debug!("err: retrying PUT");
                 }
             }
         }
@@ -323,7 +321,10 @@ impl MetashrewRocksDBSync {
             // Check if we should exit before processing the next block
             if let Some(exit_at) = self.args.exit_at {
                 if i >= exit_at {
-                    println!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    println!(
+                        "Reached exit-at block {}, shutting down gracefully",
+                        exit_at
+                    );
                     return Ok(());
                 }
             }
@@ -336,7 +337,7 @@ impl MetashrewRocksDBSync {
             self.runtime.context.lock().unwrap().height = best;
             self.runtime.context.lock().unwrap().db.set_height(best);
             if let Err(_) = self.runtime.run() {
-                debug!("respawn cache");
+                // debug!("respawn cache");
                 self.runtime.refresh_memory()?;
                 if let Err(e) = self.runtime.run() {
                     panic!("runtime run failed after retry: {}", e);
@@ -361,7 +362,7 @@ async fn main() {
     let start_block = args.start_block.unwrap_or_else(|| 0);
     let indexer: PathBuf = args.indexer.clone().into();
     let db_path: String = args.db_path.clone();
-    
+
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
     opts.create_if_missing(true);
@@ -380,12 +381,13 @@ async fn main() {
     opts.set_max_background_jobs(4);
     opts.set_max_background_compactions(4);
     opts.set_disable_auto_compactions(false);
-    
+
     let mut sync = MetashrewRocksDBSync {
         runtime: MetashrewRuntime::load(
             indexer,
-            RocksDBRuntimeAdapter::open(db_path, opts).unwrap()
-        ).unwrap(),
+            RocksDBRuntimeAdapter::open(db_path, opts).unwrap(),
+        )
+        .unwrap(),
         args,
         start_block,
     };

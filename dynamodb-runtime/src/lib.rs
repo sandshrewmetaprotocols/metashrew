@@ -78,15 +78,15 @@ impl RedisRuntimeAdapter {
                     return Ok(v);
                 }
                 Err(e) => {
-                    debug!("{:?}", e);
-                    debug!("KeyDB reset -- wait 1.5s");
+                    // debug!("{:?}", e);
+                    // debug!("KeyDB reset -- wait 1.5s");
                     wait_timeout();
                 }
             }
         }
     }
     pub fn reset_connection(&mut self) {
-        debug!("KeyDB reset -- wait 1.5s");
+        // debug!("KeyDB reset -- wait 1.5s");
         wait_timeout();
         self.1 = Arc::new(Mutex::new(self.connect().unwrap()));
     }
@@ -146,7 +146,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
                         return Ok(());
                     }
                     Err(e) => {
-                        debug!("{:?}", e);
+                        // debug!("{:?}", e);
                     }
                 }
             }
@@ -164,7 +164,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
                 {
                     Ok(v) => return Ok(v),
                     Err(e) => {
-                        debug!("{:?}", e);
+                        // debug!("{:?}", e);
                     }
                 }
             }
@@ -184,7 +184,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
                         return Ok(());
                     }
                     Err(e) => {
-                        debug!("{:?}", e);
+                        // debug!("{:?}", e);
                     }
                 }
             }
@@ -206,7 +206,7 @@ impl KeyValueStoreLike for RedisRuntimeAdapter {
                         return Ok(());
                     }
                     Err(e) => {
-                        debug!("{:?}", e);
+                        // debug!("{:?}", e);
                     }
                 }
             }

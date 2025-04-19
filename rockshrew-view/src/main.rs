@@ -1,14 +1,14 @@
 use actix_cors::Cors;
 use actix_web::error;
-use actix_web::http::{StatusCode};
+use actix_web::http::StatusCode;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 use anyhow;
-use clap::{Parser};
+use clap::Parser;
 use lazy_static::lazy_static;
 use log::{debug, info};
-use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use metashrew_runtime::MetashrewRuntime;
 use rocksdb::Options;
+use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::fs::File;
@@ -153,7 +153,7 @@ async fn jsonrpc_call(
     body: web::Json<JsonRpcRequest>,
     context: web::Data<Context>,
 ) -> Result<impl Responder> {
-    debug!("{}", serde_json::to_string(&body).unwrap());
+    // debug!("{}", serde_json::to_string(&body).unwrap());
 
     // Ensure we're caught up with primary before processing request
     if let Err(e) = synchronized_catch_up(&context.runtime.context.lock().unwrap().db.db).await {
@@ -254,14 +254,18 @@ async fn jsonrpc_call(
                 return Ok(HttpResponse::Ok().json(error));
             }
         };
-// Use await with the async view function
-match context.runtime.view(
-    view_name,
-    &hex::decode(input_hex.trim_start_matches("0x"))
-        .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-    height,
-).await {
-    Ok(res_string) => {
+        // Use await with the async view function
+        match context
+            .runtime
+            .view(
+                view_name,
+                &hex::decode(input_hex.trim_start_matches("0x"))
+                    .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+                height,
+            )
+            .await
+        {
+            Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
                     result: String::from("0x") + hex::encode(res_string).as_str(),
@@ -418,13 +422,17 @@ match context.runtime.view(
             }
         };
 
-        match context.runtime.preview_async(
-            &block_data,
-            view_name,
-            &hex::decode(input_hex.trim_start_matches("0x"))
-                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-            height,
-        ).await {
+        match context
+            .runtime
+            .preview_async(
+                &block_data,
+                view_name,
+                &hex::decode(input_hex.trim_start_matches("0x"))
+                    .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+                height,
+            )
+            .await
+        {
             Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
@@ -480,19 +488,19 @@ async fn main() -> std::io::Result<()> {
     let mut output = [0; 32];
     hasher.update(bytes.as_slice());
     hasher.finalize(&mut output);
-    info!("program hash: 0x{}", hex::encode(output));
+    // info!("program hash: 0x{}", hex::encode(output));
 
     // Configure RocksDB options for optimal performance
     // Configure RocksDB options for optimal performance while limiting resource usage
     let mut opts = Options::default();
     opts.create_if_missing(false);
     opts.set_max_open_files(256); // Significantly reduced to prevent handle exhaustion
-    
+
     // Read-optimized settings with reduced resource usage
     opts.optimize_for_point_lookup(8 * 1024 * 1024); // Reduced cache size
     opts.set_table_cache_num_shard_bits(2); // Reduced from 4 to lower file handles
     opts.set_max_file_opening_threads(4); // Reduced from 8
-    
+
     // Minimal background operations for secondary
     opts.set_max_background_jobs(2);
     opts.set_max_background_compactions(0);
@@ -511,7 +519,7 @@ async fn main() -> std::io::Result<()> {
         let mut interval = actix_web::rt::time::interval(catch_up_interval);
         let mut backoff = std::time::Duration::from_secs(1);
         let max_backoff = std::time::Duration::from_secs(30);
-        
+
         loop {
             interval.tick().await;
             match rocksdb::DB::open_as_secondary(&opts_clone, &db_path, &secondary_path) {
@@ -557,7 +565,8 @@ async fn main() -> std::io::Result<()> {
                         opts.clone(),
                     )
                     .unwrap(),
-                ).unwrap(),
+                )
+                .unwrap(),
             }))
             .service(jsonrpc_call)
     })

@@ -199,7 +199,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
 
     async fn make_rpc_call(&self, method: &str, params: Vec<Value>) -> Result<Value> {
         let start_time = SystemTime::now();
-        debug!(
+        // debug!(
             "Making RPC call to node - method: {}, params: {:?}",
             method, params
         );
@@ -239,7 +239,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
             .unwrap_or(Duration::from_secs(0));
 
         if let Some(error) = response.get("error") {
-            info!(
+            // info!(
                 "RPC call failed after {:.2}s - method: {}, error: {}",
                 duration.as_secs_f64(),
                 method,
@@ -248,7 +248,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
             return Err(anyhow!("RPC error: {}", error));
         }
 
-        debug!(
+        // debug!(
             "RPC call succeeded in {:.2}s - method: {}",
             duration.as_secs_f64(),
             method
@@ -259,7 +259,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
 
     async fn update_mempool(&self) -> Result<()> {
         let start_time = SystemTime::now();
-        info!("Starting mempool sync");
+        // info!("Starting mempool sync");
 
         let mempool_info = self
             .make_rpc_call("getrawmempool", vec![json!(true)])
@@ -272,7 +272,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
         txs.retain(|txid, _| mempool_info[txid.to_string()].is_object());
         let removed_count = initial_count - txs.len();
         if removed_count > 0 {
-            info!("Removed {} stale transactions", removed_count);
+            // info!("Removed {} stale transactions", removed_count);
         }
 
         // Add/update transactions
@@ -310,7 +310,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
         }
 
         if added_count > 0 {
-            info!("Added {} new transactions", added_count);
+            // info!("Added {} new transactions", added_count);
         }
 
         // Update descendant sets
@@ -327,7 +327,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
         let duration = SystemTime::now()
             .duration_since(start_time)
             .unwrap_or(Duration::from_secs(0));
-        info!(
+        // info!(
             "Mempool sync complete - {} total transactions in {:.2}s",
             txs.len(),
             duration.as_secs_f64()
@@ -429,7 +429,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
         tokio::spawn(async move {
             loop {
                 if let Err(e) = self.update_mempool().await {
-                    debug!("Error updating mempool: {}", e);
+                    // debug!("Error updating mempool: {}", e);
                 }
 
                 // Check if templates need updating
@@ -440,7 +440,7 @@ fn encode_block(&self, template: &BlockTemplate, txs: &HashMap<Txid, MempoolTxIn
                     >= TEMPLATE_CACHE_DURATION
                 {
                     if let Err(e) = self.generate_block_templates().await {
-                        debug!("Error generating block templates: {}", e);
+                        // debug!("Error generating block templates: {}", e);
                     }
                 }
 
@@ -455,7 +455,7 @@ async fn handle_jsonrpc(
     body: web::Json<JsonRpcRequest>,
     state: web::Data<AppState>,
 ) -> ActixResult<impl Responder> {
-    debug!(
+    // debug!(
         "Received JSON-RPC request - method: {}, params: {:?}",
         body.method, body.params
     );
@@ -469,7 +469,7 @@ async fn handle_jsonrpc(
             for template in templates.iter() {
                 match state.tracker.encode_block(template, &txs) {
                     Ok(hex) => blocks.push(hex),
-                    Err(e) => debug!("Error encoding block: {}", e),
+                    Err(e) => // debug!("Error encoding block: {}", e),
                 }
             }
 
@@ -586,7 +586,7 @@ async fn main() -> Result<()> {
     });
 
     // Start the JSON-RPC server
-    info!("Starting server at http://{}:{}", args.host, args.port);
+    // info!("Starting server at http://{}:{}", args.host, args.port);
     HttpServer::new(move || {
         App::new()
             .wrap(Cors::default().allowed_origin_fn(|origin, _| {

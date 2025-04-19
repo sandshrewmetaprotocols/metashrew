@@ -1204,7 +1204,7 @@ where
                         }
                     }
 
-                    debug!(
+                    // debug!(
                         "saving {:?} k/v pairs for block {:?}",
                         decoded.list.len() / 2,
                         height

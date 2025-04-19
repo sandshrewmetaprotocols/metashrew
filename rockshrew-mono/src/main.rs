@@ -178,7 +178,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     retry_delay * 2 + Duration::from_millis(jitter)
                 );
                 
-                debug!("Request failed (attempt {}): {}, retrying in {:?}",
+                // debug!("Request failed (attempt {}): {}, retrying in {:?}",
                        attempt + 1, e, retry_delay);
                 tokio::time::sleep(retry_delay).await;
             }
@@ -231,7 +231,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     Some(hash) => hash,
                     None => {
                         // If we can't get the local blockhash, try to get it from the remote
-                        debug!("Local blockhash not found for block {}, fetching from remote", best);
+                        // debug!("Local blockhash not found for block {}, fetching from remote", best);
                         let remote_hash = self.fetch_blockhash(best).await?;
                         
                         // Store the remote hash locally for future reference
@@ -239,7 +239,7 @@ async fn post(&self, body: String) -> Result<Response> {
                         if let Ok(mut context) = runtime.context.lock() {
                             let key = (String::from(HEIGHT_TO_HASH) + &best.to_string()).into_bytes();
                             if let Err(e) = context.db.put(&key, &remote_hash) {
-                                debug!("Failed to store blockhash for block {}: {}", best, e);
+                                // debug!("Failed to store blockhash for block {}: {}", best, e);
                             }
                         }
                         
@@ -362,7 +362,7 @@ async fn post(&self, body: String) -> Result<Response> {
         // Check if memory usage is approaching the limit and refresh if needed
         if self.should_refresh_memory(&mut runtime, height) {
             match runtime.refresh_memory() {
-                Ok(_) => debug!("Successfully refreshed memory preemptively for block {}", height),
+                Ok(_) => // debug!("Successfully refreshed memory preemptively for block {}", height),
                 Err(e) => {
                     error!("Failed to preemptively refresh memory: {}", e);
                     // Continue with execution even if preemptive refresh fails
@@ -373,15 +373,15 @@ async fn post(&self, body: String) -> Result<Response> {
         // Execute the runtime with better error handling
         match runtime.run() {
             Ok(_) => {
-                debug!("Successfully processed block {}", height);
+                // debug!("Successfully processed block {}", height);
                 
                 // Store the blockhash for this height to ensure it's available for future queries
                 if let Ok(mut context) = runtime.context.lock() {
                     if let Ok(Some(_blockhash)) = context.db.get(&format!("{}{}",
                         HEIGHT_TO_HASH, height).into_bytes()) {
-                        debug!("Verified blockhash is stored for block {}", height);
+                        // debug!("Verified blockhash is stored for block {}", height);
                     } else {
-                        debug!("Blockhash not found for block {}, will be fetched if needed", height);
+                        // debug!("Blockhash not found for block {}, will be fetched if needed", height);
                     }
                 }
                 
@@ -404,7 +404,7 @@ async fn post(&self, body: String) -> Result<Response> {
                         // Try running again after memory refresh
                         match runtime.run() {
                             Ok(_) => {
-                                debug!("Successfully processed block {} after memory refresh", height);
+                                // debug!("Successfully processed block {} after memory refresh", height);
                                 Ok(())
                             },
                             Err(run_err) => {
@@ -437,7 +437,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     std::cmp::max(5, available_cpus / 2),
                     16  // Cap at a reasonable maximum
                 );
-                info!("Auto-configuring pipeline size to {} based on {} available CPU cores", auto_size, available_cpus);
+                // info!("Auto-configuring pipeline size to {} based on {} available CPU cores", auto_size, available_cpus);
                 auto_size
             }
         };
@@ -457,14 +457,14 @@ async fn post(&self, body: String) -> Result<Response> {
             tokio::spawn(async move {
                     // Register this thread as the fetcher thread
                     indexer.register_current_thread_as_fetcher();
-                    info!("Block fetcher task started on thread {:?}", std::thread::current().id());
+                    // info!("Block fetcher task started on thread {:?}", std::thread::current().id());
                 let mut current_height = height;
                 
                 loop {
                     // Check if we should exit
                     if let Some(exit_at) = args.exit_at {
                         if current_height >= exit_at {
-                            info!("Fetcher reached exit-at block {}, shutting down", exit_at);
+                            // info!("Fetcher reached exit-at block {}, shutting down", exit_at);
                             break;
                         }
                     }
@@ -486,7 +486,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     // Fetch the block
                     match indexer.pull_block(best_height).await {
                         Ok(block_data) => {
-                            debug!("Fetched block {} ({})", best_height, block_data.len());
+                            // debug!("Fetched block {} ({})", best_height, block_data.len());
                             // Send block to processor
                             if block_sender_clone.send((best_height, block_data)).await.is_err() {
                                 break;
@@ -506,7 +506,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     current_height = best_height + 1;
                 }
                 
-                debug!("Block fetcher task completed");
+                // debug!("Block fetcher task completed");
             })
         };
         
@@ -519,9 +519,9 @@ async fn post(&self, body: String) -> Result<Response> {
             tokio::spawn(async move {
                     // Register this thread as the processor thread
                     indexer.register_current_thread_as_processor();
-                    info!("Block processor task started on thread {:?}", std::thread::current().id());
+                    // info!("Block processor task started on thread {:?}", std::thread::current().id());
                 while let Some((block_height, block_data)) = block_receiver.recv().await {
-                    debug!("Processing block {} ({})", block_height, block_data.len());
+                    // debug!("Processing block {} ({})", block_height, block_data.len());
                     
                     let result = match indexer.process_block(block_height, block_data).await {
                         Ok(_) => BlockResult::Success(block_height),
@@ -534,7 +534,7 @@ async fn post(&self, body: String) -> Result<Response> {
                     }
                 }
                 
-                debug!("Block processor task completed");
+                // debug!("Block processor task completed");
             })
         };
         
@@ -542,7 +542,7 @@ async fn post(&self, body: String) -> Result<Response> {
         while let Some(result) = result_receiver.recv().await {
             match result {
                 BlockResult::Success(processed_height) => {
-                    debug!("Successfully processed block {}", processed_height);
+                    // debug!("Successfully processed block {}", processed_height);
                     height = processed_height + 1;
                     CURRENT_HEIGHT.store(height, Ordering::SeqCst);
                 },
@@ -557,7 +557,7 @@ async fn post(&self, body: String) -> Result<Response> {
             // Check if we should exit
             if let Some(exit_at) = self.args.exit_at {
                 if height > exit_at {
-                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    // info!("Reached exit-at block {}, shutting down gracefully", exit_at);
                     break;
                 }
             }
@@ -580,7 +580,7 @@ async fn post(&self, body: String) -> Result<Response> {
         loop {
             if let Some(exit_at) = self.args.exit_at {
                 if height >= exit_at {
-                    info!(
+                    // info!(
                         "Reached exit-at block {}, shutting down gracefully",
                         exit_at
                     );
@@ -602,7 +602,7 @@ async fn post(&self, body: String) -> Result<Response> {
             match runtime.run() {
                 Ok(_) => {},
                 Err(e) => {
-                    info!("Runtime execution failed: {}, refreshing memory and retrying", e);
+                    // info!("Runtime execution failed: {}, refreshing memory and retrying", e);
                     runtime.refresh_memory().map_err(|refresh_err| {
                         error!("Memory refresh failed: {}", refresh_err);
                         refresh_err
@@ -677,15 +677,15 @@ impl IndexerState {
             
             // Check if memory size is approaching the limit
             if memory_size >= threshold_bytes {
-                info!("Memory usage approaching threshold of {:.2}GB for block {}: {}", threshold_gb, height, memory_stats);
-                info!("Preemptively refreshing memory to avoid OOM errors");
+                // info!("Memory usage approaching threshold of {:.2}GB for block {}: {}", threshold_gb, height, memory_stats);
+                // info!("Preemptively refreshing memory to avoid OOM errors");
                 return true;
             } else if height % 1000 == 0 {
                 // Log memory stats periodically for monitoring
-                info!("Memory stats at block {}: {}", height, memory_stats);
+                // info!("Memory stats at block {}: {}", height, memory_stats);
             }
         } else {
-            debug!("Could not get memory instance for block {}", height);
+            // debug!("Could not get memory instance for block {}", height);
         }
         
         false
@@ -764,7 +764,7 @@ async fn handle_jsonrpc(
     body: web::Json<JsonRpcRequest>,
     state: web::Data<AppState>,
 ) -> ActixResult<impl Responder> {
-    debug!("RPC request: {}", serde_json::to_string(&body).unwrap());
+    // debug!("RPC request: {}", serde_json::to_string(&body).unwrap());
 
     if body.method == "metashrew_view" {
         if body.params.len() < 3 {
@@ -1085,14 +1085,14 @@ fn main() -> Result<()> {
     let available_cpus = num_cpus::get();
     let worker_threads = std::cmp::max(8, available_cpus); // Use at least 8 threads, or more if available
     
-    info!("Detected {} CPU cores, configuring tokio runtime with {} worker threads", available_cpus, worker_threads);
+    // info!("Detected {} CPU cores, configuring tokio runtime with {} worker threads", available_cpus, worker_threads);
     
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads)
         .thread_name("metashrew-worker")
         .on_thread_start(|| {
             let thread_name = std::thread::current().name().unwrap_or("unknown").to_string();
-            info!("Thread started: {}", thread_name);
+            // info!("Thread started: {}", thread_name);
         })
         .enable_all()
         .build()
@@ -1104,12 +1104,12 @@ fn main() -> Result<()> {
 
 // The actual async main function that will run on our custom runtime
 async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
-    info!("Starting Metashrew with dedicated threads for indexer tasks");
+    // info!("Starting Metashrew with dedicated threads for indexer tasks");
     // No longer need thread names as they're set directly in the registration functions
     
     // Configure thread priorities using thread names
-    info!("Setting up dedicated task threads");
-        info!("Setting up dedicated task threads");
+    // info!("Setting up dedicated task threads");
+        // info!("Setting up dedicated task threads");
     
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
@@ -1130,7 +1130,7 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
         12  // Cap at a reasonable maximum
     ).try_into().unwrap();
     
-    info!("Configuring RocksDB with {} background jobs and {} write buffers", background_jobs, write_buffer_number);
+    // info!("Configuring RocksDB with {} background jobs and {} write buffers", background_jobs, write_buffer_number);
     
     opts.create_if_missing(true);
     opts.set_max_open_files(10000);
@@ -1168,14 +1168,14 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     
     // Log the pipeline size configuration
     match args.pipeline_size {
-        Some(size) => info!("Using user-specified pipeline size: {}", size),
+        Some(size) => // info!("Using user-specified pipeline size: {}", size),
         None => {
             let available_cpus = num_cpus::get();
             let auto_size = std::cmp::min(
                 std::cmp::max(5, available_cpus / 2),
                 16
             );
-            info!("Using auto-configured pipeline size: {} (based on {} CPU cores)", auto_size, available_cpus);
+            // info!("Using auto-configured pipeline size: {} (based on {} CPU cores)", auto_size, available_cpus);
         }
     }
 
@@ -1190,7 +1190,7 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     // Spawn a task to monitor thread IDs
     tokio::spawn(async move {
         while let Some((role, thread_id)) = thread_id_rx.recv().await {
-            info!("Thread role registered: {} on thread {:?}", role, thread_id);
+            // info!("Thread role registered: {} on thread {:?}", role, thread_id);
         }
     });
     
@@ -1199,7 +1199,7 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     
     // Start the indexer in a separate task
     let indexer_handle = tokio::spawn(async move {
-        info!("Starting indexer task");
+        // info!("Starting indexer task");
         
         if let Err(e) = indexer.run_pipeline().await {
             error!("Indexer error: {}", e);
@@ -1247,7 +1247,7 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
         .bind((args.host.as_str(), args.port))?
         .run()
     });
-    info!("Server running at http://{}:{}", args.host, args.port);
+    // info!("Server running at http://{}:{}", args.host, args.port);
 
     // Wait for either component to finish (or fail)
     tokio::select! {

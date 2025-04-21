@@ -21,3 +21,6 @@ actix-cors = "0.7.0"
 itertools = "0.14.0"
 anyhow = "1.0.95"
 num_cpus = "1.16.0"
+url = "2.5.0"  # Added for URL parsing in SSH tunneling
+dirs = "5.0.1"  # Added for home directory detection
+bytes = "1.5.0"  # Added for handling binary data in responses

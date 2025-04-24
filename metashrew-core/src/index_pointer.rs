@@ -43,6 +43,12 @@ impl Default for IndexCheckpointStack {
     }
 }
 
+impl IndexCheckpointStack {
+    pub fn depth(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AtomicPointer {
     pointer: IndexPointer,
@@ -132,5 +138,10 @@ impl AtomicPointer {
     }
     pub fn get_pointer(&self) -> IndexPointer {
         return self.pointer.clone();
+    }
+
+    // Get the current depth of the checkpoint stack
+    pub fn checkpoint_depth(&self) -> usize {
+        self.store.depth()
     }
 }

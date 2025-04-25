@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 
 #[derive(Parser, Debug, Clone)]
@@ -50,6 +50,14 @@ struct Args {
     // Pipeline configuration
     #[arg(long, default_value_t = 5)]
     pipeline_size: usize,
+    
+    // Output directory for diff reports
+    #[arg(long, help = "Directory to save diff reports")]
+    output_dir: Option<String>,
+    
+    // Maximum number of diffs before exiting
+    #[arg(long, default_value_t = 12, help = "Maximum number of diffs to find before exiting")]
+    diff_limit: usize,
 }
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
@@ -101,6 +109,10 @@ struct RockshrewDiffRuntime {
     prefix: Vec<u8>,
     primary_tracker: KeyTracker,
     compare_tracker: KeyTracker,
+    // Track the number of diffs found
+    diffs_found: usize,
+    // Track blocks with differences for summary
+    diff_blocks: Vec<u32>,
 }
 
 impl RockshrewDiffRuntime {
@@ -119,6 +131,8 @@ impl RockshrewDiffRuntime {
             primary_tracker: KeyTracker::new(prefix.clone()),
             compare_tracker: KeyTracker::new(prefix.clone()),
             prefix,
+            diffs_found: 0,
+            diff_blocks: Vec::new(),
         }
     }
 
@@ -161,30 +175,107 @@ impl RockshrewDiffRuntime {
         (primary_only, compare_only)
     }
 
-    // Function to print a report of the differences
-    fn print_diff_report(&self, height: u32, primary_only: &[Vec<u8>], compare_only: &[Vec<u8>]) {
-        println!("=== DIFF REPORT FOR BLOCK {} ===", height);
+    // Function to generate a diff report as a string
+    fn generate_diff_report(&self, height: u32, primary_only: &[Vec<u8>], compare_only: &[Vec<u8>]) -> String {
+        let mut report = format!("=== DIFF REPORT FOR BLOCK {} ===\n", height);
         
         if primary_only.is_empty() && compare_only.is_empty() {
-            println!("No differences found.");
-            return;
+            report.push_str("No differences found.\n");
+            return report;
         }
         
         if !primary_only.is_empty() {
-            println!("Keys in primary but not in compare ({}):", primary_only.len());
+            report.push_str(&format!("Keys in primary but not in compare ({}):\n", primary_only.len()));
             for key in primary_only {
-                println!("  {}", hex::encode(key));
+                report.push_str(&format!("  {}\n", hex::encode(key)));
             }
         }
         
         if !compare_only.is_empty() {
-            println!("Keys in compare but not in primary ({}):", compare_only.len());
+            report.push_str(&format!("Keys in compare but not in primary ({}):\n", compare_only.len()));
             for key in compare_only {
-                println!("  {}", hex::encode(key));
+                report.push_str(&format!("  {}\n", hex::encode(key)));
             }
         }
         
-        println!("=== END DIFF REPORT ===");
+        report.push_str("=== END DIFF REPORT ===\n");
+        report
+    }
+    
+    // Function to print a report of the differences
+    fn print_diff_report(&self, height: u32, primary_only: &[Vec<u8>], compare_only: &[Vec<u8>]) {
+        let report = self.generate_diff_report(height, primary_only, compare_only);
+        print!("{}", report);
+    }
+    
+    // Function to save a diff report to a file
+    fn save_diff_report(&self, height: u32, primary_only: &[Vec<u8>], compare_only: &[Vec<u8>]) -> Result<()> {
+        // Check if output directory is specified
+        if let Some(output_dir) = &self.args.output_dir {
+            // Create the output directory if it doesn't exist
+            let output_path = Path::new(output_dir);
+            if !output_path.exists() {
+                fs::create_dir_all(output_path)?;
+            }
+            
+            // Generate the report
+            let report = self.generate_diff_report(height, primary_only, compare_only);
+            
+            // Create the file path
+            let file_path = output_path.join(format!("diff_block_{}.txt", height));
+            
+            // Write the report to the file
+            fs::write(&file_path, report)?;
+            
+            info!("Saved diff report to {}", file_path.display());
+        }
+        
+        Ok(())
+    }
+    
+    // Function to generate and save a summary report
+    fn save_summary_report(&self) -> Result<()> {
+        // Check if output directory is specified
+        if let Some(output_dir) = &self.args.output_dir {
+            // Create the output directory if it doesn't exist
+            let output_path = Path::new(output_dir);
+            if !output_path.exists() {
+                fs::create_dir_all(output_path)?;
+            }
+            
+            // Generate the summary report
+            let mut summary = String::new();
+            summary.push_str("=== DIFF ANALYSIS SUMMARY ===\n");
+            summary.push_str(&format!("Total diffs found: {}\n", self.diffs_found));
+            
+            if !self.diff_blocks.is_empty() {
+                summary.push_str("Blocks with differences:\n");
+                for block in &self.diff_blocks {
+                    summary.push_str(&format!("  Block {}\n", block));
+                }
+            } else {
+                summary.push_str("No differences found in any blocks.\n");
+            }
+            
+            summary.push_str(&format!("Analyzed blocks from {} to {}\n",
+                self.start_block,
+                CURRENT_HEIGHT.load(Ordering::SeqCst)));
+                
+            summary.push_str("=== END SUMMARY ===\n");
+            
+            // Create the file path
+            let file_path = output_path.join("diff_summary.txt");
+            
+            // Write the summary to the file
+            fs::write(&file_path, &summary)?;
+            
+            info!("Saved summary report to {}", file_path.display());
+            
+            // Also print the summary to the console
+            print!("{}", summary);
+        }
+        
+        Ok(())
     }
 
     // Main function to process a block and compare the results
@@ -256,9 +347,20 @@ impl RockshrewDiffRuntime {
         // Compare the keys
         let (primary_only, compare_only) = self.compare_keys(&primary_keys, &compare_keys);
         
-        // If there are differences, print a report and return true
+        // If there are differences, print a report, save it to a file, and return true
         if !primary_only.is_empty() || !compare_only.is_empty() {
+            // Print the report to the console
             self.print_diff_report(height, &primary_only, &compare_only);
+            
+            // Save the report to a file if output directory is specified
+            if let Err(e) = self.save_diff_report(height, &primary_only, &compare_only) {
+                error!("Failed to save diff report: {}", e);
+            }
+            
+            // Track this diff
+            self.diffs_found += 1;
+            self.diff_blocks.push(height);
+            
             return Ok(true);
         }
         
@@ -365,7 +467,7 @@ impl RockshrewDiffRuntime {
     
     // Helper function to fetch a block from the Bitcoin node
     async fn fetch_block(&self, height: u32) -> Result<Vec<u8>> {
-        use serde_json::{json, Value, Number};
+        use serde_json::{json, Number};
         
         // Create the JSON-RPC request
         let blockhash = self.fetch_blockhash(height).await?;
@@ -405,7 +507,7 @@ impl RockshrewDiffRuntime {
     
     // Helper function to fetch a blockhash from the Bitcoin node
     async fn fetch_blockhash(&self, height: u32) -> Result<Vec<u8>> {
-        use serde_json::{json, Value};
+        use serde_json::json;
         
         // Get URL with auth
         let url = self.get_url_with_auth()?;
@@ -450,7 +552,7 @@ impl RockshrewDiffRuntime {
         // Spawn block fetcher task
         let fetcher_handle = {
             let args = self.args.clone();
-            let mut diff_runtime = self.clone();
+            let diff_runtime = self.clone();
             let result_sender_clone = result_sender.clone();
             let block_sender_clone = block_sender.clone();
             
@@ -544,11 +646,26 @@ impl RockshrewDiffRuntime {
                     sleep(Duration::from_secs(5)).await;
                 },
                 BlockResult::Difference(diff_height) => {
-                    info!("Found differences at block {}, exiting", diff_height);
-                    // Clean up
-                    drop(block_sender);
-                    drop(result_sender);
-                    return Ok(());
+                    info!("Found differences at block {}", diff_height);
+                    
+                    // Check if we've reached the diff limit
+                    if self.diffs_found >= self.args.diff_limit {
+                        info!("Reached diff limit of {}, exiting", self.args.diff_limit);
+                        
+                        // Save summary report
+                        if let Err(e) = self.save_summary_report() {
+                            error!("Failed to save summary report: {}", e);
+                        }
+                        
+                        // Clean up
+                        drop(block_sender);
+                        drop(result_sender);
+                        return Ok(());
+                    }
+                    
+                    // Continue processing if we haven't reached the limit
+                    height = diff_height + 1;
+                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
                 }
             }
             
@@ -556,6 +673,12 @@ impl RockshrewDiffRuntime {
             if let Some(exit_at) = self.args.exit_at {
                 if height > exit_at {
                     info!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    
+                    // Save summary report
+                    if let Err(e) = self.save_summary_report() {
+                        error!("Failed to save summary report: {}", e);
+                    }
+                    
                     break;
                 }
             }
@@ -567,6 +690,11 @@ impl RockshrewDiffRuntime {
         
         // Wait for tasks to complete
         let _ = tokio::join!(fetcher_handle, processor_handle);
+        
+        // Save summary report before exiting
+        if let Err(e) = self.save_summary_report() {
+            error!("Failed to save summary report: {}", e);
+        }
         
         Ok(())
     }
@@ -640,6 +768,8 @@ impl Clone for RockshrewDiffRuntime {
             prefix: self.prefix.clone(),
             primary_tracker: KeyTracker::new(self.prefix.clone()),
             compare_tracker: KeyTracker::new(self.prefix.clone()),
+            diffs_found: self.diffs_found,
+            diff_blocks: self.diff_blocks.clone(),
         }
     }
 }
@@ -687,6 +817,15 @@ async fn main() -> Result<()> {
     let db_path = Path::new(&args.db_path);
     if !db_path.exists() {
         fs::create_dir_all(db_path)?;
+    }
+    
+    // Create the output directory if specified
+    if let Some(output_dir) = &args.output_dir {
+        let output_path = Path::new(output_dir);
+        if !output_path.exists() {
+            info!("Creating output directory: {}", output_path.display());
+            fs::create_dir_all(output_path)?;
+        }
     }
     
     // Create primary and compare directories

@@ -5,12 +5,12 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use env_logger;
 use hex;
-use itertools::Itertools;
+// Removed unused import
 use log::{debug, info, error};
-use rand::Rng;
-use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
+use metashrew_runtime::KeyValueStoreLike;
+use metashrew_runtime::MetashrewRuntime;
 use num_cpus;
-use reqwest::{Response, Url};
+use rand::Rng;
 use rocksdb::Options;
 use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use serde::{Deserialize, Serialize};
@@ -21,9 +21,25 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio;
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::sleep;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// Import our SSH tunneling module
+mod ssh_tunnel;
+use ssh_tunnel::{SshTunnel, SshTunnelConfig, TunneledResponse, make_request_with_tunnel, parse_daemon_rpc_url};
+
+// Extension trait for RwLock to add async_read method
+trait RwLockExt<T> {
+    async fn async_read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> where T: 'a;
+}
+
+impl<T> RwLockExt<T> for tokio::sync::RwLock<T> {
+    async fn async_read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> where T: 'a {
+        // Properly use async/await pattern instead of blocking
+        self.read().await
+    }
+}
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
-use std::sync::atomic::{AtomicU32, Ordering};
 static CURRENT_HEIGHT: AtomicU32 = AtomicU32::new(0);
 
 // Block processing result for the pipeline
@@ -33,33 +49,31 @@ enum BlockResult {
     Error(u32, anyhow::Error),  // Block height and error
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long)]
     daemon_rpc_url: String,
     #[arg(long)]
-    indexer: String,
+    indexer: PathBuf,
     #[arg(long)]
-    db_path: String,
+    db_path: PathBuf,
     #[arg(long)]
     start_block: Option<u32>,
     #[arg(long)]
     auth: Option<String>,
-    #[arg(long)]
-    label: Option<String>,
-    #[arg(long)]
-    exit_at: Option<u32>,
-    // JSON-RPC server args
     #[arg(long, env = "HOST", default_value = "127.0.0.1")]
     host: String,
     #[arg(long, env = "PORT", default_value_t = 8080)]
     port: u16,
-    #[arg(long, help = "CORS allowed origins (e.g., '*' for all origins, or specific domains)")]
-    cors: Option<String>,
-    // Pipeline configuration
+    #[arg(long)]
+    label: Option<String>,
+    #[arg(long)]
+    exit_at: Option<u32>,
     #[arg(long, help = "Size of the processing pipeline (default: auto-determined based on CPU cores)")]
     pipeline_size: Option<usize>,
+    #[arg(long, help = "CORS allowed origins (e.g., '*' for all origins, or specific domains)")]
+    cors: Option<String>,
 }
 
 #[derive(Clone)]
@@ -67,12 +81,13 @@ struct AppState {
     runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
 }
 
+// JSON-RPC request structure
 #[derive(Serialize, Deserialize)]
 struct JsonRpcRequest {
     id: u32,
+    jsonrpc: String,
     method: String,
     params: Vec<Value>,
-    jsonrpc: String,
 }
 
 #[derive(Serialize)]
@@ -94,6 +109,23 @@ struct JsonRpcErrorObject {
     code: i32,
     message: String,
     data: Option<String>,
+}
+
+// JSON-RPC response structure for internal use
+#[derive(Deserialize)]
+struct JsonRpcResponse {
+    id: u32,
+    result: Option<Value>,
+    error: Option<JsonRpcErrorInternal>,
+    jsonrpc: String,
+}
+
+// JSON-RPC error structure for internal use
+#[derive(Deserialize)]
+struct JsonRpcErrorInternal {
+    code: i32,
+    message: String,
+    data: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -124,72 +156,106 @@ impl error::ResponseError for IndexerError {
         })
     }
 }
-struct IndexerState {
+
+// Block count response structure
+#[derive(Deserialize)]
+struct BlockCountResponse {
+    id: u32,
+    result: Option<u32>,
+    error: Option<Value>,
+}
+
+// Block hash response structure
+#[derive(Deserialize)]
+struct BlockHashResponse {
+    id: u32,
+    result: Option<String>,
+    error: Option<Value>,
+}
+
+pub struct MetashrewRocksDBSync {
     runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
-    args: Arc<Args>,
+    args: Args,
     start_block: u32,
+    rpc_url: String,
+    auth: Option<String>,
+    bypass_ssl: bool,
+    tunnel_config: Option<SshTunnelConfig>,
+    active_tunnel: Arc<tokio::sync::Mutex<Option<SshTunnel>>>,
     fetcher_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
     processor_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
     fetcher_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
     processor_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
 }
 
-impl IndexerState {
-    async fn post_once(&self, body: String) -> Result<Response, reqwest::Error> {
-        let response = reqwest::Client::new()
-            .post(match self.args.auth.clone() {
-                Some(v) => {
-                    let mut url = Url::parse(self.args.daemon_rpc_url.as_str()).unwrap();
-                    let (username, password) = v.split(":").next_tuple().unwrap();
-                    url.set_username(username).unwrap();
-                    url.set_password(Some(password)).unwrap();
-                    url
+impl MetashrewRocksDBSync {
+    async fn post(&self, body: String) -> Result<TunneledResponse> {
+        // Implement retry logic for network requests
+        let max_retries = 5;
+        let mut retry_delay = Duration::from_millis(500);
+        let max_delay = Duration::from_secs(16);
+        
+        for attempt in 0..max_retries {
+            // Get the existing tunnel if available
+            let existing_tunnel = if self.tunnel_config.is_some() {
+                let active_tunnel = self.active_tunnel.lock().await;
+                active_tunnel.clone()
+            } else {
+                None
+            };
+            
+            // Make the request with tunnel if needed
+            match make_request_with_tunnel(
+                &self.rpc_url,
+                body.clone(),
+                self.auth.clone(),
+                self.tunnel_config.clone(),
+                self.bypass_ssl,
+                existing_tunnel
+            ).await {
+                Ok(tunneled_response) => {
+                    // If this is a tunneled response with a tunnel, store it for reuse
+                    if let Some(tunnel) = tunneled_response._tunnel.clone() {
+                        if self.tunnel_config.is_some() {
+                            debug!("Storing SSH tunnel for reuse on port {}", tunnel.local_port);
+                            let mut active_tunnel = self.active_tunnel.lock().await;
+                            *active_tunnel = Some(tunnel);
+                        }
+                    }
+                    return Ok(tunneled_response);
+                },
+                Err(e) => {
+                    error!("Request failed (attempt {}): {}", attempt + 1, e);
+                    
+                    // If the error might be related to the tunnel, clear the active tunnel
+                    // so we'll create a new one on the next attempt
+                    if self.tunnel_config.is_some() {
+                        let mut active_tunnel = self.active_tunnel.lock().await;
+                        if active_tunnel.is_some() {
+                            debug!("Clearing active tunnel due to error");
+                            *active_tunnel = None;
+                        }
+                    }
+                    
+                    // Calculate exponential backoff with jitter
+                    let jitter = rand::thread_rng().gen_range(0..=100) as u64;
+                    retry_delay = std::cmp::min(
+                        max_delay,
+                        retry_delay * 2 + Duration::from_millis(jitter)
+                    );
+                    
+                    debug!("Request failed (attempt {}): {}, retrying in {:?}",
+                           attempt + 1, e, retry_delay);
+                    tokio::time::sleep(retry_delay).await;
                 }
-                None => Url::parse(self.args.daemon_rpc_url.as_str()).unwrap(),
-            })
-            .header("Content-Type", "application/json")
-            .body(body)
-            .send()
-            .await;
-        return response;
-    }
-#[allow(unused_assignments)]
-async fn post(&self, body: String) -> Result<Response> {
-    let mut retry_delay = Duration::from_millis(100);
-    let max_delay = Duration::from_secs(30);
-    let max_retries = 10;
-    let mut response = None;
-    
-    for attempt in 0..=max_retries {
-        match self.post_once(body.clone()).await {
-            Ok(v) => {
-                response = Some(v);
-                return Ok(response.unwrap());
-            },
-            Err(e) => {
-                if attempt == max_retries {
-                    return Err(anyhow!("Max retries exceeded: {}", e));
-                }
-                
-                // Calculate exponential backoff with jitter
-                let jitter = rand::thread_rng().gen_range(0..=100) as u64;
-                retry_delay = std::cmp::min(
-                    max_delay,
-                    retry_delay * 2 + Duration::from_millis(jitter)
-                );
-                
-                debug!("Request failed (attempt {}): {}, retrying in {:?}",
-                       attempt + 1, e, retry_delay);
-                tokio::time::sleep(retry_delay).await;
             }
         }
-    }
-    
-    Err(anyhow!("Unreachable: max retries exceeded"))
+        
+        Err(anyhow!("Max retries exceeded"))
     }
 
     async fn fetch_blockcount(&self) -> Result<u32> {
-        let response = self
+        let tunneled_response = self
             .post(serde_json::to_string(&JsonRpcRequest {
                 id: SystemTime::now()
                     .duration_since(UNIX_EPOCH)?
@@ -201,143 +267,21 @@ async fn post(&self, body: String) -> Result<Response> {
             })?)
             .await?;
 
-        let result: Value = response.json().await?;
-        Ok(result["result"]
-            .as_u64()
-            .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))? as u32)
-    }
-
-    async fn query_height(&self) -> Result<u32> {
-        let (db, start_block) = {
-            let runtime = self.runtime.read().await;
-            let context = runtime.context.lock().unwrap();
-            (context.db.db.clone(), self.start_block)
-        };
-        query_height(db, start_block).await
-    }
-
-    async fn best_height(&self, block_number: u32) -> Result<u32> {
-        let mut best: u32 = block_number;
-        let tip = self.fetch_blockcount().await?;
-
-        if best >= tip - std::cmp::min(6, tip) {
-            loop {
-                if best == 0 {
-                    break;
-                }
-                
-                // Get local blockhash with better error handling
-                let blockhash = match self.get_blockhash(best).await {
-                    Some(hash) => hash,
-                    None => {
-                        // If we can't get the local blockhash, try to get it from the remote
-                        debug!("Local blockhash not found for block {}, fetching from remote", best);
-                        let remote_hash = self.fetch_blockhash(best).await?;
-                        
-                        // Store the remote hash locally for future reference
-                        let runtime = self.runtime.write().await;
-                        if let Ok(mut context) = runtime.context.lock() {
-                            let key = (String::from(HEIGHT_TO_HASH) + &best.to_string()).into_bytes();
-                            if let Err(e) = context.db.put(&key, &remote_hash) {
-                                debug!("Failed to store blockhash for block {}: {}", best, e);
-                            }
-                        }
-                        
-                        remote_hash
-                    }
-                };
-                
-                let remote_blockhash = self.fetch_blockhash(best).await?;
-                if blockhash == remote_blockhash {
-                    break;
-                } else {
-                    best = best - 1;
-                }
-            }
-        }
-        Ok(best)
-    }
-
-    async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
-        let key = (String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes();
-        let runtime = match self.runtime.read().await {
-            runtime => runtime,
-        };
-        
-        let mut context = match runtime.context.lock() {
-            Ok(context) => context,
-            Err(e) => {
-                error!("Failed to lock context: {}", e);
-                return None;
-            }
-        };
-        
-        match context.db.get(&key) {
-            Ok(result) => result,
-            Err(e) => {
-                error!("Database error when retrieving blockhash for block {}: {}", block_number, e);
-                None
-            }
-        }
-    }
-
-    async fn fetch_blockhash(&self, block_number: u32) -> Result<Vec<u8>> {
-        let response = self
-            .post(serde_json::to_string(&JsonRpcRequest {
-                id: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_secs()
-                    .try_into()?,
-                jsonrpc: String::from("2.0"),
-                method: String::from("getblockhash"),
-                params: vec![Value::Number(Number::from(block_number))],
-            })?)
-            .await?;
-
-        let result: Value = response.json().await?;
-        let blockhash = result["result"]
-            .as_str()
+        let result: BlockCountResponse = tunneled_response.json().await?;
+        let count = result.result
             .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))?;
-        Ok(hex::decode(blockhash)?)
+        Ok(count)
     }
 
-    async fn pull_block(&self, block_number: u32) -> Result<Vec<u8>> {
-        loop {
-            let count = self.fetch_blockcount().await?;
-            if block_number > count {
-                tokio::time::sleep(Duration::from_millis(3000)).await;
-            } else {
-                break;
-            }
-        }
-        let blockhash = self.fetch_blockhash(block_number).await?;
+    pub async fn poll_connection<'a>(&'a self) -> Result<Arc<rocksdb::DB>> {
+        let runtime_guard = self.runtime.read().await;
+        let context = runtime_guard.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+        Ok(context.db.db.clone())
+    }
 
-        let runtime = self.runtime.write().await;
-        runtime.context.lock().unwrap().db.put(
-            &(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes(),
-            &blockhash,
-        )?;
-
-        let response = self
-            .post(serde_json::to_string(&JsonRpcRequest {
-                id: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_secs()
-                    .try_into()?,
-                jsonrpc: String::from("2.0"),
-                method: String::from("getblock"),
-                params: vec![
-                    Value::String(hex::encode(&blockhash)),
-                    Value::Number(Number::from(0)),
-                ],
-            })?)
-            .await?;
-
-        let result: Value = response.json().await?;
-        let block_hex = result["result"]
-            .as_str()
-            .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))?;
-        Ok(hex::decode(block_hex)?)
+    pub async fn query_height(&self) -> Result<u32> {
+        let db = self.poll_connection().await?;
+        query_height(db, self.start_block).await
     }
 
     // Process a single block
@@ -387,17 +331,7 @@ async fn post(&self, body: String) -> Result<Response> {
                 
                 Ok(())
             },
-            Err(e) => {
-                // Log detailed memory stats when runtime execution fails
-                let memory_stats = self.get_memory_stats(&mut runtime);
-                error!("CRITICAL: Runtime execution failed for block {}: {}", height, e);
-                error!("Memory stats at failure: {}", memory_stats);
-                
-                // Crash the process to force a restart and make the issue more visible
-                panic!("Runtime execution failed with memory stats: {}", memory_stats);
-                
-                // The code below is unreachable due to the panic, but kept for reference
-                /*
+            Err(_e) => {
                 // Try to refresh memory with better error handling
                 match runtime.refresh_memory() {
                     Ok(_) => {
@@ -418,15 +352,15 @@ async fn post(&self, body: String) -> Result<Response> {
                         Err(anyhow!(refresh_err))
                     }
                 }
-                */
             }
         }
     }
 
-    // Improvement 5: Parallel processing with pipeline
+    // Parallel processing with pipeline
     async fn run_pipeline(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
         CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+        
         // Determine optimal pipeline size based on CPU cores if not specified
         let pipeline_size = match self.args.pipeline_size {
             Some(size) => size,
@@ -455,9 +389,10 @@ async fn post(&self, body: String) -> Result<Response> {
             
             // Spawn a task for the block fetcher
             tokio::spawn(async move {
-                    // Register this thread as the fetcher thread
-                    indexer.register_current_thread_as_fetcher();
-                    info!("Block fetcher task started on thread {:?}", std::thread::current().id());
+                // Register this thread as the fetcher thread
+                indexer.register_current_thread_as_fetcher();
+                info!("Block fetcher task started on thread {:?}", std::thread::current().id());
+                
                 let mut current_height = height;
                 
                 loop {
@@ -517,9 +452,10 @@ async fn post(&self, body: String) -> Result<Response> {
             
             // Spawn a task for the block processor
             tokio::spawn(async move {
-                    // Register this thread as the processor thread
-                    indexer.register_current_thread_as_processor();
-                    info!("Block processor task started on thread {:?}", std::thread::current().id());
+                // Register this thread as the processor thread
+                indexer.register_current_thread_as_processor();
+                info!("Block processor task started on thread {:?}", std::thread::current().id());
+                
                 while let Some((block_height, block_data)) = block_receiver.recv().await {
                     debug!("Processing block {} ({})", block_height, block_data.len());
                     
@@ -573,71 +509,231 @@ async fn post(&self, body: String) -> Result<Response> {
         Ok(())
     }
 
-    #[allow(dead_code)]
+    async fn best_height(&self, block_number: u32) -> Result<u32> {
+        let mut best: u32 = block_number;
+        let count = self.fetch_blockcount().await?;
+        
+        if best >= count - std::cmp::min(6, count) {
+            loop {
+                if best == 0 {
+                    break;
+                }
+                let blockhash = self
+                    .get_blockhash(best)
+                    .await
+                    .ok_or(anyhow!("failed to retrieve blockhash"))?;
+                let remote_blockhash = self.fetch_blockhash(best).await?;
+                if blockhash == remote_blockhash {
+                    break;
+                } else {
+                    best = best - 1;
+                }
+            }
+        }
+        return Ok(best);
+    }
+
+    async fn get_once(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let runtime = self.runtime.async_read().await;
+        let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+        context.db.get(key).map_err(|_| anyhow!("GET error against RocksDB"))
+    }
+
+    async fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let mut count = 0;
+        loop {
+            match self.get_once(key).await {
+                Ok(v) => {
+                    return Ok(v);
+                }
+                Err(e) => {
+                    if count > 100 {
+                        return Err(e.into());
+                    } else {
+                        count = count + 1;
+                        // Add a small delay to avoid tight loop
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        debug!("err: retrying GET");
+                    }
+                }
+            }
+        }
+        // This line is unreachable, but we'll keep the function structure consistent
+        // with the rest of the codebase
+    }
+
+    async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
+        match self.get(&(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes()).await {
+            Ok(Some(value)) => Some(value),
+            _ => None
+        }
+    }
+
+    async fn fetch_blockhash(&self, block_number: u32) -> Result<Vec<u8>> {
+        let tunneled_response = self
+            .post(serde_json::to_string(&JsonRpcRequest {
+                id: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_secs()
+                    .try_into()?,
+                jsonrpc: String::from("2.0"),
+                method: String::from("getblockhash"),
+                params: vec![Value::Number(Number::from(block_number))],
+            })?)
+            .await?;
+
+        let result: BlockHashResponse = tunneled_response.json().await?;
+        let blockhash = result.result
+            .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))?;
+        Ok(hex::decode(blockhash)?)
+    }
+
+    async fn put_once(&self, k: &Vec<u8>, v: &Vec<u8>) -> Result<()> {
+        let runtime = self.runtime.async_read().await;
+        let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+        context.db.put(k, v).map_err(|_| anyhow!("PUT error against RocksDB"))
+    }
+
+    async fn put(&self, key: &Vec<u8>, val: &Vec<u8>) -> Result<()> {
+        let mut count = 0;
+        loop {
+            match self.put_once(key, val).await {
+                Ok(v) => {
+                    return Ok(v);
+                }
+                Err(e) => {
+                    if count > 100 { // Changed from i32::MAX to a reasonable retry limit
+                        return Err(e.into());
+                    } else {
+                        // Add a small delay to avoid tight loop
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        count = count + 1;
+                    }
+                    debug!("err: retrying PUT");
+                }
+            }
+        }
+    }
+
+    async fn pull_block(&self, block_number: u32) -> Result<Vec<u8>> {
+        loop {
+            let count = self.fetch_blockcount().await?;
+            if block_number > count {
+                sleep(Duration::from_millis(3000)).await;
+            } else {
+                break;
+            }
+        }
+        let blockhash = self.fetch_blockhash(block_number).await?;
+        
+        self.put(
+            &(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes(),
+            &blockhash,
+        ).await?;
+        
+        let tunneled_response = self
+            .post(serde_json::to_string(&JsonRpcRequest {
+                id: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)?
+                    .as_secs()
+                    .try_into()?,
+                jsonrpc: String::from("2.0"),
+                method: String::from("getblock"),
+                params: vec![
+                    Value::String(hex::encode(&blockhash)),
+                    Value::Number(Number::from(0)),
+                ],
+            })?)
+            .await?;
+
+        let result: BlockHashResponse = tunneled_response.json().await?;
+        let block_hex = result.result
+            .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))?;
+        
+        Ok(hex::decode(block_hex)?)
+    }
+
     async fn run(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
-
+        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+        
         loop {
+            // Check if we should exit before processing the next block
             if let Some(exit_at) = self.args.exit_at {
                 if height >= exit_at {
-                    info!(
-                        "Reached exit-at block {}, shutting down gracefully",
-                        exit_at
-                    );
+                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
                     return Ok(());
                 }
             }
 
-            let best: u32 = self.best_height(height).await.unwrap_or(height);
-            let block_data = self.pull_block(best).await?;
-
-            let mut runtime = self.runtime.write().await;
-            {
-                let mut context = runtime.context.lock().unwrap();
-                context.block = block_data;
-                context.height = best;
-                context.db.set_height(best);
-            }
-
-            match runtime.run() {
-                Ok(_) => {},
+            let best: u32 = match self.best_height(height).await {
+                Ok(v) => v,
                 Err(e) => {
-                    info!("Runtime execution failed: {}, refreshing memory and retrying", e);
-                    runtime.refresh_memory().map_err(|refresh_err| {
-                        error!("Memory refresh failed: {}", refresh_err);
-                        refresh_err
-                    })?;
+                    error!("Failed to determine best height: {}", e);
+                    height
+                },
+            };
+            
+            info!("Processing block {} (best height: {})", best, height);
+            
+            match self.pull_block(best).await {
+                Ok(block_data) => {
+                    // Get a write lock on the runtime
+                    let mut runtime_guard = self.runtime.write().await;
                     
-                    runtime.run().map_err(|run_err| {
-                        error!("Runtime execution failed after memory refresh: {}", run_err);
-                        run_err
-                    })?;
+                    // Update the context
+                    {
+                        let mut context = runtime_guard.context.lock()
+                            .map_err(|_| anyhow!("Failed to lock context"))?;
+                        context.block = block_data;
+                        context.height = best;
+                        context.db.set_height(best);
+                    }
+                    
+                    // Run the runtime
+                    if let Err(e) = runtime_guard.run() {
+                        debug!("Runtime error, refreshing memory: {}", e);
+                        runtime_guard.refresh_memory()?;
+                        if let Err(e) = runtime_guard.run() {
+                            error!("Runtime run failed after retry: {}", e);
+                            return Err(anyhow!("Runtime run failed after retry: {}", e));
+                        }
+                    }
+                    
+                    height = best + 1;
+                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+                },
+                Err(e) => {
+                    error!("Failed to pull block {}: {}", best, e);
+                    sleep(Duration::from_secs(5)).await;
                 }
             }
-
-            height = best + 1;
-            CURRENT_HEIGHT.store(height, Ordering::SeqCst);
         }
     }
 }
 
 // Allow cloning for use in async tasks
-impl Clone for IndexerState {
+impl Clone for MetashrewRocksDBSync {
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
             args: self.args.clone(),
             start_block: self.start_block,
+            rpc_url: self.rpc_url.clone(),
+            auth: self.auth.clone(),
+            bypass_ssl: self.bypass_ssl,
+            tunnel_config: self.tunnel_config.clone(),
+            active_tunnel: self.active_tunnel.clone(),
             fetcher_thread_id_tx: self.fetcher_thread_id_tx.clone(),
             processor_thread_id_tx: self.processor_thread_id_tx.clone(),
-            fetcher_thread_id: std::sync::Mutex::new(*self.fetcher_thread_id.lock().unwrap()),
-            processor_thread_id: std::sync::Mutex::new(*self.processor_thread_id.lock().unwrap()),
+            fetcher_thread_id: std::sync::Mutex::new(None),
+            processor_thread_id: std::sync::Mutex::new(None),
         }
     }
 }
 
-// Add methods to set and get thread ID senders
-impl IndexerState {
+// Add methods for thread management and memory monitoring
+impl MetashrewRocksDBSync {
     // Helper method to get detailed memory statistics as a string
     fn get_memory_stats(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>) -> String {
         if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
@@ -690,6 +786,7 @@ impl IndexerState {
         
         false
     }
+
     fn set_thread_id_senders(
         &mut self,
         fetcher_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>,
@@ -729,8 +826,6 @@ impl IndexerState {
         }
     }
     
-    // These methods might be useful in the future, so we'll keep them but mark them as allowed dead code
-    #[allow(dead_code)]
     fn is_fetcher_thread(&self) -> bool {
         match self.fetcher_thread_id.lock() {
             Ok(guard) => {
@@ -744,7 +839,6 @@ impl IndexerState {
         }
     }
     
-    #[allow(dead_code)]
     fn is_processor_thread(&self) -> bool {
         match self.processor_thread_id.lock() {
             Ok(guard) => {
@@ -1031,7 +1125,8 @@ async fn handle_jsonrpc(
         let key = (String::from(HEIGHT_TO_HASH) + &height.to_string()).into_bytes();
         
         // Fix lifetime issue by storing the context in a variable
-        let mut context = runtime.context.lock().unwrap();
+        let mut context = runtime.context.lock()
+            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
         let result = context.db.get(&key).map_err(|_| {
             <anyhow::Error as Into<IndexerError>>::into(anyhow!(
                 "DB connection error while fetching blockhash"
@@ -1067,49 +1162,26 @@ async fn handle_jsonrpc(
     }
 }
 
-fn main() -> Result<()> {
-    // Initialize the logger
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize logger
     env_logger::init();
     
     // Parse command line arguments
-    let args = Arc::new(Args::parse());
-
+    let args_arc = Arc::new(Args::parse());
+    let args = Args::parse(); // Create a non-Arc version for compatibility
+    
+    // Set the label if provided
     if let Some(ref label) = args.label {
         set_label(label.clone());
     }
-
-    let start_block = args.start_block.unwrap_or(0);
-
-    // Create a custom runtime with dedicated threads for critical tasks
-    // Dynamically determine the number of worker threads based on available CPUs
-    let available_cpus = num_cpus::get();
-    let worker_threads = std::cmp::max(8, available_cpus); // Use at least 8 threads, or more if available
     
-    info!("Detected {} CPU cores, configuring tokio runtime with {} worker threads", available_cpus, worker_threads);
+    // Parse the daemon RPC URL to determine if SSH tunneling is needed
+    let (rpc_url, bypass_ssl, tunnel_config) = parse_daemon_rpc_url(&args_arc.daemon_rpc_url).await?;
     
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
-        .thread_name("metashrew-worker")
-        .on_thread_start(|| {
-            let thread_name = std::thread::current().name().unwrap_or("unknown").to_string();
-            info!("Thread started: {}", thread_name);
-        })
-        .enable_all()
-        .build()
-        .expect("Failed to create tokio runtime");
-    
-    // Run the main application logic on the runtime
-    runtime.block_on(async_main(args, start_block))
-}
-
-// The actual async main function that will run on our custom runtime
-async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
-    info!("Starting Metashrew with dedicated threads for indexer tasks");
-    // No longer need thread names as they're set directly in the registration functions
-    
-    // Configure thread priorities using thread names
-    info!("Setting up dedicated task threads");
-        info!("Setting up dedicated task threads");
+    info!("Parsed RPC URL: {}", rpc_url);
+    info!("Bypass SSL: {}", bypass_ssl);
+    info!("Tunnel config: {:?}", tunnel_config);
     
     // Configure RocksDB options for optimal performance
     let mut opts = Options::default();
@@ -1148,42 +1220,20 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
     opts.set_max_background_jobs(background_jobs);
     // Removed deprecated call to set_max_background_compactions
     opts.set_disable_auto_compactions(false);
-
+    
+    let start_block = args.start_block.unwrap_or(0);
+    
     // Create runtime with RocksDB adapter
     let runtime = Arc::new(RwLock::new(MetashrewRuntime::load(
-      PathBuf::from(&args.indexer),
-      RocksDBRuntimeAdapter::open(args.db_path.clone(), opts)?,
-  )?));
-
-    // Create indexer state
-    let mut indexer = IndexerState {
-        runtime: runtime.clone(),
-        args: args.clone(),
-        start_block,
-        fetcher_thread_id_tx: None,
-        processor_thread_id_tx: None,
-        fetcher_thread_id: std::sync::Mutex::new(None),
-        processor_thread_id: std::sync::Mutex::new(None),
-    };
+        args.indexer.clone(),
+        RocksDBRuntimeAdapter::open(args.db_path.to_string_lossy().to_string(), opts)?
+    )?));
     
-    // Log the pipeline size configuration
-    match args.pipeline_size {
-        Some(size) => info!("Using user-specified pipeline size: {}", size),
-        None => {
-            let available_cpus = num_cpus::get();
-            let auto_size = std::cmp::min(
-                std::cmp::max(5, available_cpus / 2),
-                16
-            );
-            info!("Using auto-configured pipeline size: {} (based on {} CPU cores)", auto_size, available_cpus);
-        }
-    }
-
     // Create app state for JSON-RPC server
     let app_state = web::Data::new(AppState {
         runtime: runtime.clone(),
     });
-
+    
     // Create a channel to communicate thread IDs
     let (thread_id_tx, mut thread_id_rx) = tokio::sync::mpsc::channel::<(String, std::thread::ThreadId)>(2);
     
@@ -1194,21 +1244,34 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
         }
     });
     
-    // Configure the indexer to use thread ID tracking
-    indexer.set_thread_id_senders(thread_id_tx.clone(), thread_id_tx.clone());
+    // Create the sync object
+    let mut sync = MetashrewRocksDBSync {
+        runtime: runtime.clone(),
+        args: args.clone(),
+        start_block,
+        rpc_url,
+        auth: args_arc.auth.clone(),
+        bypass_ssl,
+        tunnel_config,
+        active_tunnel: Arc::new(tokio::sync::Mutex::new(None)),
+        fetcher_thread_id_tx: Some(thread_id_tx.clone()),
+        processor_thread_id_tx: Some(thread_id_tx.clone()),
+        fetcher_thread_id: std::sync::Mutex::new(None),
+        processor_thread_id: std::sync::Mutex::new(None),
+    };
     
     // Start the indexer in a separate task
     let indexer_handle = tokio::spawn(async move {
         info!("Starting indexer task");
         
-        if let Err(e) = indexer.run_pipeline().await {
+        if let Err(e) = sync.run_pipeline().await {
             error!("Indexer error: {}", e);
         }
     });
-
+    
     // Start the JSON-RPC server
     let server_handle = tokio::spawn({
-        let args_clone = args.clone();
+        let args_clone = args_arc.clone();
         HttpServer::new(move || {
             let cors = match &args_clone.cors {
                 Some(cors_value) if cors_value == "*" => {
@@ -1238,30 +1301,30 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
                         })
                 }
             };
-
+            
             App::new()
                 .wrap(cors)
                 .app_data(app_state.clone())
                 .service(handle_jsonrpc)
         })
-        .bind((args.host.as_str(), args.port))?
+        .bind((args_arc.host.as_str(), args_arc.port))?
         .run()
     });
-    info!("Server running at http://{}:{}", args.host, args.port);
-
+    info!("Server running at http://{}:{}", args_arc.host, args_arc.port);
+    
     // Wait for either component to finish (or fail)
     tokio::select! {
         result = indexer_handle => {
             if let Err(e) = result {
-                log::error!("Indexer task failed: {}", e);
+                error!("Indexer task failed: {}", e);
             }
         }
         result = server_handle => {
             if let Err(e) = result {
-                log::error!("Server task failed: {}", e);
+                error!("Server task failed: {}", e);
             }
         }
     }
-
+    
     Ok(())
 }

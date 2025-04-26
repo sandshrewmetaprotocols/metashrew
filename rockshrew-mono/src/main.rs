@@ -27,20 +27,15 @@ use std::sync::atomic::{AtomicU32, Ordering};
 mod ssh_tunnel;
 use ssh_tunnel::{SshTunnel, SshTunnelConfig, TunneledResponse, make_request_with_tunnel, parse_daemon_rpc_url};
 
-// Extension trait for RwLock to add blocking_read method
+// Extension trait for RwLock to add async_read method
 trait RwLockExt<T> {
-    fn blocking_read(&self) -> tokio::sync::RwLockReadGuard<'_, T>;
+    async fn async_read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> where T: 'a;
 }
 
 impl<T> RwLockExt<T> for tokio::sync::RwLock<T> {
-    fn blocking_read(&self) -> tokio::sync::RwLockReadGuard<'_, T> {
-        // This is not ideal but necessary for synchronous contexts
-        // In a real-world application, we would restructure to avoid this
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                self.read().await
-            })
-        })
+    async fn async_read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> where T: 'a {
+        // Properly use async/await pattern instead of blocking
+        self.read().await
     }
 }
 
@@ -186,7 +181,7 @@ pub struct MetashrewRocksDBSync {
     auth: Option<String>,
     bypass_ssl: bool,
     tunnel_config: Option<SshTunnelConfig>,
-    active_tunnel: Arc<std::sync::Mutex<Option<SshTunnel>>>,
+    active_tunnel: Arc<tokio::sync::Mutex<Option<SshTunnel>>>,
     fetcher_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
     processor_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
     fetcher_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
@@ -203,7 +198,7 @@ impl MetashrewRocksDBSync {
         for attempt in 0..max_retries {
             // Get the existing tunnel if available
             let existing_tunnel = if self.tunnel_config.is_some() {
-                let active_tunnel = self.active_tunnel.lock().unwrap();
+                let active_tunnel = self.active_tunnel.lock().await;
                 active_tunnel.clone()
             } else {
                 None
@@ -223,7 +218,7 @@ impl MetashrewRocksDBSync {
                     if let Some(tunnel) = tunneled_response._tunnel.clone() {
                         if self.tunnel_config.is_some() {
                             debug!("Storing SSH tunnel for reuse on port {}", tunnel.local_port);
-                            let mut active_tunnel = self.active_tunnel.lock().unwrap();
+                            let mut active_tunnel = self.active_tunnel.lock().await;
                             *active_tunnel = Some(tunnel);
                         }
                     }
@@ -235,7 +230,7 @@ impl MetashrewRocksDBSync {
                     // If the error might be related to the tunnel, clear the active tunnel
                     // so we'll create a new one on the next attempt
                     if self.tunnel_config.is_some() {
-                        let mut active_tunnel = self.active_tunnel.lock().unwrap();
+                        let mut active_tunnel = self.active_tunnel.lock().await;
                         if active_tunnel.is_some() {
                             debug!("Clearing active tunnel due to error");
                             *active_tunnel = None;
@@ -278,14 +273,15 @@ impl MetashrewRocksDBSync {
         Ok(count)
     }
 
-    pub async fn poll_connection<'a>(&'a self) -> Arc<rocksdb::DB> {
+    pub async fn poll_connection<'a>(&'a self) -> Result<Arc<rocksdb::DB>> {
         let runtime_guard = self.runtime.read().await;
-        let context = runtime_guard.context.lock().unwrap();
-        context.db.db.clone()
+        let context = runtime_guard.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+        Ok(context.db.db.clone())
     }
 
     pub async fn query_height(&self) -> Result<u32> {
-        query_height(self.poll_connection().await, self.start_block).await
+        let db = self.poll_connection().await?;
+        query_height(db, self.start_block).await
     }
 
     // Process a single block
@@ -537,37 +533,40 @@ impl MetashrewRocksDBSync {
         return Ok(best);
     }
 
-    fn get_once(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
-        let runtime = self.runtime.blocking_read();
-        let mut context = runtime.context.lock().unwrap();
+    async fn get_once(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+        let runtime = self.runtime.async_read().await;
+        let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
         context.db.get(key).map_err(|_| anyhow!("GET error against RocksDB"))
     }
 
-    fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
         let mut count = 0;
-        let mut result: Option<Option<Vec<u8>>> = None;
         loop {
-            match self.get_once(key) {
+            match self.get_once(key).await {
                 Ok(v) => {
-                    result = Some(v);
-                    break;
+                    return Ok(v);
                 }
                 Err(e) => {
                     if count > 100 {
                         return Err(e.into());
                     } else {
                         count = count + 1;
+                        // Add a small delay to avoid tight loop
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                        debug!("err: retrying GET");
                     }
-                    debug!("err: retrying GET");
                 }
             }
         }
-        Ok(result.unwrap())
+        // This line is unreachable, but we'll keep the function structure consistent
+        // with the rest of the codebase
     }
 
     async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
-        self.get(&(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes())
-            .unwrap()
+        match self.get(&(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes()).await {
+            Ok(Some(value)) => Some(value),
+            _ => None
+        }
     }
 
     async fn fetch_blockhash(&self, block_number: u32) -> Result<Vec<u8>> {
@@ -589,23 +588,25 @@ impl MetashrewRocksDBSync {
         Ok(hex::decode(blockhash)?)
     }
 
-    fn put_once(&self, k: &Vec<u8>, v: &Vec<u8>) -> Result<()> {
-        let runtime = self.runtime.blocking_read();
-        let mut context = runtime.context.lock().unwrap();
+    async fn put_once(&self, k: &Vec<u8>, v: &Vec<u8>) -> Result<()> {
+        let runtime = self.runtime.async_read().await;
+        let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
         context.db.put(k, v).map_err(|_| anyhow!("PUT error against RocksDB"))
     }
 
-    fn put(&self, key: &Vec<u8>, val: &Vec<u8>) -> Result<()> {
+    async fn put(&self, key: &Vec<u8>, val: &Vec<u8>) -> Result<()> {
         let mut count = 0;
         loop {
-            match self.put_once(key, val) {
+            match self.put_once(key, val).await {
                 Ok(v) => {
                     return Ok(v);
                 }
                 Err(e) => {
-                    if count > i32::MAX {
+                    if count > 100 { // Changed from i32::MAX to a reasonable retry limit
                         return Err(e.into());
                     } else {
+                        // Add a small delay to avoid tight loop
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                         count = count + 1;
                     }
                     debug!("err: retrying PUT");
@@ -628,7 +629,7 @@ impl MetashrewRocksDBSync {
         self.put(
             &(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes(),
             &blockhash,
-        )?;
+        ).await?;
         
         let tunneled_response = self
             .post(serde_json::to_string(&JsonRpcRequest {
@@ -682,7 +683,8 @@ impl MetashrewRocksDBSync {
                     
                     // Update the context
                     {
-                        let mut context = runtime_guard.context.lock().unwrap();
+                        let mut context = runtime_guard.context.lock()
+                            .map_err(|_| anyhow!("Failed to lock context"))?;
                         context.block = block_data;
                         context.height = best;
                         context.db.set_height(best);
@@ -1123,7 +1125,8 @@ async fn handle_jsonrpc(
         let key = (String::from(HEIGHT_TO_HASH) + &height.to_string()).into_bytes();
         
         // Fix lifetime issue by storing the context in a variable
-        let mut context = runtime.context.lock().unwrap();
+        let mut context = runtime.context.lock()
+            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
         let result = context.db.get(&key).map_err(|_| {
             <anyhow::Error as Into<IndexerError>>::into(anyhow!(
                 "DB connection error while fetching blockhash"
@@ -1250,7 +1253,7 @@ async fn main() -> Result<()> {
         auth: args_arc.auth.clone(),
         bypass_ssl,
         tunnel_config,
-        active_tunnel: Arc::new(std::sync::Mutex::new(None)),
+        active_tunnel: Arc::new(tokio::sync::Mutex::new(None)),
         fetcher_thread_id_tx: Some(thread_id_tx.clone()),
         processor_thread_id_tx: Some(thread_id_tx.clone()),
         fetcher_thread_id: std::sync::Mutex::new(None),

@@ -67,26 +67,28 @@ Configuration options:
 
 ## Comparing Indexers with rockshrew-diff
 
-The `rockshrew-diff` tool allows you to compare the output of two different WASM modules processing the same blockchain data. This is particularly useful for:
+The `rockshrew-diff` tool allows you to compare the output of two different WASM modules or existing indexers. This is particularly useful for:
 
 - Validating changes to metaprotocol implementations
 - Ensuring upgrades don't introduce financial side effects
 - Debugging differences between implementations
 - Testing compatibility between versions
 
-### How It Works
+The tool offers two modes of operation:
 
-1. `rockshrew-diff` processes blocks with both WASM modules
-2. It compares key-value pairs with a specified prefix
-3. When differences are found, it prints a detailed report and exits
-4. If no differences are found, it continues to the next block
+1. **Process Mode**: Processes blocks with two WASM modules and compares their outputs
+2. **Compare Mode**: Compares the state of two existing indexer databases directly
 
-### Example Usage
+### Process Mode
+
+In Process Mode, `rockshrew-diff` processes blocks with both WASM modules, comparing key-value pairs with a specified prefix. When differences are found, it prints a detailed report and exits (or continues to the next block, depending on configuration).
+
+#### Example Usage (Process Mode)
 
 Compare balance changes indexed by two versions of the ALKANES metaprotocol:
 
 ```sh
-./target/release/rockshrew-diff \
+./target/release/rockshrew-diff process \
   --daemon-rpc-url http://localhost:8332 \
   --auth bitcoinrpc:bitcoinrpc \
   --indexer /home/ubuntu/primary.wasm \
@@ -98,7 +100,7 @@ Compare balance changes indexed by two versions of the ALKANES metaprotocol:
 
 This example compares how two versions of the ALKANES metaprotocol index balance changes at the key prefix `/runes/proto/1/byoutpoint/`. This ensures that protocol upgrades don't introduce destructive financial side effects - a major benefit of using a metashrew-based index for metaprotocol development.
 
-### Configuration Options
+#### Configuration Options (Process Mode)
 
 - `--daemon-rpc-url`: Bitcoin Core RPC URL
 - `--auth`: RPC credentials (username:password)
@@ -109,6 +111,54 @@ This example compares how two versions of the ALKANES metaprotocol index balance
 - `--start-block`: Block height to start comparison
 - `--exit-at`: Optional block height to stop at
 - `--pipeline-size`: Optional pipeline size for parallel processing (default: 5)
+- `--output-dir`: Optional directory to save diff reports
+- `--diff-limit`: Maximum number of diffs to find before exiting (default: 12)
+
+### Compare Mode
+
+In Compare Mode, `rockshrew-diff` directly compares the state of two existing indexer databases without processing any blocks. This is useful when you have two already-running indexers and want to compare their current state.
+
+#### Example Usage (Compare Mode)
+
+Compare the state of two existing ALKANES indexers:
+
+```sh
+./target/release/rockshrew-diff compare \
+  --primary-db-path /home/hude/.metashrew \
+  --compare-db-path /tmp/rockshrew-main \
+  --prefix 0x2f72756e65732f70726f746f2f312f62796f7574706f696e742f \
+  --output-dir /home/hude/diff-reports
+```
+
+This example compares the state of two existing indexer databases, focusing on keys with the specified prefix.
+Note: The tool now supports batch processing to handle large databases efficiently.
+
+#### Batch Processing
+
+To prevent out-of-memory issues when comparing large databases, the Compare Mode now supports batch processing:
+
+```sh
+./target/release/rockshrew-diff compare \
+  --primary-db-path /home/hude/.metashrew \
+  --compare-db-path /tmp/rockshrew-main \
+  --prefix 0x2f72756e65732f70726f746f2f312f62796f7574706f696e742f \
+  --batch-size 50000 \
+  --output-dir /home/hude/diff-reports
+```
+
+This processes the database in batches of 50,000 keys at a time, significantly reducing memory usage.
+
+#### Configuration Options (Compare Mode)
+
+- `--primary-db-path`: Path to the first indexer's RocksDB database
+- `--compare-db-path`: Path to the second indexer's RocksDB database
+- `--prefix`: Hex-encoded key prefix to compare (must start with 0x)
+- `--output-dir`: Optional directory to save diff reports
+- `--max-keys`: Maximum number of keys to compare (0 for all keys, default: 0)
+- `--diff-limit`: Maximum number of differences to find before exiting (default: 100)
+- `--batch-size`: Number of keys to process in each batch (default: 10000)
+- `--height-filter`: Optional height to filter keys by (if your keys include height information)
+- `--sort-keys`: Sort keys before comparing (recommended for batch processing, default: true)
 
 ## WASM Runtime Environment
 

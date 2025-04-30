@@ -64,7 +64,6 @@ struct Args {
     diff_limit: usize,
 }
 
-const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
 static CURRENT_HEIGHT: AtomicU32 = AtomicU32::new(0);
 
 // Block processing result for the pipeline
@@ -73,35 +72,6 @@ enum BlockResult {
     Success(u32),  // Block height that was successfully processed
     Error(u32, anyhow::Error),  // Block height and error
     Difference(u32),  // Block height where a difference was found
-}
-
-// KeyTracker to monitor keys being written with a specific prefix
-struct KeyTracker {
-    prefix: Vec<u8>,
-    keys: HashSet<Vec<u8>>,
-}
-
-impl KeyTracker {
-    fn new(prefix: Vec<u8>) -> Self {
-        Self {
-            prefix,
-            keys: HashSet::new(),
-        }
-    }
-
-    fn track_key(&mut self, key: &[u8]) {
-        if key.starts_with(&self.prefix) {
-            self.keys.insert(key.to_vec());
-        }
-    }
-
-    fn get_keys(&self) -> &HashSet<Vec<u8>> {
-        &self.keys
-    }
-
-    fn clear(&mut self) {
-        self.keys.clear();
-    }
 }
 
 // Custom runtime adapter for diff operations
@@ -136,7 +106,7 @@ impl RockshrewDiffRuntime {
         }
     }
 
-    // Create a custom MetashrewRuntime that tracks keys with our prefix
+    // Helper function to create a tracking runtime
     fn create_tracking_runtime(
         wasm_path: PathBuf,
         db_adapter: RocksDBRuntimeAdapter,
@@ -146,12 +116,7 @@ impl RockshrewDiffRuntime {
         let tracking_adapter = TrackingAdapter::new(db_adapter, prefix);
         
         // Create the runtime with our tracking adapter
-        let runtime = MetashrewRuntime::load(
-            wasm_path,
-            tracking_adapter,
-        )?;
-        
-        Ok(runtime)
+        MetashrewRuntime::load(wasm_path, tracking_adapter)
     }
 
     // Function to compare keys between primary and compare runtimes
@@ -686,37 +651,6 @@ impl RockshrewDiffRuntime {
         Ok(())
     }
     
-    // Original run function
-    pub async fn run(&mut self) -> Result<()> {
-        let mut height = self.start_block;
-        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-        
-        loop {
-            // Check if we should exit before processing the next block
-            if let Some(exit_at) = self.args.exit_at {
-                if height >= exit_at {
-                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
-                    return Ok(());
-                }
-            }
-            
-            // Fetch the block
-            let block_data = self.fetch_block(height).await?;
-            
-            // Process the block and check for differences
-            let has_diff = self.process_block(block_data, height).await?;
-            
-            // If there are differences, exit
-            if has_diff {
-                info!("Found differences at block {}, exiting", height);
-                return Ok(());
-            }
-            
-            // Move to the next block
-            height += 1;
-            CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-        }
-    }
 }
 
 // Allow cloning for use in async tasks

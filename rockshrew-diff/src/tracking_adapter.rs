@@ -45,8 +45,14 @@ impl metashrew_runtime::BatchLike for TrackingBatch {
     }
 
     fn default() -> Self {
-        // This should never be called directly, use new() instead
-        panic!("TrackingBatch::default() should not be called directly");
+        // Create a default instance with empty values
+        // This is needed to satisfy the BatchLike trait
+        Self {
+            inner: <RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch::default(),
+            keys: HashMap::new(),
+            prefix: Vec::new(),
+            tracked_keys: Arc::new(Mutex::new(HashSet::new())),
+        }
     }
 }
 

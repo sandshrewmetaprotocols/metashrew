@@ -8,7 +8,7 @@ use metashrew_runtime::MetashrewRuntime;
 use rand::Rng;
 use rockshrew_runtime::{set_label, RocksDBRuntimeAdapter};
 use rocksdb::Options;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -119,43 +119,76 @@ impl RockshrewDiffRuntime {
         MetashrewRuntime::load(wasm_path, tracking_adapter)
     }
 
-    // Function to compare keys between primary and compare runtimes
-    fn compare_keys(&self, primary_keys: &HashSet<Vec<u8>>, compare_keys: &HashSet<Vec<u8>>) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+    // Function to compare updates between primary and compare runtimes
+    fn compare_updates(
+        &self,
+        primary_updates: &HashMap<Vec<u8>, Vec<u8>>,
+        compare_updates: &HashMap<Vec<u8>, Vec<u8>>
+    ) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>) {
         // Keys in primary but not in compare
-        let primary_only: Vec<Vec<u8>> = primary_keys
-            .difference(compare_keys)
+        let primary_only_keys: Vec<Vec<u8>> = primary_updates
+            .keys()
+            .filter(|k| !compare_updates.contains_key(*k))
             .cloned()
             .collect();
         
         // Keys in compare but not in primary
-        let compare_only: Vec<Vec<u8>> = compare_keys
-            .difference(primary_keys)
+        let compare_only_keys: Vec<Vec<u8>> = compare_updates
+            .keys()
+            .filter(|k| !primary_updates.contains_key(*k))
             .cloned()
             .collect();
         
-        (primary_only, compare_only)
+        // Keys in both but with different values
+        let mut value_diffs: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+        
+        for (key, primary_value) in primary_updates {
+            if let Some(compare_value) = compare_updates.get(key) {
+                if primary_value != compare_value {
+                    // Store (key, primary_value, compare_value)
+                    value_diffs.push((key.clone(), primary_value.clone(), compare_value.clone()));
+                }
+            }
+        }
+        
+        (primary_only_keys, compare_only_keys, value_diffs)
     }
 
     // Function to generate a diff report as a string
-    fn generate_diff_report(&self, height: u32, primary_only: &[Vec<u8>], compare_only: &[Vec<u8>]) -> String {
+    fn generate_diff_report(
+        &self,
+        height: u32,
+        primary_only_keys: &[Vec<u8>],
+        compare_only_keys: &[Vec<u8>],
+        value_diffs: &[(Vec<u8>, Vec<u8>, Vec<u8>)]
+    ) -> String {
         let mut report = format!("=== DIFF REPORT FOR BLOCK {} ===\n", height);
         
-        if primary_only.is_empty() && compare_only.is_empty() {
+        if primary_only_keys.is_empty() && compare_only_keys.is_empty() && value_diffs.is_empty() {
             report.push_str("No differences found.\n");
             return report;
         }
         
-        if !primary_only.is_empty() {
-            report.push_str(&format!("Keys in primary but not in compare ({}):\n", primary_only.len()));
-            for key in primary_only {
+        if !primary_only_keys.is_empty() {
+            report.push_str(&format!("Keys in primary but not in compare ({}):\n", primary_only_keys.len()));
+            for key in primary_only_keys {
                 report.push_str(&format!("  {}\n", hex::encode(key)));
             }
         }
         
-        if !compare_only.is_empty() {
-            report.push_str(&format!("Keys in compare but not in primary ({}):\n", compare_only.len()));
-            for key in compare_only {
+        if !compare_only_keys.is_empty() {
+            report.push_str(&format!("Keys in compare but not in primary ({}):\n", compare_only_keys.len()));
+            for key in compare_only_keys {
                 report.push_str(&format!("  {}\n", hex::encode(key)));
+            }
+        }
+        
+        if !value_diffs.is_empty() {
+            report.push_str(&format!("Keys with different values ({}):\n", value_diffs.len()));
+            for (key, primary_value, compare_value) in value_diffs {
+                report.push_str(&format!("  Key: {}\n", hex::encode(key)));
+                report.push_str(&format!("    Primary value: {}\n", hex::encode(primary_value)));
+                report.push_str(&format!("    Compare value: {}\n", hex::encode(compare_value)));
             }
         }
         
@@ -164,32 +197,56 @@ impl RockshrewDiffRuntime {
     }
     
     // Function to print a report of the differences
-    fn print_diff_report(&self, height: u32, primary_only: &[Vec<u8>], compare_only: &[Vec<u8>]) {
-        let report = self.generate_diff_report(height, primary_only, compare_only);
+    fn print_diff_report(
+        &self,
+        height: u32,
+        primary_only_keys: &[Vec<u8>],
+        compare_only_keys: &[Vec<u8>],
+        value_diffs: &[(Vec<u8>, Vec<u8>, Vec<u8>)]
+    ) {
+        let report = self.generate_diff_report(height, primary_only_keys, compare_only_keys, value_diffs);
         print!("{}", report);
     }
     
     // Function to save a diff report to a file
-    fn save_diff_report(&self, height: u32, primary_only: &[Vec<u8>], compare_only: &[Vec<u8>]) -> Result<()> {
-        // Check if output directory is specified
-        if let Some(output_dir) = &self.args.output_dir {
-            // Create the output directory if it doesn't exist
-            let output_path = Path::new(output_dir);
-            if !output_path.exists() {
-                fs::create_dir_all(output_path)?;
+    fn save_diff_report(
+        &self,
+        height: u32,
+        primary_only_keys: &[Vec<u8>],
+        compare_only_keys: &[Vec<u8>],
+        value_diffs: &[(Vec<u8>, Vec<u8>, Vec<u8>)]
+    ) -> Result<()> {
+        // Generate the report
+        let report = self.generate_diff_report(height, primary_only_keys, compare_only_keys, value_diffs);
+        
+        // Determine output directory
+        let output_dir = match &self.args.output_dir {
+            Some(dir) => {
+                // Create the output directory if it doesn't exist
+                let output_path = Path::new(dir);
+                if !output_path.exists() {
+                    fs::create_dir_all(output_path)?;
+                }
+                output_path.to_path_buf()
+            },
+            None => {
+                // Use current directory if no output directory is specified
+                PathBuf::from(".")
             }
-            
-            // Generate the report
-            let report = self.generate_diff_report(height, primary_only, compare_only);
-            
-            // Create the file path
-            let file_path = output_path.join(format!("diff_block_{}.txt", height));
-            
-            // Write the report to the file
-            fs::write(&file_path, report)?;
-            
-            info!("Saved diff report to {}", file_path.display());
-        }
+        };
+        
+        // Create a meaningful filename with timestamp
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        let file_path = output_dir.join(format!("diff_block_{}_ts_{}.txt", height, timestamp));
+        
+        // Write the report to the file
+        fs::write(&file_path, report)?;
+        
+        info!("Saved diff report to {}", file_path.display());
         
         Ok(())
     }
@@ -301,38 +358,38 @@ impl RockshrewDiffRuntime {
             }
         }
         
-        // Get tracked keys from both adapters
-        let primary_keys = {
+        // Get tracked updates from both adapters
+        let primary_updates = {
             let context = self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-            context.db.get_tracked_keys()
+            context.db.get_tracked_updates()
         };
         
-        let compare_keys = {
+        let compare_updates = {
             let context = self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-            context.db.get_tracked_keys()
+            context.db.get_tracked_updates()
         };
         
-        // Clear tracked keys for next block
+        // Clear tracked updates for next block
         {
             let context = self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-            context.db.clear_tracked_keys();
+            context.db.clear_tracked_updates();
         }
         
         {
             let context = self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-            context.db.clear_tracked_keys();
+            context.db.clear_tracked_updates();
         }
         
-        // Compare the keys
-        let (primary_only, compare_only) = self.compare_keys(&primary_keys, &compare_keys);
+        // Compare the updates
+        let (primary_only_keys, compare_only_keys, value_diffs) = self.compare_updates(&primary_updates, &compare_updates);
         
         // If there are differences, print a report, save it to a file, and return true
-        if !primary_only.is_empty() || !compare_only.is_empty() {
+        if !primary_only_keys.is_empty() || !compare_only_keys.is_empty() || !value_diffs.is_empty() {
             // Print the report to the console
-            self.print_diff_report(height, &primary_only, &compare_only);
+            self.print_diff_report(height, &primary_only_keys, &compare_only_keys, &value_diffs);
             
-            // Save the report to a file if output directory is specified
-            if let Err(e) = self.save_diff_report(height, &primary_only, &compare_only) {
+            // Save the report to a file
+            if let Err(e) = self.save_diff_report(height, &primary_only_keys, &compare_only_keys, &value_diffs) {
                 error!("Failed to save diff report: {}", e);
             }
             

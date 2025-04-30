@@ -1,6 +1,6 @@
-use metashrew_runtime::KeyValueStoreLike;
+use metashrew_runtime::{KeyValueStoreLike, BatchLike};
 use rockshrew_runtime::RocksDBRuntimeAdapter;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 /// A wrapper around RocksDBRuntimeAdapter that tracks key-value updates
@@ -14,56 +14,16 @@ pub struct TrackingAdapter {
     pub tracked_keys: Arc<Mutex<HashSet<Vec<u8>>>>,
 }
 
-/// Batch implementation for TrackingAdapter
-pub struct TrackingBatch {
-    /// The underlying RocksDB batch
-    pub inner: <RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch,
-    /// Keys being written in this batch
-    pub keys: HashMap<Vec<u8>, Vec<u8>>,
-    /// The prefix to track
-    pub prefix: Vec<u8>,
-    /// Reference to the tracked keys set
-    pub tracked_keys: Arc<Mutex<HashSet<Vec<u8>>>>,
-}
+/// Simple batch implementation that just forwards to the inner batch
+pub struct TrackingBatch(<RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch);
 
-impl metashrew_runtime::BatchLike for TrackingBatch {
+impl BatchLike for TrackingBatch {
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        // Track the key if it starts with our prefix
-        let key_bytes = key.as_ref().to_vec();
-        if key_bytes.starts_with(&self.prefix) {
-            // Add to tracked keys
-            if let Ok(mut tracked_keys) = self.tracked_keys.lock() {
-                tracked_keys.insert(key_bytes.clone());
-            }
-        }
-        
-        // Store in our local map for debugging/inspection
-        self.keys.insert(key_bytes, value.as_ref().to_vec());
-        
-        // Forward to the inner batch
-        self.inner.put(key, value);
+        self.0.put(key, value);
     }
 
     fn default() -> Self {
-        // Create a default instance with empty values
-        // This is needed to satisfy the BatchLike trait
-        Self {
-            inner: <RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch::default(),
-            keys: HashMap::new(),
-            prefix: Vec::new(),
-            tracked_keys: Arc::new(Mutex::new(HashSet::new())),
-        }
-    }
-}
-
-impl TrackingBatch {
-    pub fn new(inner: <RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch, prefix: Vec<u8>, tracked_keys: Arc<Mutex<HashSet<Vec<u8>>>>) -> Self {
-        Self {
-            inner,
-            keys: HashMap::new(),
-            prefix,
-            tracked_keys,
-        }
+        TrackingBatch(<RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch::default())
     }
 }
 
@@ -83,7 +43,7 @@ impl KeyValueStoreLike for TrackingAdapter {
 
     fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
         // Forward to the inner adapter
-        self.inner.write(batch.inner)
+        self.inner.write(batch.0)
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -106,7 +66,7 @@ impl KeyValueStoreLike for TrackingAdapter {
         if key_bytes.starts_with(&self.prefix) {
             // Add to tracked keys
             if let Ok(mut tracked_keys) = self.tracked_keys.lock() {
-                tracked_keys.insert(key_bytes);
+                tracked_keys.insert(key_bytes.clone());
             }
         }
         

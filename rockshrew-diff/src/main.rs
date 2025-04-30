@@ -17,6 +17,10 @@ use tokio;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+// Import our tracking adapter
+mod tracking_adapter;
+use tracking_adapter::TrackingAdapter;
+
 #[derive(Parser, Debug, Clone)]
 #[command(version, about = "Compare the output of two WASM modules in Metashrew", long_about = None)]
 struct Args {
@@ -102,13 +106,11 @@ impl KeyTracker {
 
 // Custom runtime adapter for diff operations
 struct RockshrewDiffRuntime {
-    primary_runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
-    compare_runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
+    primary_runtime: MetashrewRuntime<TrackingAdapter>,
+    compare_runtime: MetashrewRuntime<TrackingAdapter>,
     args: Args,
     start_block: u32,
     prefix: Vec<u8>,
-    primary_tracker: KeyTracker,
-    compare_tracker: KeyTracker,
     // Track the number of diffs found
     diffs_found: usize,
     // Track blocks with differences for summary
@@ -117,8 +119,8 @@ struct RockshrewDiffRuntime {
 
 impl RockshrewDiffRuntime {
     pub fn new(
-        primary_runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
-        compare_runtime: MetashrewRuntime<RocksDBRuntimeAdapter>,
+        primary_runtime: MetashrewRuntime<TrackingAdapter>,
+        compare_runtime: MetashrewRuntime<TrackingAdapter>,
         args: Args,
         start_block: u32,
         prefix: Vec<u8>,
@@ -128,8 +130,6 @@ impl RockshrewDiffRuntime {
             compare_runtime,
             args,
             start_block,
-            primary_tracker: KeyTracker::new(prefix.clone()),
-            compare_tracker: KeyTracker::new(prefix.clone()),
             prefix,
             diffs_found: 0,
             diff_blocks: Vec::new(),
@@ -140,20 +140,16 @@ impl RockshrewDiffRuntime {
     fn create_tracking_runtime(
         wasm_path: PathBuf,
         db_adapter: RocksDBRuntimeAdapter,
-        _tracker: &mut KeyTracker,
-    ) -> Result<MetashrewRuntime<RocksDBRuntimeAdapter>> {
-        let engine = wasmtime::Engine::default();
-        let _module = wasmtime::Module::from_file(&engine, &wasm_path)
-            .map_err(|e| anyhow!("Failed to load WASM module: {}", e))?;
+        prefix: Vec<u8>,
+    ) -> Result<MetashrewRuntime<TrackingAdapter>> {
+        // Create our tracking adapter that wraps the RocksDBRuntimeAdapter
+        let tracking_adapter = TrackingAdapter::new(db_adapter, prefix);
         
+        // Create the runtime with our tracking adapter
         let runtime = MetashrewRuntime::load(
             wasm_path,
-            db_adapter,
+            tracking_adapter,
         )?;
-        
-        // We'll need to modify the runtime to track keys with our prefix
-        // This would require implementing a custom flush function that tracks keys
-        // For now, we'll return the standard runtime
         
         Ok(runtime)
     }
@@ -340,9 +336,27 @@ impl RockshrewDiffRuntime {
             }
         }
         
-        // Extract keys with the specified prefix from both runtimes
-        let primary_keys = self.scan_keys_with_prefix(&self.primary_runtime, height)?;
-        let compare_keys = self.scan_keys_with_prefix(&self.compare_runtime, height)?;
+        // Get tracked keys from both adapters
+        let primary_keys = {
+            let context = self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+            context.db.get_tracked_keys()
+        };
+        
+        let compare_keys = {
+            let context = self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+            context.db.get_tracked_keys()
+        };
+        
+        // Clear tracked keys for next block
+        {
+            let context = self.primary_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+            context.db.clear_tracked_keys();
+        }
+        
+        {
+            let context = self.compare_runtime.context.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+            context.db.clear_tracked_keys();
+        }
         
         // Compare the keys
         let (primary_only, compare_only) = self.compare_keys(&primary_keys, &compare_keys);
@@ -367,34 +381,7 @@ impl RockshrewDiffRuntime {
         Ok(false)
     }
 
-    // Scan the database for keys with our prefix that were written at the given height
-    fn scan_keys_with_prefix(&self, runtime: &MetashrewRuntime<RocksDBRuntimeAdapter>, height: u32) -> Result<HashSet<Vec<u8>>> {
-        let mut keys = HashSet::new();
-        
-        // Get the height key for this block - we don't actually use it but we check for errors
-        match metashrew_runtime::u32_to_vec(height) {
-            Ok(_) => {},
-            Err(e) => return Err(anyhow!("Failed to convert height to vec: {}", e)),
-        };
-        
-        // Get the updated keys for this block
-        let updated_keys = match MetashrewRuntime::<RocksDBRuntimeAdapter>::db_updated_keys_for_block(
-            runtime.context.clone(),
-            height,
-        ) {
-            Ok(keys) => keys,
-            Err(e) => return Err(anyhow!("Failed to get updated keys: {}", e)),
-        };
-        
-        // Filter keys that start with our prefix
-        for key in updated_keys {
-            if key.starts_with(&self.prefix) {
-                keys.insert(key);
-            }
-        }
-        
-        Ok(keys)
-    }
+    // This function is no longer needed as we're using the TrackingAdapter
 
     // Helper function to send a request with exponential backoff and jitter
     async fn send_request(&self, url: reqwest::Url, request_body: serde_json::Value) -> Result<serde_json::Value> {
@@ -766,8 +753,6 @@ impl Clone for RockshrewDiffRuntime {
             args: self.args.clone(),
             start_block: self.start_block,
             prefix: self.prefix.clone(),
-            primary_tracker: KeyTracker::new(self.prefix.clone()),
-            compare_tracker: KeyTracker::new(self.prefix.clone()),
             diffs_found: self.diffs_found,
             diff_blocks: self.diff_blocks.clone(),
         }
@@ -810,8 +795,11 @@ async fn main() -> Result<()> {
     let prefix = match args.prefix.strip_prefix("0x") {
         Some(hex_str) => hex::decode(hex_str)
             .map_err(|e| anyhow!("Invalid hex prefix: {}", e))?,
-        None => return Err(anyhow!("Prefix must start with 0x followed by hex characters")),
+        None => hex::decode(&args.prefix)
+            .map_err(|e| anyhow!("Invalid hex prefix: {}", e))?,
     };
+    
+    info!("Using prefix: {}", hex::encode(&prefix));
     
     // Create the db_path directory if it doesn't exist
     let db_path = Path::new(&args.db_path);
@@ -847,18 +835,22 @@ async fn main() -> Result<()> {
     let primary_db = RocksDBRuntimeAdapter::open(primary_path.to_string_lossy().to_string(), opts.clone())?;
     let compare_db = RocksDBRuntimeAdapter::open(compare_path.to_string_lossy().to_string(), opts)?;
     
+    // Create tracking adapters
+    let primary_tracking_adapter = TrackingAdapter::new(primary_db, prefix.clone());
+    let compare_tracking_adapter = TrackingAdapter::new(compare_db, prefix.clone());
+    
     // Load primary and compare WASM modules
     let primary_indexer: PathBuf = args.indexer.clone().into();
     let compare_indexer: PathBuf = args.compare.clone().into();
     
     let primary_runtime = MetashrewRuntime::load(
         primary_indexer,
-        primary_db,
+        primary_tracking_adapter,
     )?;
     
     let compare_runtime = MetashrewRuntime::load(
         compare_indexer,
-        compare_db,
+        compare_tracking_adapter,
     )?;
     
     // Get start block

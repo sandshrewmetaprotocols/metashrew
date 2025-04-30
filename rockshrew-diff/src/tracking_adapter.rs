@@ -1,6 +1,6 @@
 use metashrew_runtime::{KeyValueStoreLike, BatchLike};
 use rockshrew_runtime::RocksDBRuntimeAdapter;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// A wrapper around RocksDBRuntimeAdapter that tracks key-value updates
@@ -14,16 +14,29 @@ pub struct TrackingAdapter {
     pub tracked_keys: Arc<Mutex<HashSet<Vec<u8>>>>,
 }
 
-/// Simple batch implementation that just forwards to the inner batch
-pub struct TrackingBatch(<RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch);
+/// Enhanced batch implementation that tracks keys being written
+pub struct TrackingBatch {
+    /// The underlying RocksDB batch
+    inner: <RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch,
+    /// Keys being written in this batch
+    keys: HashMap<Vec<u8>, Vec<u8>>,
+}
 
 impl BatchLike for TrackingBatch {
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.0.put(key, value);
+        // Store the key for later tracking
+        let key_bytes = key.as_ref().to_vec();
+        self.keys.insert(key_bytes, value.as_ref().to_vec());
+        
+        // Forward to the inner batch
+        self.inner.put(key, value);
     }
 
     fn default() -> Self {
-        TrackingBatch(<RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch::default())
+        Self {
+            inner: <RocksDBRuntimeAdapter as KeyValueStoreLike>::Batch::default(),
+            keys: HashMap::new(),
+        }
     }
 }
 
@@ -42,8 +55,17 @@ impl KeyValueStoreLike for TrackingAdapter {
     type Batch = TrackingBatch;
 
     fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
+        // Track keys from the batch that match our prefix
+        for (key, _) in batch.keys.iter() {
+            if key.starts_with(&self.prefix) {
+                if let Ok(mut tracked_keys) = self.tracked_keys.lock() {
+                    tracked_keys.insert(key.clone());
+                }
+            }
+        }
+        
         // Forward to the inner adapter
-        self.inner.write(batch.0)
+        self.inner.write(batch.inner)
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -61,16 +83,7 @@ impl KeyValueStoreLike for TrackingAdapter {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        // Track the key if it starts with our prefix
-        let key_bytes = key.as_ref().to_vec();
-        if key_bytes.starts_with(&self.prefix) {
-            // Add to tracked keys
-            if let Ok(mut tracked_keys) = self.tracked_keys.lock() {
-                tracked_keys.insert(key_bytes.clone());
-            }
-        }
-        
-        // Forward to the inner adapter
+        // Forward to the inner adapter - no tracking here as it's not used by __flush
         self.inner.put(key, value)
     }
 }

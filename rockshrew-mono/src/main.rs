@@ -60,6 +60,9 @@ struct Args {
     // Pipeline configuration
     #[arg(long, help = "Size of the processing pipeline (default: auto-determined based on CPU cores)")]
     pipeline_size: Option<usize>,
+    // Memory management
+    #[arg(long, help = "Enable experimental memory caching between blocks (EXPERIMENTAL: may cause non-deterministic behavior)")]
+    enable_experimental_cache: bool,
 }
 
 #[derive(Clone)]
@@ -359,13 +362,25 @@ async fn post(&self, body: String) -> Result<Response> {
             }
         }
         
-        // Check if memory usage is approaching the limit and refresh if needed
-        if self.should_refresh_memory(&mut runtime, height) {
+        // Memory management: By default, refresh memory for each block for deterministic behavior
+        // Only skip memory refresh if experimental caching is explicitly enabled
+        if !self.args.enable_experimental_cache {
             match runtime.refresh_memory() {
-                Ok(_) => debug!("Successfully refreshed memory preemptively for block {}", height),
+                Ok(_) => debug!("Refreshed memory for deterministic execution of block {}", height),
                 Err(e) => {
-                    error!("Failed to preemptively refresh memory: {}", e);
-                    // Continue with execution even if preemptive refresh fails
+                    error!("CRITICAL: Failed to refresh memory for block {}: {}", height, e);
+                    panic!("Memory refresh failed - this indicates a serious system issue: {}", e);
+                }
+            }
+        } else {
+            // Experimental caching mode: only refresh if memory usage is high
+            if self.should_refresh_memory(&mut runtime, height) {
+                match runtime.refresh_memory() {
+                    Ok(_) => debug!("Refreshed memory due to high usage for block {}", height),
+                    Err(e) => {
+                        error!("Failed to refresh memory in experimental cache mode: {}", e);
+                        // Continue with execution even if preemptive refresh fails in experimental mode
+                    }
                 }
             }
         }
@@ -393,32 +408,9 @@ async fn post(&self, body: String) -> Result<Response> {
                 error!("CRITICAL: Runtime execution failed for block {}: {}", height, e);
                 error!("Memory stats at failure: {}", memory_stats);
                 
-                // Crash the process to force a restart and make the issue more visible
-                panic!("Runtime execution failed with memory stats: {}", memory_stats);
-                
-                // The code below is unreachable due to the panic, but kept for reference
-                /*
-                // Try to refresh memory with better error handling
-                match runtime.refresh_memory() {
-                    Ok(_) => {
-                        // Try running again after memory refresh
-                        match runtime.run() {
-                            Ok(_) => {
-                                debug!("Successfully processed block {} after memory refresh", height);
-                                Ok(())
-                            },
-                            Err(run_err) => {
-                                error!("Runtime execution failed after memory refresh: {}", run_err);
-                                Err(anyhow!(run_err))
-                            }
-                        }
-                    },
-                    Err(refresh_err) => {
-                        error!("Memory refresh failed: {}", refresh_err);
-                        Err(anyhow!(refresh_err))
-                    }
-                }
-                */
+                // Crash the process to ensure deterministic behavior and make issues visible
+                // We do not want to recover from OOMs as this could lead to non-deterministic behavior
+                panic!("Runtime execution failed - crashing to ensure deterministic behavior. Memory stats: {}", memory_stats);
             }
         }
     }
@@ -1177,6 +1169,15 @@ async fn async_main(args: Arc<Args>, start_block: u32) -> Result<()> {
             );
             info!("Using auto-configured pipeline size: {} (based on {} CPU cores)", auto_size, available_cpus);
         }
+    }
+    
+    // Log memory management configuration
+    if args.enable_experimental_cache {
+        info!("EXPERIMENTAL: Memory caching enabled between blocks - this may cause non-deterministic behavior");
+        info!("Memory will only be refreshed when usage approaches limits");
+    } else {
+        info!("Deterministic mode: Memory will be refreshed for each block to ensure consistent execution");
+        info!("Use --enable-experimental-cache to enable memory reuse between blocks (not recommended for production)");
     }
 
     // Create app state for JSON-RPC server

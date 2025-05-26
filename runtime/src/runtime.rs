@@ -219,11 +219,21 @@ where
     T: Clone + 'static,
 {
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
-        // Configure the engine with default settings
+        // Configure the engine with memory settings to ensure deterministic behavior
         let mut async_config = wasmtime::Config::default();
         async_config.consume_fuel(true);
         async_config.async_support(true);
-        let config = wasmtime::Config::default();
+        // Configure memory settings for deterministic WASM execution
+        async_config.static_memory_maximum_size(4_294_967_296); // 4GB maximum
+        async_config.static_memory_guard_size(0); // No guard pages for maximum memory availability
+        async_config.dynamic_memory_guard_size(0);
+        
+        let mut config = wasmtime::Config::default();
+        // Configure memory settings for deterministic WASM execution
+        config.static_memory_maximum_size(4_294_967_296); // 4GB maximum
+        config.static_memory_guard_size(0); // No guard pages for maximum memory availability
+        config.dynamic_memory_guard_size(0);
+        
         let engine = wasmtime::Engine::new(&config)?;
         let async_engine = wasmtime::Engine::new(&async_config)?;
         let module = wasmtime::Module::from_file(&engine, indexer.clone().into_os_string()).context("Failed to load WASM module")?;
@@ -247,6 +257,24 @@ where
         }
         let instance = linker.instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
+            
+        // Verify that we have access to the full WASM memory space
+        if let Some(memory) = instance.get_memory(&mut wasmstore, "memory") {
+            let max_pages = memory.ty(&wasmstore).maximum().unwrap_or(0);
+            let max_bytes = max_pages as u64 * 65536; // 64KB per page
+            if max_bytes < 4_294_967_296 {
+                return Err(anyhow!(
+                    "CRITICAL: WASM memory maximum is only {} bytes ({} GB), but we require 4GB for deterministic execution. \
+                    This indicates the WASM module or system cannot provide the required memory space.",
+                    max_bytes,
+                    max_bytes as f64 / 1_073_741_824.0
+                ));
+            }
+            log::info!("WASM memory configured with maximum {} bytes ({:.2} GB)", max_bytes, max_bytes as f64 / 1_073_741_824.0);
+        } else {
+            return Err(anyhow!("CRITICAL: Could not access WASM memory instance - this indicates a serious configuration issue"));
+        }
+        
         Ok(MetashrewRuntime {
             wasmstore,
             async_engine,
@@ -395,6 +423,22 @@ where
             .linker
             .instantiate(&mut wasmstore, &self.module)
             .context("Failed to instantiate module during memory refresh")?;
+            
+        // Verify that we still have access to the full WASM memory space after refresh
+        if let Some(memory) = self.instance.get_memory(&mut wasmstore, "memory") {
+            let max_pages = memory.ty(&wasmstore).maximum().unwrap_or(0);
+            let max_bytes = max_pages as u64 * 65536; // 64KB per page
+            if max_bytes < 4_294_967_296 {
+                return Err(anyhow!(
+                    "CRITICAL: After memory refresh, WASM memory maximum is only {} bytes ({} GB), but we require 4GB for deterministic execution.",
+                    max_bytes,
+                    max_bytes as f64 / 1_073_741_824.0
+                ));
+            }
+        } else {
+            return Err(anyhow!("CRITICAL: Could not access WASM memory instance after refresh"));
+        }
+        
         self.wasmstore = wasmstore;
         Ok(())
     }

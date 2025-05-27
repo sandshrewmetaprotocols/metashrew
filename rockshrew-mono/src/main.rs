@@ -641,12 +641,11 @@ impl IndexerState {
             let memory_pages = memory.size(&mut runtime.wasmstore);
             
             format!(
-                "Memory size: {} bytes ({:.2} GB, {:.2} MB), Pages: {}, Usage: {:.2}%",
+                "Memory size: {} bytes ({:.2} GB, {:.2} MB), Pages: {}",
                 memory_size,
                 memory_size_gb,
                 memory_size_mb,
-                memory_pages,
-                (memory_size as f64 / 4_294_967_296.0) * 100.0 // Percentage of 4GB limit
+                memory_pages
             )
         } else {
             "Could not access memory instance".to_string()

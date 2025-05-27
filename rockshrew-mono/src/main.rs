@@ -37,6 +37,8 @@ enum BlockResult {
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long)]
+    enable_experimental_cache: bool,
+    #[arg(long)]
     daemon_rpc_url: String,
     #[arg(long)]
     indexer: String,
@@ -664,6 +666,9 @@ impl IndexerState {
     // Helper method to check if memory needs to be refreshed based on its size
     fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>, height: u32) -> bool {
         // Get the memory instance
+        if !self.args.enable_experimental_cache {
+            return true;
+        }
         if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
             // Get the memory size in bytes
             let memory_size = memory.data_size(&mut runtime.wasmstore);

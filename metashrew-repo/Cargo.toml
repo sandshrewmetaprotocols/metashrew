@@ -1,0 +1,49 @@
+[package]
+name = "metashrew-repo"
+version = "0.1.0"
+edition = "2021"
+description = "Repository service for Metashrew fast sync"
+license = "MIT"
+
+[dependencies]
+metashrew-core = { path = "../metashrew-core" }
+metashrew-support = { path = "../metashrew-support" }
+rockshrew-runtime = { path = "../rockshrew-runtime" }
+runtime = { path = "../runtime" }
+
+# Async runtime
+tokio = { version = "1.43.0", features = ["full"] }
+futures = "0.3.30"
+
+# Web server
+actix-web = "4.9.0"
+actix-files = "0.6.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3.3"
+prost = "0.12.3"
+
+# Cryptography
+sha2 = "0.10.8"
+blake2 = "0.10.6"
+
+# Database
+rocksdb = "0.21.0"
+
+# Utilities
+clap = { version = "4.5.26", features = ["derive"] }
+thiserror = "1.0.56"
+anyhow = "1.0.79"
+log = "0.4.20"
+env_logger = "0.10.1"
+hex = "0.4.3"
+
+[lib]
+name = "metashrew_repo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "metashrew-repo"
+path = "src/main.rs"

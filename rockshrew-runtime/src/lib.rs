@@ -1,150 +1,208 @@
-use anyhow::Result;
-use metashrew_runtime::{BatchLike, KeyValueStoreLike};
-use rocksdb::{DB, Options, WriteBatch, WriteBatchIterator};
-use std::sync::{Arc};
+//! RocksDB adapter for Metashrew runtime
+//!
+//! This crate provides a RocksDB adapter for the Metashrew runtime.
 
-const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
+use runtime::{KeyValueStoreLike, BatchLike};
+use std::sync::Arc;
+use rocksdb::{DB, Options, WriteBatch};
 
+mod merkleized_adapter;
+pub use merkleized_adapter::{
+    MerkleizedRocksDBRuntimeAdapter,
+    MerkleizedRocksDBBatch,
+    SparseMerkleTree,
+    Hash,
+};
+
+/// RocksDB adapter for Metashrew runtime
 #[derive(Clone)]
 pub struct RocksDBRuntimeAdapter {
+    /// The underlying RocksDB instance
     pub db: Arc<DB>,
+    /// Current block height
     pub height: u32,
 }
 
-static mut _LABEL: Option<String> = None;
-
-const TIMEOUT: u64 = 1500;
-
-use std::{thread, time};
-
-pub fn wait_timeout() {
-    thread::sleep(time::Duration::from_millis(TIMEOUT));
-}
-
-pub fn set_label(s: String) -> () {
-    unsafe {
-        _LABEL = Some(s + "://");
-    }
-}
-
-#[allow(static_mut_refs)]
-pub fn get_label() -> &'static String {
-    unsafe { _LABEL.as_ref().unwrap() }
-}
-
-#[allow(static_mut_refs)]
-pub fn has_label() -> bool {
-    unsafe { _LABEL.is_some() }
-}
-
-pub fn to_labeled_key(key: &Vec<u8>) -> Vec<u8> {
-    if has_label() {
-        let mut result: Vec<u8> = vec![];
-        result.extend(get_label().as_str().as_bytes());
-        result.extend(key);
-        result
-    } else {
-        key.clone()
-    }
-}
-
-pub async fn query_height(db: Arc<DB>, start_block: u32) -> Result<u32> {
-    let height_key = TIP_HEIGHT_KEY.as_bytes().to_vec();
-    let bytes = match db.get(&to_labeled_key(&height_key))? {
-        Some(v) => v,
-        None => {
-            return Ok(start_block);
-        }
-    };
-    if bytes.len() == 0 {
-        return Ok(start_block);
-    }
-    let bytes_ref: &[u8] = &bytes;
-    Ok(u32::from_le_bytes(bytes_ref.try_into().unwrap()))
+/// Batch operations for RocksDB
+pub struct RocksDBBatch {
+    /// The underlying RocksDB batch
+    batch: WriteBatch,
 }
 
 impl RocksDBRuntimeAdapter {
-    pub fn open_secondary(
-        primary_path: String,
-        secondary_path: String, 
-        opts: rocksdb::Options
-    ) -> Result<Self, rocksdb::Error> {
-        let db = rocksdb::DB::open_as_secondary(&opts, &primary_path, &secondary_path)?;
-        Ok(RocksDBRuntimeAdapter {
-            db: Arc::new(db),
-            height: 0
-        })
-    }
-    pub fn open(path: String, opts: Options) -> Result<RocksDBRuntimeAdapter> {
-        let db = DB::open(&opts, path)?;
-        Ok(RocksDBRuntimeAdapter {
+    /// Create a new RocksDB adapter
+    pub fn new(db_path: &str) -> Result<Self, rocksdb::Error> {
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.set_max_open_files(10000);
+        opts.set_use_fsync(false);
+        opts.set_bytes_per_sync(8388608); // 8MB
+        opts.optimize_for_point_lookup(1024);
+        opts.set_table_cache_num_shard_bits(6);
+        opts.set_max_write_buffer_number(6);
+        opts.set_write_buffer_size(256 * 1024 * 1024);
+        opts.set_target_file_size_base(256 * 1024 * 1024);
+        opts.set_min_write_buffer_number_to_merge(2);
+        opts.set_level_zero_file_num_compaction_trigger(4);
+        opts.set_level_zero_slowdown_writes_trigger(20);
+        opts.set_level_zero_stop_writes_trigger(30);
+        opts.set_max_background_jobs(4);
+        opts.set_max_background_compactions(4);
+        opts.set_disable_auto_compactions(false);
+        
+        let db = DB::open(&opts, db_path)?;
+        
+        Ok(Self {
             db: Arc::new(db),
             height: 0,
         })
     }
-
-    pub fn is_open(&self) -> bool {
-        true // RocksDB doesn't need connection management like Redis
-    }
-    pub fn set_height(&mut self, height: u32) {
-        self.height = height;
-    }
-
-    pub fn clone(&self) -> Self {
-        RocksDBRuntimeAdapter {
-            db: self.db.clone(),
-            height: self.height,
-        }
-    }
-}
-
-pub struct RocksDBBatch(pub WriteBatch);
-
-impl BatchLike for RocksDBBatch {
-    fn default() -> Self {
-        Self(WriteBatch::default())
+    
+    /// Create a new RocksDB adapter with custom options
+    pub fn with_options(db_path: &str, opts: Options) -> Result<Self, rocksdb::Error> {
+        let db = DB::open(&opts, db_path)?;
+        
+        Ok(Self {
+            db: Arc::new(db),
+            height: 0,
+        })
     }
     
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-        self.0.put(to_labeled_key(&k.as_ref().to_vec()), v);
+    /// Open a secondary instance of RocksDB
+    pub fn open_secondary(
+        primary_path: String,
+        secondary_path: String, 
+        opts: Options
+    ) -> Result<Self, rocksdb::Error> {
+        let db = DB::open_as_secondary(&opts, &primary_path, &secondary_path)?;
+        
+        Ok(Self {
+            db: Arc::new(db),
+            height: 0,
+        })
     }
-}
-
-pub struct RocksDBBatchCloner<'a>(&'a mut WriteBatch);
-
-impl<'a> WriteBatchIterator for RocksDBBatchCloner<'a> {
-  fn put(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
-    self.0.put(key.as_ref(), value.as_ref());
-  }
-  fn delete(&mut self, _key: Box<[u8]>) {
-    //no-op
-  }
+    
+    /// Create an iterator over key-value pairs with a prefix
+    pub fn prefix_iterator(&self, prefix: &[u8]) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
+        let prefix = prefix.to_vec();
+        let iter = self.db.prefix_iterator(&prefix);
+        
+        iter.map(|result| {
+            match result {
+                Ok((key, value)) => (key.to_vec(), value.to_vec()),
+                Err(_) => (Vec::new(), Vec::new()),
+            }
+        })
+        .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+    }
 }
 
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
 
-    fn write(&mut self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
-        let height_bytes: Vec<u8> = (self.height + 1).to_le_bytes().to_vec();
-        
-        let mut final_batch = WriteBatch::default();
-        final_batch.put(&to_labeled_key(&key_bytes), &height_bytes);
-        batch.0.iterate(&mut RocksDBBatchCloner(&mut final_batch));
-        
-        self.db.write(final_batch)
+    fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
+        self.db.write(batch.batch)
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.db.get(to_labeled_key(&key.as_ref().to_vec())).map(|opt| opt.map(|v| v.to_vec()))
+        self.db.get(key)
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
-        self.db.delete(to_labeled_key(&key.as_ref().to_vec()))
+        self.db.delete(key)
     }
 
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
-        self.db.put(to_labeled_key(&key.as_ref().to_vec()), value)
+    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>
+    {
+        self.db.put(key, value)
+    }
+}
+
+impl RocksDBBatch {
+    /// Create a new batch
+    pub fn new() -> Self {
+        Self {
+            batch: WriteBatch::default(),
+        }
+    }
+}
+
+impl BatchLike for RocksDBBatch {
+    fn insert<K, V>(&mut self, key: K, value: V)
+    where
+        K: AsRef<[u8]>,
+        V: AsRef<[u8]>,
+    {
+        self.batch.put(key, value);
+    }
+
+    fn remove<K>(&mut self, key: K)
+    where
+        K: AsRef<[u8]>,
+    {
+        self.batch.delete(key);
+    }
+}
+
+impl Default for RocksDBBatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    
+    #[test]
+    fn test_rocksdb_adapter() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().to_str().unwrap();
+        
+        // Create a new adapter
+        let mut adapter = RocksDBRuntimeAdapter::new(db_path).unwrap();
+        
+        // Insert a key-value pair
+        adapter.put(b"test_key", b"test_value").unwrap();
+        
+        // Get the value back
+        let value = adapter.get(b"test_key").unwrap().unwrap();
+        assert_eq!(value, b"test_value");
+        
+        // Delete the key
+        adapter.delete(b"test_key").unwrap();
+        
+        // Value should be gone
+        assert!(adapter.get(b"test_key").unwrap().is_none());
+    }
+    
+    #[test]
+    fn test_rocksdb_batch() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().to_str().unwrap();
+        
+        // Create a new adapter
+        let mut adapter = RocksDBRuntimeAdapter::new(db_path).unwrap();
+        
+        // Create a batch
+        let mut batch = RocksDBBatch::new();
+        
+        // Add some operations
+        batch.insert(b"key1", b"value1");
+        batch.insert(b"key2", b"value2");
+        batch.insert(b"key3", b"value3");
+        
+        // Write the batch
+        adapter.write(batch).unwrap();
+        
+        // Check that all keys were written
+        assert_eq!(adapter.get(b"key1").unwrap().unwrap(), b"value1");
+        assert_eq!(adapter.get(b"key2").unwrap().unwrap(), b"value2");
+        assert_eq!(adapter.get(b"key3").unwrap().unwrap(), b"value3");
     }
 }

@@ -64,6 +64,11 @@ Configuration options:
 - `--port`: JSON-RPC port
 - `--label`: Optional database label
 - `--exit-at`: Optional block height to stop at
+- `--snapshot-interval`: Block interval between automatic snapshots
+- `--snapshot-directory`: Directory to store snapshots
+- `--repo`: URL of snapshot repository to sync from
+- `--pipeline-size`: Size of the processing pipeline (default: auto-determined)
+- `--cors`: CORS allowed origins (e.g., '*' for all origins)
 
 ## Comparing Indexers with rockshrew-diff
 
@@ -200,6 +205,137 @@ The database structure allows:
 - Historical state queries
 - High performance reads/writes
 
+## State Root and Snapshot System
+
+Metashrew implements a robust state verification and snapshot system that enables fast syncing, integrity verification, and static file serving capabilities.
+
+### Sparse Merkle Tree (SMT) for State Roots
+
+Metashrew uses a Sparse Merkle Tree (SMT) implementation to generate cryptographic state roots:
+
+- **State Root Generation**: Each block height has an associated state root hash that represents the entire database state
+- **Hierarchical Structure**: The SMT organizes data in a binary tree with 256-bit paths
+- **Efficient Verification**: Allows proving inclusion/exclusion of specific keys without downloading the entire database
+- **Height-Annotated Values**: Values are annotated with block heights for historical queries
+- **Rollback Support**: The tree structure facilitates chain reorganization handling
+
+The state root can be queried via the `metashrew_stateroot` JSON-RPC method:
+
+```sh
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"metashrew_stateroot","params":["latest"]}'
+```
+
+### Snapshot Mode
+
+Snapshot mode creates point-in-time captures of the database state:
+
+- **Automatic Snapshots**: Created at configurable block intervals
+- **Complete State Capture**: Includes database files, state root, and WASM module hash
+- **Integrity Verification**: Each snapshot includes checksums and state root for verification
+- **Efficient Storage**: Stores only the necessary SST files from RocksDB
+- **WASM Versioning**: Tracks which WASM module was used to build each snapshot
+
+Enable snapshot mode with:
+
+```sh
+./target/release/rockshrew-mono \
+  --daemon-rpc-url http://localhost:8332 \
+  --auth bitcoinrpc:password \
+  --indexer path/to/indexer.wasm \
+  --db-path ~/.metashrew \
+  --snapshot-interval 10000 \
+  --snapshot-directory ~/.metashrew/snapshots
+```
+
+### Repo Mode
+
+Repo mode enables fast syncing from a remote snapshot repository:
+
+- **Fast Initial Sync**: Download pre-built database snapshots instead of processing blocks from scratch
+- **Incremental Updates**: Apply diffs between snapshots to catch up to the latest state
+- **WASM Consistency**: Ensures the correct WASM module is used for each block range
+- **Static File Serving**: Snapshots can be served from static file servers like nginx
+- **Integrity Verification**: Validates state roots and file checksums during sync
+
+Sync from a snapshot repository with:
+
+```sh
+./target/release/rockshrew-mono \
+  --daemon-rpc-url http://localhost:8332 \
+  --auth bitcoinrpc:password \
+  --db-path ~/.metashrew \
+  --repo https://snapshots.example.com/metashrew
+```
+
+### Benefits of the Snapshot System
+
+- **Fast Bootstrapping**: New nodes can sync in minutes instead of days
+- **Verifiable Integrity**: Cryptographic verification of database state
+- **Reduced Resource Usage**: Minimizes CPU, network, and disk I/O during initial sync
+- **Deployment Flexibility**: Snapshots can be hosted on any static file server
+- **WASM Trajectory Tracking**: Maintains history of which WASM modules processed which blocks
+
+### Snapshot Repository Structure
+
+A snapshot repository is a static file structure that can be served by any web server (like nginx). The structure is organized as follows:
+
+```
+snapshot-repo/
+├── metadata.json             # Global metadata about the repository
+├── wasm/                     # WASM module files
+│   ├── <hash1>.wasm          # WASM module identified by hash
+│   └── <hash2>.wasm          # Another WASM module version
+├── snapshots/                # Full database snapshots
+│   ├── <height>-<blockhash>/ # Snapshot directory for specific height
+│   │   ├── metadata.json     # Snapshot metadata (height, state root, etc.)
+│   │   ├── stateroot.json    # State root information
+│   │   └── sst/              # RocksDB SST files
+│   │       ├── <file1>.sst   # Database file
+│   │       └── <file2>.sst   # Database file
+│   └── ...
+└── diffs/                    # Incremental updates between snapshots
+    ├── <start>-<end>/        # Diff from start height to end height
+    │   ├── metadata.json     # Diff metadata
+    │   ├── stateroot.json    # End state root information
+    │   └── diff.bin          # Binary diff data
+    └── ...
+```
+
+The `metadata.json` file at the repository root contains:
+- Index name and version
+- Start block height and hash
+- Latest snapshot height and hash
+- WASM module history with height ranges
+- Current WASM module hash
+
+To create your own snapshot repository:
+
+1. Enable snapshot mode on your indexer
+2. Copy the generated snapshot directory to your web server
+3. Ensure proper MIME types are configured for `.wasm` and `.sst` files
+4. Configure your web server to allow CORS if needed
+
+Example nginx configuration:
+```nginx
+server {
+    listen 80;
+    server_name snapshots.example.com;
+    root /var/www/snapshot-repo;
+
+    location / {
+        autoindex on;
+        add_header Access-Control-Allow-Origin *;
+    }
+
+    types {
+        application/wasm wasm;
+        application/octet-stream sst;
+    }
+}
+```
+
 ## Development Guide
 
 1. Choose your WASM development environment:
@@ -226,11 +362,55 @@ The database structure allows:
    ```
 
 5. Query indexed data:
-   ```sh
-   curl -X POST http://localhost:8080 \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"metashrew_view","params":["viewFunction","inputHex","latest"]}'
-   ```
+    ```sh
+    curl -X POST http://localhost:8080 \
+      -H "Content-Type: application/json" \
+      -d '{"jsonrpc":"2.0","method":"metashrew_view","params":["viewFunction","inputHex","latest"]}'
+    ```
+
+## JSON-RPC API
+
+Metashrew provides a JSON-RPC API for interacting with the indexer:
+
+### Core Methods
+
+- `metashrew_view`: Execute a view function at a specific height
+  ```json
+  {"jsonrpc":"2.0","method":"metashrew_view","params":["viewFunction","inputHex","height"]}
+  ```
+
+- `metashrew_preview`: Execute a view function against a specific block without indexing it
+  ```json
+  {"jsonrpc":"2.0","method":"metashrew_preview","params":["blockHex","viewFunction","inputHex","height"]}
+  ```
+
+- `metashrew_height`: Get the current indexed height
+  ```json
+  {"jsonrpc":"2.0","method":"metashrew_height","params":[]}
+  ```
+
+- `metashrew_getblockhash`: Get the block hash at a specific height
+  ```json
+  {"jsonrpc":"2.0","method":"metashrew_getblockhash","params":[height]}
+  ```
+
+### State Root and Snapshot Methods
+
+- `metashrew_stateroot`: Get the SMT state root at a specific height
+  ```json
+  {"jsonrpc":"2.0","method":"metashrew_stateroot","params":[height]}
+  ```
+  
+  The state root is a 32-byte hash that cryptographically represents the entire database state at the specified height. It can be used to verify the integrity of the database and to validate snapshots.
+
+  Example response:
+  ```json
+  {
+    "id": 1,
+    "result": "0x7a9c5375e7c6916f525d8d091f9e084e9dd6b1506f1a41d2178de0d53f43c30a",
+    "jsonrpc": "2.0"
+  }
+  ```
 
 ## Contributing
 

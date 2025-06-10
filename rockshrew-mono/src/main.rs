@@ -17,6 +17,11 @@ use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 // Import our SMT helper module
 mod smt_helper;
 use smt_helper::SMTHelper;
+
+// Import our snapshot module
+mod snapshot;
+// Removed unused import
+
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Number, Value};
 use std::path::PathBuf;
@@ -78,6 +83,12 @@ struct Args {
     pipeline_size: Option<usize>,
     #[arg(long, help = "CORS allowed origins (e.g., '*' for all origins, or specific domains)")]
     cors: Option<String>,
+    #[arg(long, help = "Interval in blocks between snapshots")]
+    snapshot_interval: Option<u32>,
+    #[arg(long, help = "Directory to store snapshots")]
+    snapshot_directory: Option<PathBuf>,
+    #[arg(long, help = "URL of snapshot repository to sync from (can provide WASM if --indexer is not specified)")]
+    repo: Option<String>,
 }
 
 #[derive(Clone)]
@@ -117,6 +128,7 @@ struct JsonRpcErrorObject {
 
 // JSON-RPC response structure for internal use
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct JsonRpcResponse {
     id: u32,
     result: Option<Value>,
@@ -126,6 +138,7 @@ struct JsonRpcResponse {
 
 // JSON-RPC error structure for internal use
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct JsonRpcErrorInternal {
     code: i32,
     message: String,
@@ -163,6 +176,7 @@ impl error::ResponseError for IndexerError {
 
 // Block count response structure
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct BlockCountResponse {
     id: u32,
     result: Option<u32>,
@@ -171,6 +185,7 @@ struct BlockCountResponse {
 
 // Block hash response structure
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct BlockHashResponse {
     id: u32,
     result: Option<String>,
@@ -485,6 +500,19 @@ impl MetashrewRocksDBSync {
                     debug!("Successfully processed block {}", processed_height);
                     height = processed_height + 1;
                     CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+                    
+                    // Check if we should create a snapshot
+                    if self.should_create_snapshot(height) {
+                        // Get the blockhash for this height
+                        if let Some(block_hash) = self.get_blockhash(height).await {
+                            // Create snapshot
+                            if let Err(e) = self.handle_snapshot(height, &block_hash).await {
+                                error!("Failed to create snapshot at height {}: {}", height, e);
+                            } else {
+                                info!("Created snapshot at height {}", height);
+                            }
+                        }
+                    }
                 },
                 BlockResult::Error(failed_height, error) => {
                     error!("Failed to process block {}: {}", failed_height, error);
@@ -657,6 +685,7 @@ impl MetashrewRocksDBSync {
         Ok(hex::decode(block_hex)?)
     }
 
+    #[allow(dead_code)]
     async fn run(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
         CURRENT_HEIGHT.store(height, Ordering::SeqCst);
@@ -791,6 +820,7 @@ impl MetashrewRocksDBSync {
         false
     }
 
+    #[allow(dead_code)]
     fn set_thread_id_senders(
         &mut self,
         fetcher_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>,
@@ -830,6 +860,7 @@ impl MetashrewRocksDBSync {
         }
     }
     
+    #[allow(dead_code)]
     fn is_fetcher_thread(&self) -> bool {
         match self.fetcher_thread_id.lock() {
             Ok(guard) => {
@@ -843,6 +874,7 @@ impl MetashrewRocksDBSync {
         }
     }
     
+    #[allow(dead_code)]
     fn is_processor_thread(&self) -> bool {
         match self.processor_thread_id.lock() {
             Ok(guard) => {
@@ -1306,6 +1338,16 @@ async fn main() -> Result<()> {
         fetcher_thread_id: std::sync::Mutex::new(None),
         processor_thread_id: std::sync::Mutex::new(None),
     };
+    
+    // If repo URL is provided, sync from snapshot repo
+    if args.repo.is_some() {
+        info!("Syncing from snapshot repo: {}", args.repo.as_ref().unwrap());
+        if let Err(e) = sync.sync_from_snapshot_repo().await {
+            error!("Failed to sync from snapshot repo: {}", e);
+            return Err(anyhow!("Failed to sync from snapshot repo: {}", e));
+        }
+        info!("Successfully synced from snapshot repo");
+    }
     
     // Start the indexer in a separate task
     let indexer_handle = tokio::spawn(async move {

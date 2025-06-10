@@ -1,6 +1,6 @@
 [package]
 name = "rockshrew-mono"
-version = "8.7.3"
+version = "9.0.0"
 edition = "2021"
 
 [dependencies]

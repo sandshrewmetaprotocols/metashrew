@@ -1,6 +1,6 @@
 [package]
 name = "memshrew"
-version = "8.7.3"
+version = "8.8.1"
 edition = "2021"
 
 [dependencies]

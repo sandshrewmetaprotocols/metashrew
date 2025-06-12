@@ -219,11 +219,23 @@ where
     T: Clone + 'static,
 {
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
-        // Configure the engine with default settings
-        let mut async_config = wasmtime::Config::default();
+        // Configure the engine with settings for deterministic execution
+        let mut config = wasmtime::Config::default();
+        // Enable NaN canonicalization for deterministic floating point operations
+        config.cranelift_nan_canonicalization(true);
+        // Make relaxed SIMD deterministic (or disable it if not needed)
+        config.relaxed_simd_deterministic(true);
+        // Allocate memory at maximum size to avoid non-deterministic memory growth
+        config.static_memory_maximum_size(0x100000000); // 4GB max memory
+        config.static_memory_guard_size(0x10000); // 64KB guard
+        // Pre-allocate memory to maximum size
+        config.memory_init_cow(false); // Disable copy-on-write to ensure consistent memory behavior
+        
+        // Configure async engine with the same deterministic settings
+        let mut async_config = config.clone();
         async_config.consume_fuel(true);
         async_config.async_support(true);
-        let config = wasmtime::Config::default();
+        
         let engine = wasmtime::Engine::new(&config)?;
         let async_engine = wasmtime::Engine::new(&async_config)?;
         let module = wasmtime::Module::from_file(&engine, indexer.clone().into_os_string()).context("Failed to load WASM module")?;

@@ -89,6 +89,12 @@ struct Args {
     snapshot_directory: Option<PathBuf>,
     #[arg(long, help = "URL of snapshot repository to sync from (can provide WASM if --indexer is not specified)")]
     repo: Option<String>,
+    #[arg(long, help = "Migrate existing data to the height-indexed BST structure")]
+    migrate_to_bst: bool,
+    #[arg(long, help = "Start height for BST migration (default: 0)")]
+    migrate_start_height: Option<u32>,
+    #[arg(long, help = "End height for BST migration (default: current height)")]
+    migrate_end_height: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -1228,6 +1234,99 @@ async fn handle_jsonrpc(
                 jsonrpc: "2.0".to_string(),
             })),
         }
+    } else if body.method == "metashrew_query" {
+        // Get historical state using the Height-Indexed BST
+        if body.params.len() < 2 {
+            return Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: "Invalid params: requires [key, height]".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            }));
+        }
+        
+        // Parse key parameter
+        let key_hex = match body.params[0].as_str() {
+            Some(s) => s.to_string(),
+            None => {
+                return Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: key must be a hex string".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
+        };
+        
+        // Parse height parameter
+        let height = match &body.params[1] {
+            Value::String(s) if s == "latest" => CURRENT_HEIGHT.load(Ordering::SeqCst),
+            Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+            _ => {
+                return Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: height must be a number or 'latest'".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
+        };
+        
+        // Decode key
+        let key = match hex::decode(key_hex.trim_start_matches("0x")) {
+            Ok(data) => data,
+            Err(e) => {
+                return Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: format!("Invalid hex key: {}", e),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
+        };
+        
+        // Get the value from the Height-Indexed BST
+        let runtime = state.runtime.read().await;
+        let context = runtime.context.lock()
+            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
+        
+        // Create an SMTHelper instance
+        let smt_helper = SMTHelper::new(context.db.db.clone());
+        
+        // Get the value using the SMTHelper
+        match smt_helper.get_value_at_height(&key, height) {
+            Ok(Some(value)) => Ok(HttpResponse::Ok().json(JsonRpcResult {
+                id: body.id,
+                result: format!("0x{}", hex::encode(value)),
+                jsonrpc: "2.0".to_string(),
+            })),
+            Ok(None) => Ok(HttpResponse::Ok().json(JsonRpcResult {
+                id: body.id,
+                result: "0x".to_string(),
+                jsonrpc: "2.0".to_string(),
+            })),
+            Err(e) => Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32000,
+                    message: format!("Failed to get historical state: {}", e),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
+        }
     } else {
         Ok(HttpResponse::Ok().json(JsonRpcError {
             id: body.id,
@@ -1347,6 +1446,40 @@ async fn main() -> Result<()> {
             return Err(anyhow!("Failed to sync from snapshot repo: {}", e));
         }
         info!("Successfully synced from snapshot repo");
+    }
+    
+    // If migrate_to_bst is set, migrate existing data to the height-indexed BST structure
+    if args.migrate_to_bst {
+        info!("Migrating existing data to height-indexed BST structure");
+        
+        // Get the current height
+        let current_height = sync.query_height().await?;
+        
+        // Determine start and end heights for migration
+        let start_height = args.migrate_start_height.unwrap_or(0);
+        let end_height = args.migrate_end_height.unwrap_or(current_height);
+        
+        info!("Migration range: {} to {}", start_height, end_height);
+        
+        // Get the DB from the runtime
+        let db = sync.poll_connection().await?;
+        
+        // Create an SMTHelper instance
+        let smt_helper = SMTHelper::new(db);
+        
+        // Perform the migration
+        if let Err(e) = smt_helper.migrate_to_height_indexed(start_height, end_height) {
+            error!("Failed to migrate data to height-indexed BST: {}", e);
+            return Err(anyhow!("Failed to migrate data to height-indexed BST: {}", e));
+        }
+        
+        info!("Successfully migrated data to height-indexed BST structure");
+        
+        // If --migrate-to-bst is the only flag, exit after migration
+        if args.daemon_rpc_url == "none" {
+            info!("Migration completed, exiting as requested");
+            return Ok(());
+        }
     }
     
     // Start the indexer in a separate task

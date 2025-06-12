@@ -3,12 +3,16 @@ use rocksdb::{DB, WriteBatch};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::collections::HashMap;
+use std::cmp::Ordering;
 
 // Prefixes for different types of keys in the database
 pub const SMT_NODE_PREFIX: &str = "smt:node:";
 pub const SMT_ROOT_PREFIX: &str = "smt:root:";
 pub const SMT_LEAF_PREFIX: &str = "smt:leaf:";
 pub const HEIGHT_INDEX_PREFIX: &str = "smt:height:";
+pub const HEIGHT_TREE_PREFIX: &str = "height_tree:";
+pub const HEIGHT_LIST_SUFFIX: &str = ":heights";
+pub const MODIFIED_KEYS_PREFIX: &str = "modified_keys:";
 
 // Default empty hash (represents empty nodes)
 const EMPTY_NODE_HASH: [u8; 32] = [0; 32];
@@ -268,10 +272,15 @@ impl SMTHelper {
         let mut updates = Vec::new();
         let key_hash = Self::hash_key(key);
         
-        // 1. Store the value with height annotation
+        // 1. Store the value with height annotation (old format)
         let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
         let value_hash = Self::hash_value(value);
         updates.push((value_key, value.to_vec()));
+        
+        // 1.1 Store the value in the height-indexed BST structure
+        let height_indexed_smt = HeightIndexedSMT::new(self.db.clone());
+        let bst_updates = height_indexed_smt.put_with_height(key, value, height)?;
+        updates.extend(bst_updates);
         
         // 2. Create or update the leaf node
         let leaf_key = format!("{}:{}", SMT_LEAF_PREFIX, hex::encode(key_hash)).into_bytes();
@@ -384,6 +393,13 @@ impl SMTHelper {
     /// Get a value at a specific height
     pub fn get_value_at_height(&self, key: &[u8], value_hash: [u8; 32], height: u32) 
         -> Result<Option<Vec<u8>>> {
+        // First try using the height-indexed BST for efficient lookup
+        let height_indexed_smt = HeightIndexedSMT::new(self.db.clone());
+        if let Some(value) = height_indexed_smt.get_at_height(key, height)? {
+            return Ok(Some(value));
+        }
+        
+        // Fall back to the old method if not found in the BST
         // Try to get the value at the exact height first
         let exact_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
         if let Ok(Some(value)) = self.db.get(&exact_key) {
@@ -406,5 +422,359 @@ impl SMTHelper {
             Some(value) => Ok(Some(value)),
             None => Ok(None),
         }
+    }
+    
+    /// Track keys modified at a specific height
+    pub fn track_modified_keys(&self, keys: &[Vec<u8>], height: u32) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut updates = Vec::new();
+        let modified_keys_key = format!("{}:{}", MODIFIED_KEYS_PREFIX, height).into_bytes();
+        
+        // Serialize the list of keys
+        let mut data = Vec::new();
+        for key in keys {
+            // Write key length (4 bytes)
+            data.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            // Write key
+            data.extend_from_slice(key);
+        }
+        
+        updates.push((modified_keys_key, data));
+        Ok(updates)
+    }
+    
+    /// Get keys modified at a specific height
+    pub fn get_keys_modified_at_height(&self, height: u32) -> Result<Vec<Vec<u8>>> {
+        let modified_keys_key = format!("{}:{}", MODIFIED_KEYS_PREFIX, height).into_bytes();
+        
+        match self.db.get(&modified_keys_key)? {
+            Some(data) => {
+                let mut keys = Vec::new();
+                let mut i = 0;
+                
+                while i < data.len() {
+                    if i + 4 <= data.len() {
+                        let mut len_bytes = [0u8; 4];
+                        len_bytes.copy_from_slice(&data[i..i+4]);
+                        let key_len = u32::from_le_bytes(len_bytes) as usize;
+                        i += 4;
+                        
+                        if i + key_len <= data.len() {
+                            keys.push(data[i..i+key_len].to_vec());
+                            i += key_len;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                
+                Ok(keys)
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+    
+    /// Get all keys affected by a reorg
+    pub fn get_keys_affected_by_reorg(&self, fork_height: u32, current_height: u32) -> Result<Vec<Vec<u8>>> {
+        let mut affected_keys = Vec::new();
+        
+        // For each height from fork_height+1 to current_height
+        for height in (fork_height + 1)..=current_height {
+            // Get all keys modified at this height
+            let keys = self.get_keys_modified_at_height(height)?;
+            affected_keys.extend(keys);
+        }
+        
+        // Remove duplicates
+        affected_keys.sort();
+        affected_keys.dedup();
+        
+        Ok(affected_keys)
+    }
+    
+    /// Compute delete updates for a key
+    pub fn compute_delete_updates(&self, key: &[u8], current_root: [u8; 32], height: u32) 
+        -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        // This is a simplified implementation
+        // In a real implementation, we would need to update the SMT to remove the key
+        // For now, we'll just mark the key as deleted at this height
+        let mut updates = Vec::new();
+        let delete_marker = Vec::new(); // Empty value indicates deletion
+        
+        let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
+        updates.push((value_key, delete_marker));
+        
+        // We would also need to update the SMT root
+        // For now, we'll just use the current root
+        let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+        updates.push((root_key, current_root.to_vec()));
+        
+        Ok(updates)
+    }
+}
+/// Height-Indexed Binary Search Tree for efficient historical state queries
+pub struct HeightIndexedSMT {
+    db: Arc<DB>,
+}
+
+impl HeightIndexedSMT {
+    pub fn new(db: Arc<DB>) -> Self {
+        Self { db }
+    }
+    
+    /// Store a value with height indexing
+    pub fn put_with_height(&self, key: &[u8], value: &[u8], height: u32) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut updates = Vec::new();
+        
+        // 1. Store the actual value with height in the key
+        let height_key = format!("{}:{}:{}", 
+            HEIGHT_TREE_PREFIX, 
+            hex::encode(key), 
+            height
+        ).into_bytes();
+        updates.push((height_key, value.to_vec()));
+        
+        // 2. Update the height list for binary search
+        self.update_height_list(&mut updates, key, height)?;
+        
+        // 3. Track this key as modified at this height
+        let smt_helper = SMTHelper::new(self.db.clone());
+        let modified_keys_updates = smt_helper.track_modified_keys(&[key.to_vec()], height)?;
+        updates.extend(modified_keys_updates);
+        
+        Ok(updates)
+    }
+    
+    /// Update the height list for a key
+    fn update_height_list(&self, updates: &mut Vec<(Vec<u8>, Vec<u8>)>, key: &[u8], height: u32) -> Result<()> {
+        let heights_key = format!("{}:{}", hex::encode(key), HEIGHT_LIST_SUFFIX).into_bytes();
+        
+        // Get existing heights
+        let mut heights = match self.db.get(&heights_key)? {
+            Some(data) => {
+                let mut heights = Vec::new();
+                let mut i = 0;
+                while i < data.len() {
+                    if i + 4 <= data.len() {
+                        let mut height_bytes = [0u8; 4];
+                        height_bytes.copy_from_slice(&data[i..i+4]);
+                        heights.push(u32::from_le_bytes(height_bytes));
+                    }
+                    i += 4;
+                }
+                heights
+            },
+            None => Vec::new(),
+        };
+        
+        // Add new height if not already present
+        if !heights.contains(&height) {
+            heights.push(height);
+            heights.sort(); // Keep sorted for binary search
+            
+            // Serialize heights back to bytes
+            let mut data = Vec::with_capacity(heights.len() * 4);
+            for h in heights {
+                data.extend_from_slice(&h.to_le_bytes());
+            }
+            
+            updates.push((heights_key, data));
+        }
+        
+        Ok(())
+    }
+    
+    /// Get a value at a specific height using binary search
+    pub fn get_at_height(&self, key: &[u8], target_height: u32) -> Result<Option<Vec<u8>>> {
+        // 1. Get the height list
+        let heights_key = format!("{}:{}", hex::encode(key), HEIGHT_LIST_SUFFIX).into_bytes();
+        
+        let heights = match self.db.get(&heights_key)? {
+            Some(data) => {
+                let mut heights = Vec::new();
+                let mut i = 0;
+                while i < data.len() {
+                    if i + 4 <= data.len() {
+                        let mut height_bytes = [0u8; 4];
+                        height_bytes.copy_from_slice(&data[i..i+4]);
+                        heights.push(u32::from_le_bytes(height_bytes));
+                    }
+                    i += 4;
+                }
+                heights
+            },
+            None => return Ok(None), // No history for this key
+        };
+        
+        // 2. Binary search for the closest height less than or equal to target_height
+        let closest_height = match heights.binary_search_by(|&h| {
+            if h <= target_height {
+                Ordering::Less
+            } else {
+                Ordering::Greater
+            }
+        }) {
+            Ok(idx) => heights[idx],
+            Err(idx) => {
+                if idx == 0 {
+                    return Ok(None); // No value before target_height
+                }
+                heights[idx - 1] // Get the closest height less than target_height
+            }
+        };
+        
+        // 3. Get the value at the closest height
+        let height_key = format!("{}:{}:{}", 
+            HEIGHT_TREE_PREFIX, 
+            hex::encode(key), 
+            closest_height
+        ).into_bytes();
+        
+        self.db.get(&height_key).map_err(|e| anyhow!(e))
+    }
+    
+    /// Migrate existing data to the height-indexed structure
+    pub fn migrate_data(&self, start_height: u32, end_height: u32) -> Result<()> {
+        let smt_helper = SMTHelper::new(self.db.clone());
+        let mut batch = WriteBatch::default();
+        
+        // For each height
+        for height in start_height..=end_height {
+            // Get all keys modified at this height
+            let modified_keys_key = format!("{}:{}", HEIGHT_INDEX_PREFIX, height).into_bytes();
+            
+            if let Ok(Some(keys_data)) = self.db.get(&modified_keys_key) {
+                let mut i = 0;
+                let mut modified_keys = Vec::new();
+                
+                while i < keys_data.len() {
+                    if i + 4 <= keys_data.len() {
+                        let mut len_bytes = [0u8; 4];
+                        len_bytes.copy_from_slice(&keys_data[i..i+4]);
+                        let key_len = u32::from_le_bytes(len_bytes) as usize;
+                        i += 4;
+                        
+                        if i + key_len <= keys_data.len() {
+                            let key = keys_data[i..i+key_len].to_vec();
+                            modified_keys.push(key.clone());
+                            
+                            // Get the value at this height
+                            let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(&key), height).into_bytes();
+                            
+                            if let Ok(Some(value)) = self.db.get(&value_key) {
+                                // Store in the new format
+                                let updates = self.put_with_height(&key, &value, height)?;
+                                
+                                for (update_key, update_value) in updates {
+                                    batch.put(&update_key, &update_value);
+                                }
+                            }
+                            
+                            i += key_len;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                
+                // Track modified keys in the new format
+                let modified_keys_updates = smt_helper.track_modified_keys(&modified_keys, height)?;
+                for (update_key, update_value) in modified_keys_updates {
+                    batch.put(&update_key, &update_value);
+                }
+            }
+        }
+        
+        // Apply all changes
+        self.db.write(batch)?;
+        
+        Ok(())
+    }
+    
+    /// Roll back to a specific height during reorg
+    pub fn rollback_to_height(&self, fork_height: u32, current_height: u32) -> Result<()> {
+        let smt_helper = SMTHelper::new(self.db.clone());
+        
+        // Get all keys affected by the reorg
+        let affected_keys = smt_helper.get_keys_affected_by_reorg(fork_height, current_height)?;
+        
+        let mut batch = WriteBatch::default();
+        
+        // For each affected key
+        for key in &affected_keys {
+            // Get the value at the fork height
+            let fork_value = match self.get_at_height(key, fork_height)? {
+                Some(value) => value,
+                None => Vec::new(), // Key didn't exist at fork height
+            };
+            
+            // Update the SMT with the fork height value
+            let fork_root = smt_helper.get_smt_root_at_height(fork_height)?;
+            
+            // Compute SMT updates to restore the state
+            let updates = if fork_value.is_empty() {
+                // Key didn't exist at fork height, so remove it
+                smt_helper.compute_delete_updates(key, fork_root, fork_height)?
+            } else {
+                // Key existed with a different value, restore it
+                smt_helper.compute_smt_updates(key, &fork_value, fork_root, fork_height)?
+            };
+            
+            // Apply the updates to the batch
+            for (update_key, update_value) in updates {
+                batch.put(&update_key, &update_value);
+            }
+            
+            // Update the height list to mark this key as not modified after fork_height
+            let heights_key = format!("{}:{}", hex::encode(key), HEIGHT_LIST_SUFFIX).into_bytes();
+            
+            if let Some(heights_data) = self.db.get(&heights_key)? {
+                let mut heights = Vec::new();
+                let mut i = 0;
+                
+                while i < heights_data.len() {
+                    if i + 4 <= heights_data.len() {
+                        let mut height_bytes = [0u8; 4];
+                        height_bytes.copy_from_slice(&heights_data[i..i+4]);
+                        let height = u32::from_le_bytes(height_bytes);
+                        
+                        // Only keep heights up to fork_height
+                        if height <= fork_height {
+                            heights.push(height);
+                        }
+                        
+                        i += 4;
+                    } else {
+                        break;
+                    }
+                }
+                
+                // Serialize heights back to bytes
+                let mut new_heights_data = Vec::with_capacity(heights.len() * 4);
+                for h in heights {
+                    new_heights_data.extend_from_slice(&h.to_le_bytes());
+                }
+                
+                batch.put(&heights_key, &new_heights_data);
+            }
+        }
+        
+        // Delete height index entries for heights > fork_height
+        for height in (fork_height + 1)..=current_height {
+            let modified_keys_key = format!("{}:{}", MODIFIED_KEYS_PREFIX, height).into_bytes();
+            batch.delete(&modified_keys_key);
+            
+            // Delete the stateroot for this height
+            let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+            batch.delete(&root_key);
+        }
+        
+        // Apply all changes atomically
+        self.db.write(batch)?;
+        
+        Ok(())
     }
 }

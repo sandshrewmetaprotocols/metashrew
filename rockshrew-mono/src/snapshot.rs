@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use log::{info, warn};
+use log::{info, warn, error};
 use rocksdb::{checkpoint::Checkpoint, DB, Options, WriteBatch};
 use serde_json::{json, Value};
 use std::fs::{self, File};
@@ -176,55 +176,155 @@ impl SnapshotManager {
         runtime: &Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
         wasm_path: &Path,
     ) -> Result<()> {
-        info!("Creating snapshot at height {}", height);
+        info!("Creating snapshot at height {} with block hash {}", height, hex::encode(block_hash));
+        info!("Using WASM path: {}", wasm_path.display());
+        info!("Snapshot directory: {}", self.snapshot_directory.display());
         
         // Store WASM file and get hash
-        let wasm_hash = self.store_wasm_file(wasm_path)?;
+        info!("Storing WASM file from {}", wasm_path.display());
+        let wasm_hash = match self.store_wasm_file(wasm_path) {
+            Ok(hash) => {
+                info!("WASM file stored successfully with hash: {}", hash);
+                hash
+            },
+            Err(e) => {
+                error!("Failed to store WASM file: {}", e);
+                return Err(e);
+            }
+        };
         
         // Update WASM history
-        self.update_wasm_history(height, &wasm_hash)?;
+        info!("Updating WASM history for height {} with hash {}", height, wasm_hash);
+        if let Err(e) = self.update_wasm_history(height, &wasm_hash) {
+            error!("Failed to update WASM history: {}", e);
+            return Err(e);
+        }
         
         // Create snapshot directory
         let snapshot_dir = self.snapshot_directory.join(SNAPSHOTS_DIR)
             .join(format!("{}-{}", height, hex::encode(block_hash)));
         
-        fs::create_dir_all(&snapshot_dir)?;
+        info!("Creating snapshot directory: {}", snapshot_dir.display());
+        if let Err(e) = fs::create_dir_all(&snapshot_dir) {
+            error!("Failed to create snapshot directory: {}", e);
+            return Err(anyhow!("Failed to create snapshot directory: {}", e));
+        }
         
         // Create RocksDB checkpoint
+        info!("Acquiring RocksDB instance from runtime");
         let db = {
-            let runtime_guard = runtime.read().await;
-            let context = runtime_guard.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+            let runtime_guard = match runtime.read().await {
+                guard => {
+                    info!("Acquired read lock on runtime");
+                    guard
+                }
+            };
+            
+            let context = match runtime_guard.context.lock() {
+                Ok(ctx) => {
+                    info!("Acquired lock on context");
+                    ctx
+                },
+                Err(e) => {
+                    error!("Failed to lock context: {}", e);
+                    return Err(anyhow!("Failed to lock context: {}", e));
+                }
+            };
+            
+            info!("Got RocksDB instance from context");
             context.db.db.clone()
         };
         
-        let checkpoint = Checkpoint::new(&db)?;
+        info!("Creating RocksDB checkpoint");
+        let checkpoint = match Checkpoint::new(&db) {
+            Ok(cp) => cp,
+            Err(e) => {
+                error!("Failed to create RocksDB checkpoint: {}", e);
+                return Err(anyhow!("Failed to create RocksDB checkpoint: {}", e));
+            }
+        };
+        
         let checkpoint_path = snapshot_dir.join("checkpoint");
-        checkpoint.create_checkpoint(checkpoint_path.as_path())?;
+        info!("Creating checkpoint at: {}", checkpoint_path.display());
+        if let Err(e) = checkpoint.create_checkpoint(checkpoint_path.as_path()) {
+            error!("Failed to create checkpoint: {}", e);
+            return Err(anyhow!("Failed to create checkpoint: {}", e));
+        }
+        info!("Checkpoint created successfully");
         
         // Get state root
+        info!("Getting state root at height {}", height);
         let smt_helper = SMTHelper::new(db.clone());
-        let state_root = smt_helper.get_smt_root_at_height(height)?;
+        let state_root = match smt_helper.get_smt_root_at_height(height) {
+            Ok(root) => {
+                info!("Got state root: {}", hex::encode(&root));
+                root
+            },
+            Err(e) => {
+                error!("Failed to get state root: {}", e);
+                return Err(e);
+            }
+        };
         
         // Extract SST files
         let sst_dir = snapshot_dir.join("sst");
-        fs::create_dir_all(&sst_dir)?;
+        info!("Creating SST directory: {}", sst_dir.display());
+        if let Err(e) = fs::create_dir_all(&sst_dir) {
+            error!("Failed to create SST directory: {}", e);
+            return Err(anyhow!("Failed to create SST directory: {}", e));
+        }
         
         // Move SST files from checkpoint to sst directory
+        info!("Moving SST files from checkpoint to SST directory");
         let mut sst_files = Vec::new();
-        for entry in fs::read_dir(&checkpoint_path)? {
-            let entry = entry?;
+        let entries = match fs::read_dir(&checkpoint_path) {
+            Ok(entries) => entries,
+            Err(e) => {
+                error!("Failed to read checkpoint directory: {}", e);
+                return Err(anyhow!("Failed to read checkpoint directory: {}", e));
+            }
+        };
+        
+        for entry_result in entries {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    error!("Failed to read directory entry: {}", e);
+                    return Err(anyhow!("Failed to read directory entry: {}", e));
+                }
+            };
+            
             let path = entry.path();
             
             if path.is_file() && path.extension().map_or(false, |ext| ext == "sst") {
                 let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+                info!("Processing SST file: {}", file_name);
+                
                 let target_path = sst_dir.join(&file_name);
                 
                 // Get file size and checksum
-                let file_size = fs::metadata(&path)?.len();
-                let file_checksum = self.compute_file_checksum(&path)?;
+                let file_size = match fs::metadata(&path) {
+                    Ok(meta) => meta.len(),
+                    Err(e) => {
+                        error!("Failed to get metadata for file {}: {}", path.display(), e);
+                        return Err(anyhow!("Failed to get metadata for file {}: {}", path.display(), e));
+                    }
+                };
+                
+                let file_checksum = match self.compute_file_checksum(&path) {
+                    Ok(checksum) => checksum,
+                    Err(e) => {
+                        error!("Failed to compute checksum for file {}: {}", path.display(), e);
+                        return Err(e);
+                    }
+                };
                 
                 // Copy the file
-                fs::copy(&path, &target_path)?;
+                info!("Copying SST file from {} to {}", path.display(), target_path.display());
+                if let Err(e) = fs::copy(&path, &target_path) {
+                    error!("Failed to copy SST file: {}", e);
+                    return Err(anyhow!("Failed to copy SST file: {}", e));
+                }
                 
                 // Add to sst_files list
                 sst_files.push(json!({
@@ -235,10 +335,17 @@ impl SnapshotManager {
             }
         }
         
+        info!("Processed {} SST files", sst_files.len());
+        
         // Clean up checkpoint directory
-        fs::remove_dir_all(&checkpoint_path)?;
+        info!("Cleaning up checkpoint directory");
+        if let Err(e) = fs::remove_dir_all(&checkpoint_path) {
+            error!("Failed to clean up checkpoint directory: {}", e);
+            return Err(anyhow!("Failed to clean up checkpoint directory: {}", e));
+        }
         
         // Generate metadata
+        info!("Generating snapshot metadata");
         let metadata = json!({
             "height": height,
             "block_hash": hex::encode(block_hash),
@@ -251,28 +358,77 @@ impl SnapshotManager {
         });
         
         // Write metadata to file
-        let metadata_file = File::create(snapshot_dir.join(METADATA_FILENAME))?;
-        serde_json::to_writer_pretty(metadata_file, &metadata)?;
+        let metadata_path = snapshot_dir.join(METADATA_FILENAME);
+        info!("Writing snapshot metadata to {}", metadata_path.display());
+        let metadata_file = match File::create(&metadata_path) {
+            Ok(file) => file,
+            Err(e) => {
+                error!("Failed to create metadata file: {}", e);
+                return Err(anyhow!("Failed to create metadata file: {}", e));
+            }
+        };
+        
+        if let Err(e) = serde_json::to_writer_pretty(metadata_file, &metadata) {
+            error!("Failed to write metadata: {}", e);
+            return Err(anyhow!("Failed to write metadata: {}", e));
+        }
         
         // Write state root to file
-        let stateroot_file = File::create(snapshot_dir.join(STATEROOT_FILENAME))?;
-        serde_json::to_writer_pretty(stateroot_file, &json!({
+        let stateroot_path = snapshot_dir.join(STATEROOT_FILENAME);
+        info!("Writing state root to {}", stateroot_path.display());
+        let stateroot_file = match File::create(&stateroot_path) {
+            Ok(file) => file,
+            Err(e) => {
+                error!("Failed to create state root file: {}", e);
+                return Err(anyhow!("Failed to create state root file: {}", e));
+            }
+        };
+        
+        if let Err(e) = serde_json::to_writer_pretty(stateroot_file, &json!({
             "height": height,
             "state_root": hex::encode(state_root)
-        }))?;
+        })) {
+            error!("Failed to write state root: {}", e);
+            return Err(anyhow!("Failed to write state root: {}", e));
+        }
         
         // Update global metadata with latest snapshot height
-        let metadata_path = self.snapshot_directory.join(METADATA_FILENAME);
+        let global_metadata_path = self.snapshot_directory.join(METADATA_FILENAME);
+        info!("Updating global metadata at {}", global_metadata_path.display());
+        
         let mut global_metadata: Value = {
-            let metadata_file = File::open(&metadata_path)?;
-            serde_json::from_reader(metadata_file)?
+            let metadata_file = match File::open(&global_metadata_path) {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("Failed to open global metadata file: {}", e);
+                    return Err(anyhow!("Failed to open global metadata file: {}", e));
+                }
+            };
+            
+            match serde_json::from_reader(metadata_file) {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    error!("Failed to parse global metadata: {}", e);
+                    return Err(anyhow!("Failed to parse global metadata: {}", e));
+                }
+            }
         };
         
         global_metadata["latest_snapshot_height"] = json!(height);
         global_metadata["latest_snapshot_hash"] = json!(hex::encode(block_hash));
         
-        let metadata_file = File::create(&metadata_path)?;
-        serde_json::to_writer_pretty(metadata_file, &global_metadata)?;
+        let metadata_file = match File::create(&global_metadata_path) {
+            Ok(file) => file,
+            Err(e) => {
+                error!("Failed to create global metadata file: {}", e);
+                return Err(anyhow!("Failed to create global metadata file: {}", e));
+            }
+        };
+        
+        if let Err(e) = serde_json::to_writer_pretty(metadata_file, &global_metadata) {
+            error!("Failed to write global metadata: {}", e);
+            return Err(anyhow!("Failed to write global metadata: {}", e));
+        }
         
         info!("Snapshot created successfully at height {}", height);
         Ok(())
@@ -746,44 +902,77 @@ impl MetashrewRocksDBSync {
     /// Check if a snapshot should be created at the current height
     pub fn should_create_snapshot(&self, height: u32) -> bool {
         if let Some(snapshot_interval) = self.args.snapshot_interval {
-            height % snapshot_interval == 0
+            if snapshot_interval == 0 {
+                info!("Snapshot interval is 0, snapshots are disabled");
+                return false;
+            }
+            
+            let should_create = height % snapshot_interval == 0;
+            info!("Checking if snapshot should be created at height {}: {} % {} == 0? {}",
+                  height, height, snapshot_interval, should_create);
+            should_create
         } else {
+            info!("No snapshot interval configured, snapshots are disabled");
             false
         }
     }
     
     /// Handle snapshot creation at the specified height
     pub async fn handle_snapshot(&mut self, height: u32, block_hash: &[u8]) -> Result<()> {
+        info!("Starting snapshot creation process for height {}", height);
+        
         // Check if snapshot directory is configured
         let snapshot_directory = match &self.args.snapshot_directory {
-            Some(dir) => dir.clone(),
-            None => return Err(anyhow!("Snapshot directory not configured")),
+            Some(dir) => {
+                info!("Using snapshot directory: {}", dir.display());
+                dir.clone()
+            },
+            None => {
+                error!("Snapshot directory not configured");
+                return Err(anyhow!("Snapshot directory not configured"));
+            },
         };
         
         // Get the WASM path
         let wasm_path = self.args.indexer.clone();
+        info!("Using WASM path: {}", wasm_path.display());
         
         // Create snapshot manager
         let snapshot_interval = self.args.snapshot_interval.unwrap_or(0);
+        info!("Creating snapshot manager with interval: {}", snapshot_interval);
+        
         let snapshot_manager = SnapshotManager::new(
-            snapshot_directory,
+            snapshot_directory.clone(),
             snapshot_interval,
             self.args.repo.clone(),
             Some(wasm_path.clone()),
         );
         
         // Initialize snapshot directory structure
-        snapshot_manager.initialize()?;
+        info!("Initializing snapshot directory structure at {}", snapshot_directory.display());
+        if let Err(e) = snapshot_manager.initialize() {
+            error!("Failed to initialize snapshot directory: {}", e);
+            return Err(e);
+        }
+        info!("Snapshot directory initialized successfully");
         
         // Create snapshot
-        snapshot_manager.create_snapshot(
+        info!("Creating snapshot for height {} with block hash {}", height, hex::encode(block_hash));
+        match snapshot_manager.create_snapshot(
             height,
             block_hash,
             &self.runtime,
             &wasm_path,
-        ).await?;
-        
-        Ok(())
+        ).await {
+            Ok(_) => {
+                info!("Snapshot created successfully for height {}", height);
+                Ok(())
+            },
+            Err(e) => {
+                error!("Failed to create snapshot for height {}: {}", height, e);
+                Err(e)
+            }
+        }
     }
     
     /// Sync from snapshot repository

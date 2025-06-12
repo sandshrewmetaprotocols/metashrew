@@ -504,21 +504,35 @@ impl MetashrewRocksDBSync {
             match result {
                 BlockResult::Success(processed_height) => {
                     debug!("Successfully processed block {}", processed_height);
-                    height = processed_height + 1;
-                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
                     
-                    // Check if we should create a snapshot
-                    if self.should_create_snapshot(height) {
+                    // Check if we should create a snapshot for the block we just processed
+                    info!("Checking if snapshot should be created at height {}, snapshot_interval: {:?}",
+                          processed_height, self.args.snapshot_interval);
+                    
+                    if self.should_create_snapshot(processed_height) {
+                        info!("Snapshot should be created at height {}", processed_height);
+                        
                         // Get the blockhash for this height
-                        if let Some(block_hash) = self.get_blockhash(height).await {
-                            // Create snapshot
-                            if let Err(e) = self.handle_snapshot(height, &block_hash).await {
-                                error!("Failed to create snapshot at height {}: {}", height, e);
-                            } else {
-                                info!("Created snapshot at height {}", height);
+                        match self.get_blockhash(processed_height).await {
+                            Some(block_hash) => {
+                                info!("Got blockhash for height {}: {}", processed_height, hex::encode(&block_hash));
+                                
+                                // Create snapshot
+                                if let Err(e) = self.handle_snapshot(processed_height, &block_hash).await {
+                                    error!("Failed to create snapshot at height {}: {}", processed_height, e);
+                                } else {
+                                    info!("Created snapshot at height {}", processed_height);
+                                }
+                            },
+                            None => {
+                                error!("Failed to get blockhash for height {}, cannot create snapshot", processed_height);
                             }
                         }
                     }
+                    
+                    // Update height for next block
+                    height = processed_height + 1;
+                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
                 },
                 BlockResult::Error(failed_height, error) => {
                     error!("Failed to process block {}: {}", failed_height, error);

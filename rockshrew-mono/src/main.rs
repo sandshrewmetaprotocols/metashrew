@@ -352,62 +352,54 @@ impl MetashrewRocksDBSync {
                 debug!("Successfully processed block {}", height);
                 
                 // Store the blockhash for this height to ensure it's available for future queries
-                if let Ok(mut context) = runtime.context.lock() {
-                    if let Ok(Some(_blockhash)) = context.db.get(&format!("{}{}",
-                        HEIGHT_TO_HASH, height).into_bytes()) {
-                        debug!("Verified blockhash is stored for block {}", height);
-                    } else {
-                        debug!("Blockhash not found for block {}, will be fetched if needed", height);
+                // Check if blockhash is stored
+                {
+                    if let Ok(mut context) = runtime.context.lock() {
+                        if let Ok(Some(_blockhash)) = context.db.get(&format!("{}{}",
+                            HEIGHT_TO_HASH, height).into_bytes()) {
+                            debug!("Verified blockhash is stored for block {}", height);
+                        } else {
+                            debug!("Blockhash not found for block {}, will be fetched if needed", height);
+                        }
                     }
+                }
+                
+                // For snapshot handling, we'll use a simpler approach
+                // If this block is a snapshot point, we'll create a snapshot
+                if self.should_create_snapshot(height) {
+                    info!("Creating snapshot at height {}", height);
                     
-                    // For snapshot handling, we'll use a simpler approach
-                    // If this block is a snapshot point, we'll create a snapshot
-                    if self.should_create_snapshot(height) {
-                        info!("Creating snapshot at height {}", height);
+                    // Get the snapshot manager
+                    if let Some(snapshot_dir) = &self.args.snapshot_directory {
+                        let snapshot_manager = snapshot::SnapshotManager::new(
+                            snapshot_dir.clone(),
+                            self.args.snapshot_interval.unwrap_or(0),
+                            self.args.repo.clone(),
+                            Some(self.args.indexer.clone()),
+                        );
                         
-                        // Get the snapshot manager
-                        if let Some(snapshot_dir) = &self.args.snapshot_directory {
-                            let snapshot_manager = snapshot::SnapshotManager::new(
-                                snapshot_dir.clone(),
-                                self.args.snapshot_interval.unwrap_or(0),
-                                self.args.repo.clone(),
-                                Some(self.args.indexer.clone()),
-                            );
-                            
-                            // Create a snapshot or diff based on the latest snapshot
-                            let latest_snapshot_height = self.find_latest_snapshot_height(snapshot_dir.clone()).await;
-                            
-                            if let Some(prev_height) = latest_snapshot_height {
-                                // Get the previous snapshot's block hash
-                                if let Some(prev_block_hash) = self.get_blockhash(prev_height).await {
-                                    // Create a diff between the previous snapshot and current state
-                                    info!("Creating diff from height {} to {}", prev_height, height);
-                                    
-                                    if let Err(e) = snapshot_manager.create_simple_diff(
-                                        prev_height,
-                                        &prev_block_hash,
-                                        height,
-                                        &self.get_blockhash(height).await.unwrap_or_default(),
-                                        &self.runtime
-                                    ).await {
-                                        error!("Failed to create diff: {}", e);
-                                    }
-                                } else {
-                                    // Fall back to full snapshot if we can't get the previous block hash
-                                    info!("Creating full snapshot at height {}", height);
-                                    
-                                    if let Err(e) = snapshot_manager.create_snapshot(
-                                        height,
-                                        &self.get_blockhash(height).await.unwrap_or_default(),
-                                        &self.runtime,
-                                        &self.args.indexer
-                                    ).await {
-                                        error!("Failed to create snapshot: {}", e);
-                                    }
+                        // Create a snapshot or diff based on the latest snapshot
+                        // Note: This is now outside the mutex lock scope
+                        let latest_snapshot_height = self.find_latest_snapshot_height(snapshot_dir.clone()).await;
+                        
+                        if let Some(prev_height) = latest_snapshot_height {
+                            // Get the previous snapshot's block hash
+                            if let Some(prev_block_hash) = self.get_blockhash(prev_height).await {
+                                // Create a diff between the previous snapshot and current state
+                                info!("Creating diff from height {} to {}", prev_height, height);
+                                
+                                if let Err(e) = snapshot_manager.create_simple_diff(
+                                    prev_height,
+                                    &prev_block_hash,
+                                    height,
+                                    &self.get_blockhash(height).await.unwrap_or_default(),
+                                    &self.runtime
+                                ).await {
+                                    error!("Failed to create diff: {}", e);
                                 }
                             } else {
-                                // No previous snapshot, create a full one
-                                info!("Creating first full snapshot at height {}", height);
+                                // Fall back to full snapshot if we can't get the previous block hash
+                                info!("Creating full snapshot at height {}", height);
                                 
                                 if let Err(e) = snapshot_manager.create_snapshot(
                                     height,
@@ -417,6 +409,18 @@ impl MetashrewRocksDBSync {
                                 ).await {
                                     error!("Failed to create snapshot: {}", e);
                                 }
+                            }
+                        } else {
+                            // No previous snapshot, create a full one
+                            info!("Creating first full snapshot at height {}", height);
+                            
+                            if let Err(e) = snapshot_manager.create_snapshot(
+                                height,
+                                &self.get_blockhash(height).await.unwrap_or_default(),
+                                &self.runtime,
+                                &self.args.indexer
+                            ).await {
+                                error!("Failed to create snapshot: {}", e);
                             }
                         }
                     }

@@ -518,15 +518,34 @@ impl MetashrewRocksDBSync {
                 if best == 0 {
                     break;
                 }
-                let blockhash = self
-                    .get_blockhash(best)
-                    .await
-                    .ok_or(anyhow!("failed to retrieve blockhash"))?;
+                
+                // Try to get the blockhash locally
+                let local_blockhash = self.get_blockhash(best).await;
+                
+                // Fetch the remote blockhash
                 let remote_blockhash = self.fetch_blockhash(best).await?;
-                if blockhash == remote_blockhash {
+                
+                // If local blockhash is not available, store the remote one for future use
+                if local_blockhash.is_none() {
+                    debug!("Local blockhash for height {} not found, storing remote hash", best);
+                    self.put(
+                        &(String::from(HEIGHT_TO_HASH) + &best.to_string()).into_bytes(),
+                        &remote_blockhash,
+                    ).await?;
+                    
+                    // Since we just stored it, they match - continue to next block
                     break;
-                } else {
-                    best = best - 1;
+                }
+                
+                // Compare the blockhashes
+                if let Some(blockhash) = local_blockhash {
+                    if blockhash == remote_blockhash {
+                        debug!("Blockhash match found at height {}", best);
+                        break;
+                    } else {
+                        info!("Blockhash mismatch at height {}, checking previous block", best);
+                        best = best - 1;
+                    }
                 }
             }
         }

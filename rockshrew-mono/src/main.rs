@@ -13,6 +13,7 @@ use num_cpus;
 use rand::Rng;
 use rocksdb::Options;
 use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
+use sha2::Digest;
 
 // Import our SMT helper module
 mod smt_helper;
@@ -330,6 +331,47 @@ impl MetashrewRocksDBSync {
                         debug!("Verified blockhash is stored for block {}", height);
                     } else {
                         debug!("Blockhash not found for block {}, will be fetched if needed", height);
+                    }
+                    
+                    // Compute and store the SMT root for this block
+                    let db = context.db.db.clone();
+                    drop(context); // Release the lock before async operations
+                    
+                    // Create an SMTHelper instance
+                    let smt_helper = SMTHelper::new(db.clone());
+                    
+                    // Get the previous root (if any)
+                    let prev_height = if height > 0 { height - 1 } else { 0 };
+                    let prev_root = match smt_helper.get_smt_root_at_height(prev_height) {
+                        Ok(root) => root,
+                        Err(e) => {
+                            error!("Failed to get previous SMT root: {}", e);
+                            [0u8; 32] // Use empty root if previous can't be found
+                        }
+                    };
+                    
+                    // Compute a new root based on the current block height
+                    // This is a simplified approach - in a full implementation, we would track all DB changes
+                    let mut hasher = sha2::Sha256::new();
+                    hasher.update(&prev_root);
+                    hasher.update(&height.to_le_bytes());
+                    
+                    // Add block hash to the state root calculation if available
+                    if let Ok(Some(blockhash)) = db.get(&format!("{}{}",
+                        HEIGHT_TO_HASH, height).into_bytes()) {
+                        hasher.update(&blockhash);
+                    }
+                    
+                    // Finalize the new root
+                    let mut new_root = [0u8; 32];
+                    new_root.copy_from_slice(&hasher.finalize());
+                    
+                    // Store the new root for this height
+                    let root_key = format!("{}:{}", "smt:root:", height).into_bytes();
+                    if let Err(e) = db.put(&root_key, &new_root) {
+                        error!("Failed to store SMT root for height {}: {}", height, e);
+                    } else {
+                        info!("Stored SMT root for height {}: {}", height, hex::encode(&new_root));
                     }
                 }
                 

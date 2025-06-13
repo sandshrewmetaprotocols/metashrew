@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-runtime"
-version = "8.8.1"
+version = "8.8.2"
 edition = "2021"
 build = "build.rs"
 

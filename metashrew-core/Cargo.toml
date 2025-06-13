@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-core"
-version = "8.8.1"
+version = "8.8.2"
 description = "metashrew indexer bindings"
 repository = "https://github.com/sandshrewmetaprotocols/metashrew"
 license = "MIT"

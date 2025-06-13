@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-support"
-version = "8.8.1"
+version = "8.8.2"
 edition = "2021"
 description = "Support library for Metashrew indexers"
 license = "MIT"

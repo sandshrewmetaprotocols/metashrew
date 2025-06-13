@@ -13,6 +13,10 @@ use num_cpus;
 use rand::Rng;
 use rocksdb::Options;
 use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
+
+// Import our SMT helper module
+mod smt_helper;
+use smt_helper::SMTHelper;
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Number, Value};
 use std::path::PathBuf;
@@ -1163,6 +1167,49 @@ async fn handle_jsonrpc(
                 error: JsonRpcErrorObject {
                     code: -32000,
                     message: "Block hash not found".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
+        }
+    } else if body.method == "metashrew_stateroot" {
+        // Get the stateroot from the SMT adapter
+        let height = match &body.params[0] {
+            Value::String(s) if s == "latest" => CURRENT_HEIGHT.load(Ordering::SeqCst),
+            Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+            _ => {
+                return Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: height must be a number or 'latest'".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
+        };
+        
+        // Get the stateroot from the SMT adapter
+        let runtime = state.runtime.read().await;
+        let context = runtime.context.lock()
+            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
+        
+        // Create an SMTHelper instance
+        let smt_helper = SMTHelper::new(context.db.db.clone());
+        
+        // Get the stateroot using the SMTHelper
+        match smt_helper.get_smt_root_at_height(height) {
+            Ok(root) => Ok(HttpResponse::Ok().json(JsonRpcResult {
+                id: body.id,
+                result: format!("0x{}", hex::encode(root)),
+                jsonrpc: "2.0".to_string(),
+            })),
+            Err(e) => Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32000,
+                    message: format!("Failed to get stateroot: {}", e),
                     data: None,
                 },
                 jsonrpc: "2.0".to_string(),

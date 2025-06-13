@@ -19,13 +19,14 @@ const STATEROOT_FILENAME: &str = "stateroot.json";
 const WASM_DIR: &str = "wasm";
 const SNAPSHOTS_DIR: &str = "snapshots";
 const DIFFS_DIR: &str = "diffs";
+const CHANGES_TRACKER_PREFIX: &str = "changes_tracker:";
 
 /// Snapshot manager for Metashrew
 pub struct SnapshotManager {
     snapshot_directory: PathBuf,
     snapshot_interval: u32,
     _repo_url: Option<String>,
-    _current_wasm_path: Option<PathBuf>,
+    current_wasm_path: Option<PathBuf>,
 }
 
 impl SnapshotManager {
@@ -40,7 +41,7 @@ impl SnapshotManager {
             snapshot_directory,
             snapshot_interval,
             _repo_url: repo_url,
-            _current_wasm_path: current_wasm_path,
+            current_wasm_path: current_wasm_path,
         }
     }
 
@@ -441,24 +442,82 @@ impl SnapshotManager {
         Ok(format!("sha256:placeholder_checksum_{}", file_size))
     }
 
-    /// Create a diff between two snapshots using RocksDB APIs
-    #[allow(dead_code)]
+    /// Track changes between blocks for efficient diff creation
+    pub fn track_block_changes(&self, height: u32, db: &Arc<DB>, keys: &[Vec<u8>]) -> Result<()> {
+        info!("Tracking changes for block height {}", height);
+        
+        // Create a key for storing the changes at this height
+        let changes_key = format!("{}:{}", CHANGES_TRACKER_PREFIX, height).into_bytes();
+        
+        // Serialize the list of changed keys
+        let mut data = Vec::new();
+        for key in keys {
+            // Write key length (4 bytes)
+            data.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            // Write key
+            data.extend_from_slice(key);
+        }
+        
+        // Store the changes in the database
+        db.put(&changes_key, &data)?;
+        
+        info!("Tracked {} changed keys for height {}", keys.len(), height);
+        Ok(())
+    }
+    
+    /// Get tracked changes for a specific height range
+    pub fn get_tracked_changes(&self, db: &Arc<DB>, start_height: u32, end_height: u32) -> Result<Vec<Vec<u8>>> {
+        info!("Getting tracked changes from height {} to {}", start_height, end_height);
+        
+        let mut all_changed_keys = Vec::new();
+        
+        // Collect changes for each height in the range
+        for height in start_height..=end_height {
+            let changes_key = format!("{}:{}", CHANGES_TRACKER_PREFIX, height).into_bytes();
+            
+            if let Some(data) = db.get(&changes_key)? {
+                let mut i = 0;
+                
+                while i < data.len() {
+                    if i + 4 <= data.len() {
+                        let mut len_bytes = [0u8; 4];
+                        len_bytes.copy_from_slice(&data[i..i+4]);
+                        let key_len = u32::from_le_bytes(len_bytes) as usize;
+                        i += 4;
+                        
+                        if i + key_len <= data.len() {
+                            all_changed_keys.push(data[i..i+key_len].to_vec());
+                            i += key_len;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Remove duplicates (if a key was changed multiple times, we only need the latest value)
+        all_changed_keys.sort();
+        all_changed_keys.dedup();
+        
+        info!("Found {} unique changed keys between heights {} and {}",
+              all_changed_keys.len(), start_height, end_height);
+        
+        Ok(all_changed_keys)
+    }
+
+    /// Create a diff between two snapshots using tracked changes
     pub async fn create_diff(
         &self,
         start_height: u32,
         start_block_hash: &[u8],
         end_height: u32,
         end_block_hash: &[u8],
-        _runtime: &Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
+        runtime: &Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
     ) -> Result<()> {
-        info!("Creating diff from height {} to {}", start_height, end_height);
-        
-        // Get the snapshot directories
-        let start_snapshot_dir = self.snapshot_directory.join(SNAPSHOTS_DIR)
-            .join(format!("{}-{}", start_height, hex::encode(start_block_hash)));
-        
-        let end_snapshot_dir = self.snapshot_directory.join(SNAPSHOTS_DIR)
-            .join(format!("{}-{}", end_height, hex::encode(end_block_hash)));
+        info!("Creating efficient diff from height {} to {}", start_height, end_height);
         
         // Create diff directory
         let diff_dir = self.snapshot_directory.join(DIFFS_DIR)
@@ -466,142 +525,219 @@ impl SnapshotManager {
         
         fs::create_dir_all(&diff_dir)?;
         
-        // Get state roots
-        let start_stateroot_path = start_snapshot_dir.join(STATEROOT_FILENAME);
-        let end_stateroot_path = end_snapshot_dir.join(STATEROOT_FILENAME);
-        
-        let start_stateroot: Value = {
-            let file = File::open(&start_stateroot_path)?;
-            serde_json::from_reader(file)?
+        // Get the database from the runtime
+        let db = {
+            let runtime_guard = runtime.read().await;
+            let context = runtime_guard.context.lock()
+                .map_err(|_| anyhow!("Failed to lock context"))?;
+            context.db.db.clone()
         };
         
-        let end_stateroot: Value = {
-            let file = File::open(&end_stateroot_path)?;
-            serde_json::from_reader(file)?
-        };
+        // Get the state roots
+        let smt_helper = SMTHelper::new(db.clone());
+        let start_state_root = smt_helper.get_smt_root_at_height(start_height)?;
+        let end_state_root = smt_helper.get_smt_root_at_height(end_height)?;
         
-        // Get WASM hash from end snapshot metadata
-        let end_metadata_path = end_snapshot_dir.join(METADATA_FILENAME);
-        let end_metadata: Value = {
-            let file = File::open(&end_metadata_path)?;
-            serde_json::from_reader(file)?
-        };
+        // Get the WASM hash for the end height
+        let wasm_path = self.current_wasm_path
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing WASM path"))?;
+        let wasm_hash = self.compute_wasm_hash(&wasm_path)?;
         
-        let wasm_hash = end_metadata["wasm_hash"].as_str()
-            .ok_or_else(|| anyhow!("Missing wasm_hash in end snapshot metadata"))?;
+        // Get tracked changes between start_height and end_height
+        let changed_keys = self.get_tracked_changes(&db, start_height + 1, end_height)?;
         
-        // Check if WASM changed between snapshots
-        let start_metadata_path = start_snapshot_dir.join(METADATA_FILENAME);
-        let start_metadata: Value = {
-            let file = File::open(&start_metadata_path)?;
-            serde_json::from_reader(file)?
-        };
-        
-        let start_wasm_hash = start_metadata["wasm_hash"].as_str()
-            .ok_or_else(|| anyhow!("Missing wasm_hash in start snapshot metadata"))?;
-        
-        let wasm_changed = start_wasm_hash != wasm_hash;
-        
-        // Create temporary RocksDB instances for both snapshots
-        let start_opts = Options::default();
-        let start_db = DB::open_for_read_only(&start_opts, start_snapshot_dir.join("sst"), false)?;
-        
-        let end_opts = Options::default();
-        let end_db = DB::open_for_read_only(&end_opts, end_snapshot_dir.join("sst"), false)?;
-        
-        // Compute diff between the two DBs
+        // Create a batch for the diff
+        let mut diff_batch = WriteBatch::default();
         let mut keys_added = 0;
         let mut keys_modified = 0;
         let mut keys_deleted = 0;
         
-        // Create a batch for the diff
-        let mut diff_batch = WriteBatch::default();
-        
-        // First, find all keys in end_db and check if they're different from start_db
-        let mut iter = end_db.raw_iterator();
-        iter.seek_to_first();
-        
-        while iter.valid() {
-            let key = iter.key().ok_or_else(|| anyhow!("Invalid key in end_db"))?;
-            let value = iter.value().ok_or_else(|| anyhow!("Invalid value in end_db"))?;
-            
-            match start_db.get(key) {
-                Ok(Some(start_value)) => {
-                    // Key exists in both DBs, check if values are different
-                    if start_value != value {
-                        // Value changed
-                        diff_batch.put(key, value);
-                        keys_modified += 1;
+        // Process each changed key
+        for key in &changed_keys {
+            // Get the current value (at end_height)
+            match db.get(key)? {
+                Some(value) => {
+                    // Check if the key existed at start_height
+                    let start_value = smt_helper.get_value_at_height(key, start_height)?;
+                    
+                    match start_value {
+                        Some(_) => {
+                            // Key existed before, so it was modified
+                            diff_batch.put(key, &value);
+                            keys_modified += 1;
+                        },
+                        None => {
+                            // Key didn't exist before, so it was added
+                            diff_batch.put(key, &value);
+                            keys_added += 1;
+                        }
                     }
                 },
-                Ok(None) => {
-                    // Key only exists in end_db (added)
-                    diff_batch.put(key, value);
-                    keys_added += 1;
-                },
-                Err(e) => return Err(anyhow!("Error reading from start_db: {}", e)),
-            }
-            
-            iter.next();
-        }
-        
-        // Now find keys that exist in start_db but not in end_db (deleted)
-        let mut iter = start_db.raw_iterator();
-        iter.seek_to_first();
-        
-        while iter.valid() {
-            let key = iter.key().ok_or_else(|| anyhow!("Invalid key in start_db"))?;
-            
-            match end_db.get(key) {
-                Ok(None) => {
-                    // Key only exists in start_db (deleted)
+                None => {
+                    // Key doesn't exist at end_height but was tracked as changed,
+                    // so it must have been deleted
                     diff_batch.delete(key);
                     keys_deleted += 1;
-                },
-                Ok(Some(_)) => {
-                    // Key exists in both DBs, already handled above
-                },
-                Err(e) => return Err(anyhow!("Error reading from end_db: {}", e)),
+                }
             }
-            
-            iter.next();
         }
         
         // Serialize the diff batch
         let diff_data = diff_batch.data();
         
-        // Store the diff without compression
-        let diff_path = diff_dir.join("diff.bin");
+        // Compress the diff data using zstd
+        let compressed_data = zstd::encode_all(&diff_data[..], 3)?;
+        
+        // Store the compressed diff
+        let diff_path = diff_dir.join("diff.bin.zst");
         let mut diff_file = File::create(&diff_path)?;
-        diff_file.write_all(diff_data)?;
+        diff_file.write_all(&compressed_data)?;
         
         // Generate metadata
         let metadata = json!({
             "start_height": start_height,
             "start_block_hash": hex::encode(start_block_hash),
-            "start_state_root": start_stateroot["state_root"],
+            "start_state_root": hex::encode(start_state_root),
             "end_height": end_height,
             "end_block_hash": hex::encode(end_block_hash),
-            "end_state_root": end_stateroot["state_root"],
-            "timestamp": "2025-06-10T00:00:00Z",
+            "end_state_root": hex::encode(end_state_root),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
             "diff_size_bytes": fs::metadata(&diff_path)?.len(),
-            "compression": "none",
+            "original_size_bytes": diff_data.len(),
+            "compression": "zstd",
+            "compression_level": 3,
             "keys_modified": keys_modified,
             "keys_added": keys_added,
             "keys_deleted": keys_deleted,
             "wasm_hash": wasm_hash,
-            "wasm_changed": wasm_changed
+            "total_changed_keys": changed_keys.len()
         });
         
         // Write metadata to file
         let metadata_file = File::create(diff_dir.join(METADATA_FILENAME))?;
         serde_json::to_writer_pretty(metadata_file, &metadata)?;
         
-        // Copy state root file
-        fs::copy(end_stateroot_path, diff_dir.join(STATEROOT_FILENAME))?;
+        // Write state root file
+        let stateroot_file = File::create(diff_dir.join(STATEROOT_FILENAME))?;
+        serde_json::to_writer_pretty(stateroot_file, &json!({
+            "height": end_height,
+            "state_root": hex::encode(end_state_root)
+        }))?;
         
-        info!("Diff created successfully from height {} to {}", start_height, end_height);
-        info!("Keys added: {}, modified: {}, deleted: {}", keys_added, keys_modified, keys_deleted);
+        info!("Efficient diff created successfully from height {} to {}", start_height, end_height);
+        info!("Keys added: {}, modified: {}, deleted: {}, total unique changes: {}",
+              keys_added, keys_modified, keys_deleted, changed_keys.len());
+        info!("Original size: {} bytes, compressed size: {} bytes",
+              diff_data.len(), fs::metadata(&diff_path)?.len());
+        
+        Ok(())
+    }
+    
+    /// Create a simple diff between two snapshots by dumping the entire database state
+    pub async fn create_simple_diff(
+        &self,
+        start_height: u32,
+        start_block_hash: &[u8],
+        end_height: u32,
+        end_block_hash: &[u8],
+        runtime: &Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
+    ) -> Result<()> {
+        info!("Creating simple diff from height {} to {}", start_height, end_height);
+        
+        // Create diff directory
+        let diff_dir = self.snapshot_directory.join(DIFFS_DIR)
+            .join(format!("{}-{}", start_height, end_height));
+        
+        fs::create_dir_all(&diff_dir)?;
+        
+        // Get the database from the runtime
+        let db = {
+            let runtime_guard = runtime.read().await;
+            let context = runtime_guard.context.lock()
+                .map_err(|_| anyhow!("Failed to lock context"))?;
+            context.db.db.clone()
+        };
+        
+        // Get the state roots
+        let smt_helper = SMTHelper::new(db.clone());
+        let start_state_root = smt_helper.get_smt_root_at_height(start_height)?;
+        let end_state_root = smt_helper.get_smt_root_at_height(end_height)?;
+        
+        // Get the WASM hash for the end height
+        let wasm_path = self.current_wasm_path
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing WASM path"))?;
+        let wasm_hash = self.compute_wasm_hash(&wasm_path)?;
+        
+        // Create a binary format to store all key-value pairs
+        // Format: [key_length (4 bytes)][key][value_length (4 bytes)][value]...
+        let mut diff_data = Vec::new();
+        let mut key_count = 0;
+        
+        // Iterate through all keys in the database
+        let iter = db.iterator(rocksdb::IteratorMode::Start);
+        for item in iter {
+            if let Ok((key, value)) = item {
+                // Skip internal keys
+                if key.starts_with(b"/__INTERNAL/") {
+                    continue;
+                }
+                
+                // Write key length (4 bytes)
+                diff_data.extend_from_slice(&(key.len() as u32).to_le_bytes());
+                // Write key
+                diff_data.extend_from_slice(&key);
+                // Write value length (4 bytes)
+                diff_data.extend_from_slice(&(value.len() as u32).to_le_bytes());
+                // Write value
+                diff_data.extend_from_slice(&value);
+                
+                key_count += 1;
+            }
+        }
+        
+        // Compress the diff data using zstd
+        let compressed_data = zstd::encode_all(&diff_data[..], 3)?;
+        
+        // Store the compressed diff
+        let diff_path = diff_dir.join("diff.bin.zst");
+        let mut diff_file = File::create(&diff_path)?;
+        diff_file.write_all(&compressed_data)?;
+        
+        // Generate metadata
+        let metadata = json!({
+            "start_height": start_height,
+            "start_block_hash": hex::encode(start_block_hash),
+            "start_state_root": hex::encode(start_state_root),
+            "end_height": end_height,
+            "end_block_hash": hex::encode(end_block_hash),
+            "end_state_root": hex::encode(end_state_root),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "diff_size_bytes": fs::metadata(&diff_path)?.len(),
+            "original_size_bytes": diff_data.len(),
+            "compression": "zstd",
+            "compression_level": 3,
+            "format": "simple_kv",
+            "key_count": key_count,
+            "wasm_hash": wasm_hash
+        });
+        
+        // Write metadata to file
+        let metadata_file = File::create(diff_dir.join(METADATA_FILENAME))?;
+        serde_json::to_writer_pretty(metadata_file, &metadata)?;
+        
+        // Write state root file
+        let stateroot_file = File::create(diff_dir.join(STATEROOT_FILENAME))?;
+        serde_json::to_writer_pretty(stateroot_file, &json!({
+            "height": end_height,
+            "state_root": hex::encode(end_state_root)
+        }))?;
+        
+        info!("Simple diff created successfully from height {} to {}", start_height, end_height);
+        info!("Total keys: {}", key_count);
+        info!("Original size: {} bytes, compressed size: {} bytes",
+              diff_data.len(), fs::metadata(&diff_path)?.len());
         
         Ok(())
     }
@@ -744,29 +880,96 @@ impl SnapshotManager {
         let metadata_path = temp_dir.join(METADATA_FILENAME);
         self.download_file(&metadata_url, &metadata_path).await?;
         
-        // Parse metadata (using underscore prefix to avoid unused variable warning)
-        let _metadata: Value = {
+        // Parse metadata
+        let metadata: Value = {
             let file = File::open(&metadata_path)?;
             serde_json::from_reader(file)?
         };
         
-        // Download diff file
-        let diff_url = format!("{}/diffs/{}-{}/diff.bin", repo_url, start_height, end_height);
-        let diff_path = temp_dir.join("diff.bin");
+        // Check compression format
+        let compression = metadata["compression"].as_str().unwrap_or("none");
+        
+        // Check diff format
+        let format = metadata["format"].as_str().unwrap_or("writebatch");
+        info!("Diff format: {}", format);
+        
+        // Download diff file (check if it's compressed)
+        let diff_filename = if compression == "zstd" {
+            "diff.bin.zst"
+        } else {
+            "diff.bin"
+        };
+        
+        let diff_url = format!("{}/diffs/{}-{}/{}", repo_url, start_height, end_height, diff_filename);
+        let diff_path = temp_dir.join(diff_filename);
         self.download_file(&diff_url, &diff_path).await?;
         
-        // Read the diff data
-        let mut diff_file = File::open(&diff_path)?;
-        let mut diff_data = Vec::new();
-        diff_file.read_to_end(&mut diff_data)?;
+        // Read and decompress the diff data if needed
+        let diff_data = if compression == "zstd" {
+            let compressed_data = fs::read(&diff_path)?;
+            zstd::decode_all(compressed_data.as_slice())?
+        } else {
+            let mut diff_file = File::open(&diff_path)?;
+            let mut diff_data = Vec::new();
+            diff_file.read_to_end(&mut diff_data)?;
+            diff_data
+        };
         
         // Open the DB
         let opts = Options::default();
         let db = DB::open(&opts, db_path)?;
         
-        // Apply the diff
-        let batch = WriteBatch::from_data(&diff_data);
-        db.write(batch)?;
+        // Apply the diff based on format
+        if format == "simple_kv" {
+            info!("Applying diff using simple KV format");
+            let mut batch = WriteBatch::default();
+            let mut i = 0;
+            let mut key_count = 0;
+            
+            // Parse the simple KV format: [key_length (4 bytes)][key][value_length (4 bytes)][value]...
+            while i + 8 <= diff_data.len() {
+                // Read key length (4 bytes)
+                let mut key_len_bytes = [0u8; 4];
+                key_len_bytes.copy_from_slice(&diff_data[i..i+4]);
+                let key_len = u32::from_le_bytes(key_len_bytes) as usize;
+                i += 4;
+                
+                if i + key_len + 4 <= diff_data.len() {
+                    // Read key
+                    let key = diff_data[i..i+key_len].to_vec();
+                    i += key_len;
+                    
+                    // Read value length (4 bytes)
+                    let mut val_len_bytes = [0u8; 4];
+                    val_len_bytes.copy_from_slice(&diff_data[i..i+4]);
+                    let val_len = u32::from_le_bytes(val_len_bytes) as usize;
+                    i += 4;
+                    
+                    if i + val_len <= diff_data.len() {
+                        // Read value
+                        let value = diff_data[i..i+val_len].to_vec();
+                        i += val_len;
+                        
+                        // Add to batch
+                        batch.put(&key, &value);
+                        key_count += 1;
+                    } else {
+                        return Err(anyhow!("Invalid diff data format: value truncated"));
+                    }
+                } else {
+                    return Err(anyhow!("Invalid diff data format: key truncated"));
+                }
+            }
+            
+            // Write the batch to the DB
+            db.write(batch)?;
+            info!("Applied {} key-value pairs from simple KV format", key_count);
+        } else {
+            // Default to WriteBatch format
+            info!("Applying diff using WriteBatch format");
+            let batch = WriteBatch::from_data(&diff_data);
+            db.write(batch)?;
+        }
         
         // Download state root file
         let stateroot_url = format!("{}/diffs/{}-{}/stateroot.json", repo_url, start_height, end_height);
@@ -786,8 +989,9 @@ impl SnapshotManager {
             .ok_or_else(|| anyhow!("Missing state_root in stateroot file"))?;
         
         if hex::encode(actual_state_root) != expected_state_root {
-            warn!("State root mismatch after applying diff: expected {}, got {}", 
+            warn!("State root mismatch after applying diff: expected {}, got {}",
                 expected_state_root, hex::encode(actual_state_root));
+            return Err(anyhow!("State root verification failed after applying diff"));
         } else {
             info!("State root verified successfully after applying diff");
         }
@@ -807,6 +1011,120 @@ impl SnapshotManager {
         db_path: &Path,
     ) -> Result<PathBuf> {
         info!("Syncing from repo: {}", repo_url);
+        
+        // Download index.json first to get a complete picture of available snapshots and diffs
+        let index_url = format!("{}/index.json", repo_url);
+        let index_path = PathBuf::from("./temp_index.json");
+        
+        info!("Downloading index file from {}", index_url);
+        match self.download_file(&index_url, &index_path).await {
+            Ok(_) => info!("Index file downloaded successfully"),
+            Err(e) => {
+                // If index.json doesn't exist, fall back to metadata.json
+                warn!("Failed to download index.json: {}, falling back to metadata.json", e);
+                return self.sync_from_repo_legacy(repo_url, start_block, db_path).await;
+            }
+        };
+        
+        // Parse index
+        let index: Value = {
+            let file = File::open(&index_path)?;
+            serde_json::from_reader(file)?
+        };
+        
+        // Get current WASM hash from index
+        let current_wasm_hash = index["current_wasm_hash"].as_str()
+            .ok_or_else(|| anyhow!("Missing current_wasm_hash in index"))?;
+        
+        // Download the WASM file
+        info!("Downloading WASM file with hash: {}", current_wasm_hash);
+        let wasm_path = self.get_wasm_from_repo(repo_url, current_wasm_hash).await?;
+        
+        // Find best snapshot to start from
+        let _repo_start_block = index["start_block_height"].as_u64().unwrap_or(0) as u32;
+        let latest_snapshot_height = index["latest_snapshot_height"].as_u64().unwrap_or(0) as u32;
+        
+        // Get all available snapshots from the index
+        let snapshots = index["snapshots"].as_array()
+            .ok_or_else(|| anyhow!("Missing snapshots array in index"))?;
+        
+        // Find the best snapshot to start from
+        let mut best_snapshot: Option<&Value> = None;
+        let mut best_snapshot_height: u32 = 0;
+        
+        for snapshot in snapshots {
+            let snapshot_height = snapshot["height"].as_u64().unwrap_or(0) as u32;
+            
+            // Find the highest snapshot that's <= our target start_block
+            if snapshot_height <= start_block && snapshot_height > best_snapshot_height {
+                best_snapshot = Some(snapshot);
+                best_snapshot_height = snapshot_height;
+            }
+        }
+        
+        // If we couldn't find a suitable snapshot, use the earliest one
+        if best_snapshot.is_none() {
+            for snapshot in snapshots {
+                let snapshot_height = snapshot["height"].as_u64().unwrap_or(0) as u32;
+                
+                if best_snapshot.is_none() || snapshot_height < best_snapshot_height {
+                    best_snapshot = Some(snapshot);
+                    best_snapshot_height = snapshot_height;
+                }
+            }
+        }
+        
+        let best_snapshot = best_snapshot
+            .ok_or_else(|| anyhow!("No snapshots available in the repository"))?;
+        
+        let snapshot_height = best_snapshot["height"].as_u64().unwrap_or(0) as u32;
+        let snapshot_hash = best_snapshot["block_hash"].as_str()
+            .ok_or_else(|| anyhow!("Missing block_hash in snapshot"))?;
+        
+        info!("Selected snapshot at height {} with hash {}", snapshot_height, snapshot_hash);
+        
+        // Apply the snapshot
+        self.apply_snapshot(repo_url, snapshot_height, snapshot_hash, db_path).await?;
+        
+        // Get all available diffs from the index
+        let diffs = index["diffs"].as_array()
+            .ok_or_else(|| anyhow!("Missing diffs array in index"))?;
+        
+        // Sort diffs by start_height
+        let mut sorted_diffs: Vec<&Value> = diffs.iter().collect();
+        sorted_diffs.sort_by(|a, b| {
+            let a_height = a["start_height"].as_u64().unwrap_or(0);
+            let b_height = b["start_height"].as_u64().unwrap_or(0);
+            a_height.cmp(&b_height)
+        });
+        
+        // Apply diffs in sequence to reach the target height
+        let mut current_height = snapshot_height;
+        
+        for diff in sorted_diffs {
+            let diff_start_height = diff["start_height"].as_u64().unwrap_or(0) as u32;
+            let diff_end_height = diff["end_height"].as_u64().unwrap_or(0) as u32;
+            
+            // Only apply diffs that start at our current height and don't exceed our target
+            if diff_start_height == current_height && diff_end_height <= latest_snapshot_height {
+                info!("Applying diff from height {} to {}", diff_start_height, diff_end_height);
+                self.apply_diff(repo_url, diff_start_height, diff_end_height, db_path).await?;
+                current_height = diff_end_height;
+            }
+        }
+        
+        info!("Sync completed successfully from repo: {} to height {}", repo_url, current_height);
+        Ok(wasm_path)
+    }
+    
+    /// Legacy sync method using metadata.json (for backward compatibility)
+    pub async fn sync_from_repo_legacy(
+        &self,
+        repo_url: &str,
+        start_block: u32,
+        db_path: &Path,
+    ) -> Result<PathBuf> {
+        info!("Syncing from repo using legacy method: {}", repo_url);
         
         // Download global metadata
         let metadata_url = format!("{}/metadata.json", repo_url);
@@ -843,7 +1161,6 @@ impl SnapshotManager {
         } else {
             // Find the closest snapshot
             // For now, just use the latest snapshot
-            // In a more sophisticated implementation, we would find the closest snapshot
             (latest_snapshot_height, latest_snapshot_hash.to_string())
         };
         
@@ -956,23 +1273,156 @@ impl MetashrewRocksDBSync {
         }
         info!("Snapshot directory initialized successfully");
         
-        // Create snapshot
-        info!("Creating snapshot for height {} with block hash {}", height, hex::encode(block_hash));
-        match snapshot_manager.create_snapshot(
-            height,
-            block_hash,
-            &self.runtime,
-            &wasm_path,
-        ).await {
-            Ok(_) => {
-                info!("Snapshot created successfully for height {}", height);
-                Ok(())
+        // Find the latest snapshot height
+        let latest_snapshot_height = self.find_latest_snapshot_height(snapshot_directory.clone()).await;
+        
+        // Determine if we need to create a full snapshot or just a diff
+        let create_full_snapshot = match latest_snapshot_height {
+            None => {
+                info!("No previous snapshots found, creating first full snapshot");
+                true
             },
-            Err(e) => {
-                error!("Failed to create snapshot for height {}: {}", height, e);
-                Err(e)
+            Some(prev_height) => {
+                // Check if this is a major snapshot (e.g., every 100 blocks)
+                // This ensures we have periodic full snapshots for reliability
+                let major_snapshot_interval = snapshot_interval * 10;
+                if major_snapshot_interval > 0 && height % major_snapshot_interval == 0 {
+                    info!("Creating major snapshot at height {} (every {} blocks)",
+                          height, major_snapshot_interval);
+                    true
+                } else {
+                    info!("Previous snapshot found at height {}, will create diff", prev_height);
+                    false
+                }
+            }
+        };
+        
+        if create_full_snapshot {
+            // Create full snapshot
+            info!("Creating full snapshot for height {} with block hash {}",
+                  height, hex::encode(block_hash));
+            
+            match snapshot_manager.create_snapshot(
+                height,
+                block_hash,
+                &self.runtime,
+                &wasm_path,
+            ).await {
+                Ok(_) => {
+                    info!("Full snapshot created successfully for height {}", height);
+                },
+                Err(e) => {
+                    error!("Failed to create full snapshot for height {}: {}", height, e);
+                    return Err(e);
+                }
+            }
+        } else {
+            // We have a previous snapshot, so create a diff
+            let prev_height = latest_snapshot_height.unwrap();
+            
+            // Get the previous snapshot's block hash
+            if let Some(prev_block_hash) = self.get_blockhash(prev_height).await {
+                info!("Found previous snapshot at height {} with block hash {}",
+                      prev_height, hex::encode(&prev_block_hash));
+                
+                // Create diff between previous and current snapshot
+                info!("Creating diff from height {} to {}", prev_height, height);
+                match snapshot_manager.create_diff(
+                    prev_height,
+                    &prev_block_hash,
+                    height,
+                    block_hash,
+                    &self.runtime,
+                ).await {
+                    Ok(_) => {
+                        info!("Diff created successfully from height {} to {}", prev_height, height);
+                    },
+                    Err(e) => {
+                        error!("Failed to create diff from height {} to {}: {}",
+                               prev_height, height, e);
+                        
+                        // If diff creation fails, fall back to creating a full snapshot
+                        warn!("Falling back to creating full snapshot");
+                        match snapshot_manager.create_snapshot(
+                            height,
+                            block_hash,
+                            &self.runtime,
+                            &wasm_path,
+                        ).await {
+                            Ok(_) => {
+                                info!("Fallback full snapshot created successfully for height {}", height);
+                            },
+                            Err(e) => {
+                                error!("Failed to create fallback snapshot for height {}: {}", height, e);
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+            } else {
+                warn!("Could not find block hash for previous height {}, creating full snapshot",
+                      prev_height);
+                
+                // Create full snapshot as fallback
+                match snapshot_manager.create_snapshot(
+                    height,
+                    block_hash,
+                    &self.runtime,
+                    &wasm_path,
+                ).await {
+                    Ok(_) => {
+                        info!("Fallback snapshot created successfully for height {}", height);
+                    },
+                    Err(e) => {
+                        error!("Failed to create fallback snapshot for height {}: {}", height, e);
+                        return Err(e);
+                    }
+                }
             }
         }
+        
+        // Update global metadata with latest snapshot height
+        let global_metadata_path = snapshot_directory.join(METADATA_FILENAME);
+        if global_metadata_path.exists() {
+            let mut global_metadata: Value = {
+                let metadata_file = match File::open(&global_metadata_path) {
+                    Ok(file) => file,
+                    Err(e) => {
+                        error!("Failed to open global metadata file: {}", e);
+                        return Err(anyhow!("Failed to open global metadata file: {}", e));
+                    }
+                };
+                
+                match serde_json::from_reader(metadata_file) {
+                    Ok(metadata) => metadata,
+                    Err(e) => {
+                        error!("Failed to parse global metadata: {}", e);
+                        return Err(anyhow!("Failed to parse global metadata: {}", e));
+                    }
+                }
+            };
+            
+            global_metadata["latest_snapshot_height"] = json!(height);
+            global_metadata["latest_snapshot_hash"] = json!(hex::encode(block_hash));
+            
+            let metadata_file = match File::create(&global_metadata_path) {
+                Ok(file) => file,
+                Err(e) => {
+                    error!("Failed to create global metadata file: {}", e);
+                    return Err(anyhow!("Failed to create global metadata file: {}", e));
+                }
+            };
+            
+            if let Err(e) = serde_json::to_writer_pretty(metadata_file, &global_metadata) {
+                error!("Failed to write global metadata: {}", e);
+                return Err(anyhow!("Failed to write global metadata: {}", e));
+            }
+        }
+        
+        // Create or update index.json file for static serving
+        self.update_index_file(snapshot_directory).await?;
+        
+        Ok(())
     }
     
     /// Sync from snapshot repository
@@ -1011,6 +1461,244 @@ impl MetashrewRocksDBSync {
         // We would need to update the runtime with the new WASM here
         // This would require additional implementation
         
+        Ok(())
+    }
+    
+    /// Find the latest snapshot height
+    pub async fn find_latest_snapshot_height(&self, snapshot_directory: PathBuf) -> Option<u32> {
+        info!("Finding latest snapshot height");
+        
+        // Check global metadata first
+        let global_metadata_path = snapshot_directory.join(METADATA_FILENAME);
+        if global_metadata_path.exists() {
+            match File::open(&global_metadata_path) {
+                Ok(file) => {
+                    match serde_json::from_reader::<_, Value>(file) {
+                        Ok(metadata) => {
+                            if let Some(height) = metadata["latest_snapshot_height"].as_u64() {
+                                info!("Found latest snapshot height in global metadata: {}", height);
+                                return Some(height as u32);
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Failed to parse global metadata: {}", e);
+                        }
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to open global metadata file: {}", e);
+                }
+            }
+        }
+        
+        // If global metadata doesn't have the information, scan the snapshots directory
+        let snapshots_dir = snapshot_directory.join(SNAPSHOTS_DIR);
+        if !snapshots_dir.exists() {
+            info!("Snapshots directory doesn't exist");
+            return None;
+        }
+        
+        let mut latest_height = None;
+        
+        match fs::read_dir(&snapshots_dir) {
+            Ok(entries) => {
+                for entry_result in entries {
+                    match entry_result {
+                        Ok(entry) => {
+                            let path = entry.path();
+                            
+                            if path.is_dir() {
+                                // Parse the directory name to get height
+                                let dir_name = path.file_name().unwrap().to_string_lossy().to_string();
+                                let parts: Vec<&str> = dir_name.split('-').collect();
+                                
+                                if parts.len() == 2 {
+                                    if let Ok(height) = parts[0].parse::<u32>() {
+                                        // Update latest height if this is higher
+                                        if latest_height.is_none() || height > latest_height.unwrap() {
+                                            latest_height = Some(height);
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            warn!("Failed to read directory entry: {}", e);
+                        }
+                    }
+                }
+            },
+            Err(e) => {
+                warn!("Failed to read snapshots directory: {}", e);
+            }
+        }
+        
+        if let Some(height) = latest_height {
+            info!("Found latest snapshot height by scanning directory: {}", height);
+        } else {
+            info!("No snapshots found");
+        }
+        
+        latest_height
+    }
+    
+    /// Update the index file for static serving
+    pub async fn update_index_file(&self, snapshot_directory: PathBuf) -> Result<()> {
+        info!("Updating index file for static serving");
+        
+        // Path to the index file
+        let index_path = snapshot_directory.join("index.json");
+        
+        // Collect information about all snapshots
+        let snapshots_dir = snapshot_directory.join(SNAPSHOTS_DIR);
+        let mut snapshots = Vec::new();
+        
+        if snapshots_dir.exists() {
+            for entry in fs::read_dir(&snapshots_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                
+                if path.is_dir() {
+                    // Parse the directory name to get height and hash
+                    let dir_name = path.file_name().unwrap().to_string_lossy().to_string();
+                    let parts: Vec<&str> = dir_name.split('-').collect();
+                    
+                    if parts.len() == 2 {
+                        if let Ok(height) = parts[0].parse::<u32>() {
+                            let block_hash = parts[1].to_string();
+                            
+                            // Read metadata file if it exists
+                            let metadata_path = path.join(METADATA_FILENAME);
+                            if metadata_path.exists() {
+                                let metadata_file = File::open(&metadata_path)?;
+                                let metadata: Value = serde_json::from_reader(metadata_file)?;
+                                
+                                // Add snapshot info to the list
+                                snapshots.push(json!({
+                                    "height": height,
+                                    "block_hash": block_hash,
+                                    "state_root": metadata["state_root"],
+                                    "db_size_bytes": metadata["db_size_bytes"],
+                                    "wasm_hash": metadata["wasm_hash"],
+                                    "path": format!("{}/{}-{}", SNAPSHOTS_DIR, height, block_hash)
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort snapshots by height
+        snapshots.sort_by(|a, b| {
+            let a_height = a["height"].as_u64().unwrap_or(0);
+            let b_height = b["height"].as_u64().unwrap_or(0);
+            a_height.cmp(&b_height)
+        });
+        
+        // Collect information about all diffs
+        let diffs_dir = snapshot_directory.join(DIFFS_DIR);
+        let mut diffs = Vec::new();
+        
+        if diffs_dir.exists() {
+            for entry in fs::read_dir(&diffs_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                
+                if path.is_dir() {
+                    // Parse the directory name to get start and end heights
+                    let dir_name = path.file_name().unwrap().to_string_lossy().to_string();
+                    let parts: Vec<&str> = dir_name.split('-').collect();
+                    
+                    if parts.len() == 2 {
+                        if let (Ok(start_height), Ok(end_height)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                            // Read metadata file if it exists
+                            let metadata_path = path.join(METADATA_FILENAME);
+                            if metadata_path.exists() {
+                                let metadata_file = File::open(&metadata_path)?;
+                                let metadata: Value = serde_json::from_reader(metadata_file)?;
+                                
+                                // Add diff info to the list
+                                diffs.push(json!({
+                                    "start_height": start_height,
+                                    "end_height": end_height,
+                                    "start_block_hash": metadata["start_block_hash"],
+                                    "end_block_hash": metadata["end_block_hash"],
+                                    "diff_size_bytes": metadata["diff_size_bytes"],
+                                    "keys_modified": metadata["keys_modified"],
+                                    "keys_added": metadata["keys_added"],
+                                    "keys_deleted": metadata["keys_deleted"],
+                                    "wasm_hash": metadata["wasm_hash"],
+                                    "path": format!("{}/{}-{}", DIFFS_DIR, start_height, end_height)
+                                }));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sort diffs by start height
+        diffs.sort_by(|a, b| {
+            let a_height = a["start_height"].as_u64().unwrap_or(0);
+            let b_height = b["start_height"].as_u64().unwrap_or(0);
+            a_height.cmp(&b_height)
+        });
+        
+        // Collect information about all WASM files
+        let wasm_dir = snapshot_directory.join(WASM_DIR);
+        let mut wasm_files = Vec::new();
+        
+        if wasm_dir.exists() {
+            for entry in fs::read_dir(&wasm_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "wasm") {
+                    let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+                    let file_size = fs::metadata(&path)?.len();
+                    
+                    // Add WASM file info to the list
+                    wasm_files.push(json!({
+                        "name": file_name,
+                        "size_bytes": file_size,
+                        "path": format!("{}/{}", WASM_DIR, file_name)
+                    }));
+                }
+            }
+        }
+        
+        // Read global metadata
+        let global_metadata_path = snapshot_directory.join(METADATA_FILENAME);
+        let global_metadata: Value = if global_metadata_path.exists() {
+            let metadata_file = File::open(&global_metadata_path)?;
+            serde_json::from_reader(metadata_file)?
+        } else {
+            json!({})
+        };
+        
+        // Create the index
+        let index = json!({
+            "index_name": global_metadata["index_name"],
+            "index_version": global_metadata["index_version"],
+            "created_at": global_metadata["created_at"],
+            "updated_at": "2025-06-10T00:00:00Z", // Should use actual current time
+            "start_block_height": global_metadata["start_block_height"],
+            "latest_snapshot_height": global_metadata["latest_snapshot_height"],
+            "latest_snapshot_hash": global_metadata["latest_snapshot_hash"],
+            "snapshot_interval": global_metadata["snapshot_interval"],
+            "current_wasm_hash": global_metadata["current_wasm_hash"],
+            "snapshots": snapshots,
+            "diffs": diffs,
+            "wasm_files": wasm_files
+        });
+        
+        // Write the index file
+        info!("Writing index file to {}", index_path.display());
+        let index_file = File::create(&index_path)?;
+        serde_json::to_writer_pretty(index_file, &index)?;
+        
+        info!("Index file updated successfully");
         Ok(())
     }
 }

@@ -760,6 +760,18 @@ impl HeightIndexedSMT {
                 
                 batch.put(&heights_key, &new_heights_data);
             }
+            
+            /// Migrate existing data to the height-indexed BST structure
+            pub fn migrate_to_height_indexed(&self, start_height: u32, end_height: u32) -> Result<()> {
+                info!("Migrating data to height-indexed BST structure from height {} to {}",
+                      start_height, end_height);
+                
+                let height_indexed_smt = HeightIndexedSMT::new(self.db.clone());
+                height_indexed_smt.migrate_data(start_height, end_height)?;
+                
+                info!("Migration completed successfully");
+                Ok(())
+            }
         }
         
         // Delete height index entries for heights > fork_height

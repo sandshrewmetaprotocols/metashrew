@@ -63,8 +63,8 @@ enum BlockResult {
 struct Args {
     #[arg(long)]
     daemon_rpc_url: String,
-    #[arg(long)]
-    indexer: PathBuf,
+    #[arg(long, required_unless_present = "repo")]
+    indexer: Option<PathBuf>,
     #[arg(long)]
     db_path: PathBuf,
     #[arg(long)]
@@ -1322,6 +1322,70 @@ async fn handle_jsonrpc(
                 jsonrpc: "2.0".to_string(),
             })),
         }
+    } else if body.method == "metashrew_snapshot" {
+        // Get snapshot information from the database
+        let runtime = state.runtime.read().await;
+        let context = runtime.context.lock()
+            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
+        
+        // Get the current height
+        let current_height = CURRENT_HEIGHT.load(Ordering::SeqCst);
+        
+        // Create an SMTHelper instance
+        let smt_helper = SMTHelper::new(context.db.db.clone());
+        
+        // Try to find the latest snapshot height by checking for state roots
+        // We'll check the last few heights to find the most recent snapshot
+        let mut latest_snapshot_height = 0;
+        let mut latest_root: Option<String> = None;
+        
+        // Check the last 1000 blocks for a state root
+        let start_height = if current_height > 1000 { current_height - 1000 } else { 0 };
+        for height in (start_height..=current_height).rev() {
+            if let Ok(root) = smt_helper.get_smt_root_at_height(height) {
+                latest_snapshot_height = height;
+                latest_root = Some(hex::encode(root));
+                break;
+            }
+        }
+        
+        // Try to determine if snapshots are enabled and the interval
+        // We'll look for a pattern in the state roots
+        let mut snapshot_interval = 1000; // Default interval
+        let mut snapshot_enabled = false;
+        
+        if latest_snapshot_height > 0 {
+            snapshot_enabled = true;
+            
+            // Try to find another snapshot to determine the interval
+            for height in (0..latest_snapshot_height).rev().step_by(100) {
+                if let Ok(_) = smt_helper.get_smt_root_at_height(height) {
+                    snapshot_interval = latest_snapshot_height - height;
+                    break;
+                }
+            }
+        }
+        
+        // Create snapshot info response
+        let snapshot_info = serde_json::json!({
+            "enabled": snapshot_enabled,
+            "current_height": current_height,
+            "last_snapshot_height": latest_snapshot_height,
+            "latest_root": latest_root,
+            "estimated_interval": snapshot_interval,
+            "next_snapshot_at": if snapshot_enabled && snapshot_interval > 0 {
+                let next = current_height + (snapshot_interval - (current_height % snapshot_interval));
+                serde_json::Value::Number(serde_json::Number::from(next))
+            } else {
+                serde_json::Value::Null
+            }
+        });
+        
+        Ok(HttpResponse::Ok().json(JsonRpcResult {
+            id: body.id,
+            result: snapshot_info.to_string(),
+            jsonrpc: "2.0".to_string(),
+        }))
     } else {
         Ok(HttpResponse::Ok().json(JsonRpcError {
             id: body.id,
@@ -1396,6 +1460,56 @@ async fn main() -> Result<()> {
     
     let mut start_block = args.start_block.unwrap_or(0);
     
+    // Handle repo flag if provided
+    let mut wasm_from_repo: Option<PathBuf> = None;
+    if let Some(ref repo_url) = args.repo {
+        info!("Repository URL provided: {}", repo_url);
+        
+        // Create a temporary snapshot manager for repo sync
+        let config = SnapshotConfig {
+            interval: args.snapshot_interval,
+            directory: PathBuf::from("temp_sync"),
+            enabled: true,
+        };
+        
+        let mut sync_manager = SnapshotManager::new(config);
+        
+        // Sync from repository
+        match sync_manager.sync_from_repo(repo_url, &args.db_path, args.indexer.as_ref()).await {
+            Ok((height, wasm_path)) => {
+                info!("Successfully synced from repository to height {}", height);
+                if start_block < height {
+                    info!("Adjusting start block from {} to {}", start_block, height);
+                    start_block = height;
+                }
+                
+                // If we got a WASM file from the repo and no indexer was specified, use it
+                if args.indexer.is_none() {
+                    if let Some(path) = wasm_path {
+                        info!("Using WASM file from repository: {:?}", path);
+                        wasm_from_repo = Some(path);
+                    } else {
+                        error!("No WASM file provided or found in repository");
+                        return Err(anyhow!("No WASM file provided or found in repository"));
+                    }
+                }
+            },
+            Err(e) => {
+                error!("Failed to sync from repository: {}", e);
+                return Err(anyhow!("Failed to sync from repository: {}", e));
+            }
+        }
+    }
+    
+    // Determine which WASM file to use
+    let indexer_path = if let Some(path) = wasm_from_repo {
+        path
+    } else if let Some(path) = args.indexer.clone() {
+        path
+    } else {
+        return Err(anyhow!("No indexer WASM file provided or found in repository"));
+    };
+    
     // Initialize snapshot manager if snapshot directory is provided
     let snapshot_manager = if let Some(ref snapshot_dir) = args.snapshot_directory {
         info!("Snapshot functionality enabled with directory: {:?}", snapshot_dir);
@@ -1416,7 +1530,7 @@ async fn main() -> Result<()> {
         }
         
         // Set current WASM file
-        if let Err(e) = manager.set_current_wasm(args.indexer.clone()) {
+        if let Err(e) = manager.set_current_wasm(indexer_path.clone()) {
             error!("Failed to set current WASM file for snapshots: {}", e);
             return Err(anyhow!("Failed to set current WASM file for snapshots: {}", e));
         }
@@ -1426,38 +1540,9 @@ async fn main() -> Result<()> {
         None
     };
     
-    // Handle repo flag if provided
-    if let Some(ref repo_url) = args.repo {
-        info!("Repository URL provided: {}", repo_url);
-        
-        // Create a temporary snapshot manager for repo sync
-        let config = SnapshotConfig {
-            interval: args.snapshot_interval,
-            directory: PathBuf::from("temp_sync"),
-            enabled: true,
-        };
-        
-        let mut sync_manager = SnapshotManager::new(config);
-        
-        // Sync from repository
-        match sync_manager.sync_from_repo(repo_url, &args.db_path).await {
-            Ok(height) => {
-                info!("Successfully synced from repository to height {}", height);
-                if start_block < height {
-                    info!("Adjusting start block from {} to {}", start_block, height);
-                    start_block = height;
-                }
-            },
-            Err(e) => {
-                error!("Failed to sync from repository: {}", e);
-                return Err(anyhow!("Failed to sync from repository: {}", e));
-            }
-        }
-    }
-    
     // Create runtime with RocksDB adapter
     let runtime = Arc::new(RwLock::new(MetashrewRuntime::load(
-        args.indexer.clone(),
+        indexer_path.clone(),
         RocksDBRuntimeAdapter::open(args.db_path.to_string_lossy().to_string(), opts)?
     )?));
     

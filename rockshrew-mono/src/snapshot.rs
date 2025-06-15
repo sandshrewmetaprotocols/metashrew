@@ -277,10 +277,11 @@ impl SnapshotManager {
     }
 
     /// Sync from a remote repository
-    pub async fn sync_from_repo(&mut self, repo_url: &str, db_path: &std::path::Path) -> Result<u32> {
+    pub async fn sync_from_repo(&mut self, repo_url: &str, db_path: &std::path::Path, indexer_path: Option<&PathBuf>) -> Result<(u32, Option<PathBuf>)> {
         use std::path::Path;
         use tokio::io::AsyncWriteExt;
         use reqwest;
+        use log::{debug, error, warn};
 
         info!("Syncing from repository: {}", repo_url);
         
@@ -308,17 +309,58 @@ impl SnapshotManager {
             index.intervals.len(), index.latest_height);
         
         if index.intervals.is_empty() {
-            return Ok(0);
+            return Ok((0, None));
         }
         
         // Create temporary directory for downloads
         let temp_dir = std::env::temp_dir().join("metashrew_sync");
         async_fs::create_dir_all(&temp_dir).await?;
         
-        // Process intervals in order
-        let mut current_height = 0;
-        for interval in &index.intervals {
+        // Check current database height to support resumable sync
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        let db = rocksdb::DB::open(&opts, db_path)?;
+        
+        // Get current tip height from database
+        let tip_key = "/__INTERNAL/tip-height".as_bytes();
+        let current_db_height = match db.get(tip_key)? {
+            Some(height_bytes) if height_bytes.len() >= 4 => {
+                let height = u32::from_le_bytes([
+                    height_bytes[0], height_bytes[1], height_bytes[2], height_bytes[3]
+                ]);
+                info!("Found existing database at height {}", height);
+                height
+            },
+            _ => {
+                info!("No existing height found in database, starting from 0");
+                0
+            }
+        };
+        
+        // Find the appropriate intervals to process based on current height
+        let applicable_intervals: Vec<&SnapshotMetadata> = index.intervals.iter()
+            .filter(|interval| interval.end_height > current_db_height)
+            .collect();
+        
+        if applicable_intervals.is_empty() {
+            info!("Database already at latest height {}, nothing to sync", current_db_height);
+            return Ok((current_db_height, None));
+        }
+        
+        // Track the latest WASM file we've seen
+        let mut latest_wasm_path: Option<PathBuf> = None;
+        
+        // Process applicable intervals in order
+        let mut current_height = current_db_height;
+        for interval in applicable_intervals {
             info!("Processing interval {}-{}", interval.start_height, interval.end_height);
+            
+            // Check if we need to download this interval
+            if interval.start_height < current_height && current_height < interval.end_height {
+                info!("Partial interval: database at height {} within interval {}-{}, skipping to next interval",
+                    current_height, interval.start_height, interval.end_height);
+                continue;
+            }
             
             // Download WASM file if needed
             let wasm_url = format!("{}{}", repo_url, interval.wasm_file);
@@ -335,7 +377,19 @@ impl SnapshotManager {
                 let mut file = tokio::fs::File::create(&wasm_path).await?;
                 file.write_all(&wasm_bytes).await?;
                 file.flush().await?;
+                
+                // Verify WASM hash
+                let wasm_data = std::fs::read(&wasm_path)?;
+                let hash = hex::encode(Sha256::digest(&wasm_data));
+                
+                if !hash.starts_with(&interval.wasm_hash) {
+                    warn!("WASM hash mismatch: expected {}, got {}", interval.wasm_hash, hash);
+                    // Continue anyway, but log the warning
+                }
             }
+            
+            // Keep track of the latest WASM file
+            latest_wasm_path = Some(wasm_path.clone());
             
             // Download diff file
             let diff_url = format!("{}{}", repo_url, interval.diff_file);
@@ -350,15 +404,11 @@ impl SnapshotManager {
             let diff_data = zstd::decode_all(compressed_diff.as_ref())?;
             
             // Apply diff to database
-            info!("Applying diff to database ({})", diff_data.len());
-            
-            // Open RocksDB
-            let mut opts = rocksdb::Options::default();
-            opts.create_if_missing(true);
-            let db = rocksdb::DB::open(&opts, db_path)?;
+            info!("Applying diff to database ({} bytes)", diff_data.len());
             
             // Parse and apply key-value pairs
             let mut i = 0;
+            let mut applied_keys = 0;
             while i < diff_data.len() {
                 // Read key length
                 if i + 4 > diff_data.len() {
@@ -394,7 +444,10 @@ impl SnapshotManager {
                 
                 // Apply to database
                 db.put(&key, &value)?;
+                applied_keys += 1;
             }
+            
+            info!("Applied {} key-value pairs to database", applied_keys);
             
             // Download and verify stateroot
             let stateroot_url = format!("{}{}/stateroot.json",
@@ -410,23 +463,31 @@ impl SnapshotManager {
             let stateroot_json = stateroot_response.text().await?;
             let stateroot: StateRoot = serde_json::from_str(&stateroot_json)?;
             
+            // Verify stateroot matches what's in the JSON
+            let expected_root = hex::decode(&stateroot.root)?;
+            
             // Store stateroot in database
             let root_key = format!("{}:{}", "smt:root:", interval.end_height).into_bytes();
-            let root_value = hex::decode(&stateroot.root)?;
-            db.put(&root_key, &root_value)?;
+            db.put(&root_key, &expected_root)?;
             
             // Update current height
             current_height = interval.end_height;
             
             // Store tip height
-            let tip_key = "/__INTERNAL/tip-height".as_bytes();
             let tip_value = current_height.to_le_bytes().to_vec();
             db.put(tip_key, &tip_value)?;
             
             info!("Successfully processed interval up to height {}", current_height);
         }
         
+        // If indexer path was not provided, use the latest WASM from repo
+        let final_wasm_path = if indexer_path.is_none() {
+            latest_wasm_path
+        } else {
+            None
+        };
+        
         info!("Repository sync complete, database at height {}", current_height);
-        Ok(current_height)
+        Ok((current_height, final_wasm_path))
     }
 }

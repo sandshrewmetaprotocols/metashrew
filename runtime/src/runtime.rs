@@ -33,6 +33,12 @@ pub trait KeyValueStoreLike {
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>;
+    
+    // Optional method to track key-value updates
+    // Default implementation does nothing
+    fn track_kv_update(&mut self, _key: Vec<u8>, _value: Vec<u8>) {
+        // Default implementation does nothing
+    }
 }
 
 //const TIP_KEY: &[u8] = b"T";
@@ -1190,6 +1196,22 @@ where
                     for (k, v) in decoded.list.iter().tuples() {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
                         let v_owned = <Vec<u8> as Clone>::clone(v);
+
+                        // Track key-value updates using the trait method
+                        {
+                            // Create a longer-lived value for the context reference
+                            let context_ref_clone = context_ref.clone();
+                            let mut ctx_guard = match context_ref_clone.lock() {
+                                Ok(guard) => guard,
+                                Err(_) => {
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
+                            };
+                            
+                            // Track the original key-value pair before annotation
+                            ctx_guard.db.track_kv_update(k_owned.clone(), v_owned.clone());
+                        }
 
                         if let Err(_) = Self::db_append_annotated(
                             context_ref.clone(),

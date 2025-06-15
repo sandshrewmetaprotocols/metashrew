@@ -307,6 +307,9 @@ impl MetashrewRocksDBSync {
             runtime => runtime,
         };
         
+        // Create a key-value tracker for the WASM module updates
+        let snapshot_manager_clone = self.snapshot_manager.clone();
+        
         // Set block data with better error handling
         {
             let mut context = runtime.context.lock()
@@ -314,6 +317,18 @@ impl MetashrewRocksDBSync {
             context.block = block_data;
             context.height = height;
             context.db.set_height(height);
+            
+            // Set up key-value tracking for the WASM module
+            if let Some(snapshot_manager) = &snapshot_manager_clone {
+                let sm_clone = snapshot_manager.clone();
+                context.db.set_kv_tracker(Some(Box::new(move |key: Vec<u8>, value: Vec<u8>| {
+                    let mut manager = match sm_clone.try_lock() {
+                        Ok(m) => m,
+                        Err(_) => return, // Skip if we can't get the lock
+                    };
+                    manager.track_key_change(key, value);
+                })));
+            }
         } // Release context lock
         
         // Check if memory usage is approaching the limit and refresh if needed
@@ -332,18 +347,10 @@ impl MetashrewRocksDBSync {
             Ok(_) => {
                 debug!("Successfully processed block {}", height);
                 
-                // Get database handle and other data we need without holding the context lock across await points
+                // Get database handle without holding the context lock across await points
                 let db = {
-                    let mut context = runtime.context.lock()
+                    let context = runtime.context.lock()
                         .map_err(|e| anyhow!("Failed to lock context: {}", e))?;
-                    
-                    // Verify blockhash is stored
-                    if let Ok(Some(_blockhash)) = context.db.get(&format!("{}{}",
-                        HEIGHT_TO_HASH, height).into_bytes()) {
-                        debug!("Verified blockhash is stored for block {}", height);
-                    } else {
-                        debug!("Blockhash not found for block {}, will be fetched if needed", height);
-                    }
                     
                     // Clone the database handle before releasing the lock
                     context.db.db.clone()
@@ -352,39 +359,32 @@ impl MetashrewRocksDBSync {
                 // Create an SMTHelper instance
                 let smt_helper = SMTHelper::new(db.clone());
                 
-                // Get the previous root (if any)
-                let prev_height = if height > 0 { height - 1 } else { 0 };
-                let prev_root = match smt_helper.get_smt_root_at_height(prev_height) {
+                // Fetch blockhash after releasing the context lock
+                let blockhash = self.fetch_blockhash(height).await?;
+                
+                // Store blockhash using BST approach
+                let blockhash_key = format!("{}{}",HEIGHT_TO_HASH, height).into_bytes();
+                if let Err(e) = smt_helper.bst_put(&blockhash_key, &blockhash, height) {
+                    error!("Failed to store blockhash in BST for height {}: {}", height, e);
+                } else {
+                    debug!("Stored blockhash in BST for block {}", height);
+                    
+                    // If snapshot manager is enabled, track this key change directly
+                    // (The WASM module updates are tracked through the kv_tracker)
+                    if let Some(snapshot_manager) = &self.snapshot_manager {
+                        let mut manager = snapshot_manager.lock().await;
+                        manager.track_key_change(blockhash_key.clone(), blockhash.clone());
+                    }
+                }
+                
+                // Calculate and store the state root
+                let new_root = match smt_helper.calculate_and_store_state_root(height) {
                     Ok(root) => root,
                     Err(e) => {
-                        error!("Failed to get previous SMT root: {}", e);
-                        [0u8; 32] // Use empty root if previous can't be found
+                        error!("Failed to calculate state root: {}", e);
+                        [0u8; 32] // Use empty root if calculation fails
                     }
                 };
-                
-                // Compute a new root based on the current block height
-                // This is a simplified approach - in a full implementation, we would track all DB changes
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(&prev_root);
-                hasher.update(&height.to_le_bytes());
-                
-                // Add block hash to the state root calculation if available
-                if let Ok(Some(blockhash)) = db.get(&format!("{}{}",
-                    HEIGHT_TO_HASH, height).into_bytes()) {
-                    hasher.update(&blockhash);
-                }
-                
-                // Finalize the new root
-                let mut new_root = [0u8; 32];
-                new_root.copy_from_slice(&hasher.finalize());
-                
-                // Store the new root for this height
-                let root_key = format!("{}:{}", "smt:root:", height).into_bytes();
-                if let Err(e) = db.put(&root_key, &new_root) {
-                    error!("Failed to store SMT root for height {}: {}", height, e);
-                } else {
-                    info!("Stored SMT root for height {}: {}", height, hex::encode(&new_root));
-                }
                 
                 // Handle snapshot creation if needed
                 if let Some(snapshot_manager) = &self.snapshot_manager {
@@ -692,7 +692,18 @@ impl MetashrewRocksDBSync {
     }
 
     async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
-        match self.get(&(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes()).await {
+        // Get database handle
+        let db = match self.poll_connection().await {
+            Ok(db) => db,
+            Err(_) => return None,
+        };
+        
+        // Create SMTHelper
+        let smt_helper = SMTHelper::new(db);
+        
+        // Use BST to get blockhash
+        let blockhash_key = format!("{}{}",HEIGHT_TO_HASH, block_number).into_bytes();
+        match smt_helper.bst_get_at_height(&blockhash_key, block_number) {
             Ok(Some(value)) => Some(value),
             _ => None
         }
@@ -755,10 +766,11 @@ impl MetashrewRocksDBSync {
         }
         let blockhash = self.fetch_blockhash(block_number).await?;
         
-        self.put(
-            &(String::from(HEIGHT_TO_HASH) + &block_number.to_string()).into_bytes(),
-            &blockhash,
-        ).await?;
+        // Store blockhash using BST approach
+        let db = self.poll_connection().await?;
+        let smt_helper = SMTHelper::new(db);
+        let blockhash_key = format!("{}{}",HEIGHT_TO_HASH, block_number).into_bytes();
+        smt_helper.bst_put(&blockhash_key, &blockhash, block_number)?;
         
         let tunneled_response = self
             .post(serde_json::to_string(&JsonRpcRequest {

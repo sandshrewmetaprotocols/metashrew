@@ -47,35 +47,42 @@ Data passed between host and guest follows AssemblyScript's ArrayBuffer memory l
 
 This pattern enables language-agnostic communication between the host and any WASM module that implements the interface.
 
-### 2. Append-Only Database Pattern
+### 2. Height-Indexed Binary Search Tree Pattern
 
-Metashrew uses an append-only database pattern for state management:
+Metashrew uses a height-indexed binary search tree pattern for efficient state lookup and verification:
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│ Key + Index │────►│ Value + Height │   │ Key + Index │────►│ Value + Height │
+│    Key      │────►│ Value + Height │   │    Key      │────►│ Value + Height │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
        │                                        │
        │                                        │
        ▼                                        ▼
 ┌─────────────┐                          ┌─────────────┐
-│ Length Key  │────►│ Count │            │ Height Key  │────►│ Updated Keys │
-└─────────────┘     └─────────┘          └─────────────┘     └─────────────┘
+│ Height-BST  │────►│ State at Height │  │ SMT Root    │────►│ State Root Hash │
+└─────────────┘     └─────────────────┘  └─────────────┘     └─────────────────┘
 ```
 
 Key characteristics:
 
-1. **Versioned Keys**: Each key maintains a list of values, indexed by position.
+1. **Height-Indexed BST**: Binary Search Tree indexed by height for efficient historical state lookup.
 2. **Height Annotation**: Values are annotated with the block height they were created at.
-3. **Length Tracking**: Special length keys track the number of values for each key.
-4. **Update Tracking**: For each block height, a list of updated keys is maintained.
+3. **Sparse Merkle Tree**: SMT structure produces a state root at any block height.
+4. **Binary Search Algorithm**: Finding the state at a specific height uses an efficient binary search algorithm.
+5. **Key Prefixes**: Uses specific prefixes for different types of keys:
+   - `bst:` for BST keys
+   - `bst:height:` for height index keys
+   - `smt:root:` for SMT root keys
 
 Benefits:
 
-1. **Historical Queries**: Enables querying the state at any historical block height.
+1. **Historical Queries**: Enables querying the state at any historical block height with improved efficiency.
 2. **Chain Reorganization Handling**: Simplifies rolling back state changes during reorgs.
-3. **Audit Trail**: Provides a complete history of state changes.
+3. **Audit Trail**: Provides a complete history of state changes with cryptographic verification.
 4. **Consistency**: Ensures consistent state across parallel indexers.
+5. **Verification**: State roots enable cryptographic verification of database state.
+6. **Efficiency**: Binary search improves lookup performance for historical states from O(n) to O(log n).
+7. **Snapshot Integration**: Enables efficient snapshot creation by tracking key-value changes at specific heights.
 
 ### 3. Actor Model Pattern
 
@@ -291,6 +298,14 @@ This pattern:
 │  Node       │     │  Indexer    │     │  Module     │     │  Updates    │
 │             │     │             │     │             │     │             │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                                                                  │
+                                                                  ▼
+                                                           ┌─────────────┐
+                                                           │             │
+                                                           │  SMT Root   │
+                                                           │  Calculation │
+                                                           │             │
+                                                           └─────────────┘
 ```
 
 ### 2. Query Flow
@@ -309,11 +324,42 @@ This pattern:
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │             │     │             │     │             │     │             │
-│  Detect     │────►│  Identify   │────►│  Rollback   │────►│  Reprocess  │
-│  Divergence │     │  Affected   │     │  State      │     │  New Blocks │
-│             │     │  Keys       │     │  Changes    │     │             │
+│  Detect     │────►│  Binary     │────►│  Rollback   │────►│  Reprocess  │
+│  Divergence │     │  Search for │     │  State to   │     │  New Blocks │
+│             │     │  Height     │     │  Valid Root │     │  & Calculate│
+│             │     │             │     │             │     │  New Roots  │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
 ```
+
+The BST approach significantly improves this flow by:
+
+1. **Efficient Height Location**: Using binary search to quickly find the divergence point
+2. **Precise State Rollback**: Leveraging height-indexed keys to identify affected state
+3. **Accurate Root Recalculation**: Recalculating state roots only for affected heights
+4. **Snapshot Integration**: Using snapshots as checkpoints to avoid full reprocessing when possible
+
+### 4. Snapshot System Flow
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│             │     │             │     │             │     │             │
+│  Track DB   │────►│  Create     │────►│  Compress   │────►│  Update     │
+│  Changes    │     │  Snapshot   │     │  & Store    │     │  Repository │
+│  Using BST  │     │  Metadata   │     │  Diff Files │     │  Index      │
+│             │     │             │     │             │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+```
+
+Key components of the snapshot system:
+
+1. **BST Integration**: Uses the BST structure to efficiently track key-value changes at specific heights
+2. **Height-Based Intervals**: Creates snapshots at configurable block height intervals
+3. **Compressed Diffs**: Stores compressed key-value differences between snapshots
+4. **State Root Verification**: Includes state roots for cryptographic verification
+5. **Repository Structure**: Organizes snapshots in a repository structure for easy distribution
+6. **Remote Sync**: Supports syncing from remote snapshot repositories
+7. **WASM Module Key-Value Tracking**: Captures all ~40k key-value updates per block from the WASM module
+8. **Callback-Based Tracking**: Uses a callback mechanism to track key-value updates from both direct database operations and batch operations
 
 ## Error Handling Patterns
 

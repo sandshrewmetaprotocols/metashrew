@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Result};
-use log::info;
+use log::{info, error};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs as async_fs;
 use zstd;
@@ -234,7 +235,7 @@ impl SnapshotManager {
         Ok(())
     }
 
-    /// Track database changes for a specific height range
+    /// Track database changes for a specific height range using BST approach
     pub async fn track_db_changes(&mut self, db: &rocksdb::DB, start_height: u32, end_height: u32) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
@@ -243,23 +244,30 @@ impl SnapshotManager {
         info!("Tracking database changes for height range {}-{}", start_height, end_height);
         
         // Get all keys updated in this height range
-        let mut updated_keys = Vec::new();
+        let mut updated_keys: Vec<Vec<u8>> = Vec::new();
+        
+        // Use BST key prefix and height index prefix directly
+        use crate::smt_helper::{BST_KEY_PREFIX, BST_HEIGHT_INDEX_PREFIX};
         
         for height in start_height..=end_height {
-            // Get keys updated at this height
-            let length_key = format!("{}FFFFFFFF", height).into_bytes();
+            // Create the prefix for this height
+            let prefix = format!("{}{}", BST_HEIGHT_INDEX_PREFIX, height);
             
-            if let Some(length_bytes) = db.get(&length_key)? {
-                if length_bytes.len() >= 4 {
-                    let length = u32::from_le_bytes([
-                        length_bytes[0], length_bytes[1], length_bytes[2], length_bytes[3]
-                    ]);
-                    
-                    for i in 0..length {
-                        let list_key = format!("{}{}", height, i).into_bytes();
-                        if let Some(key_bytes) = db.get(&list_key)? {
-                            updated_keys.push(key_bytes);
+            // Iterate over all keys with this prefix
+            let iter = db.prefix_iterator(prefix.as_bytes());
+            for item in iter {
+                match item {
+                    Ok((key, _)) => {
+                        // Extract the original key from the height index key
+                        let key_str = String::from_utf8_lossy(&key);
+                        if let Some(hex_key) = key_str.split(':').nth(1) {
+                            if let Ok(original_key) = hex::decode(hex_key) {
+                                updated_keys.push(original_key);
+                            }
                         }
+                    },
+                    Err(e) => {
+                        error!("Error iterating over keys at height {}: {}", height, e);
                     }
                 }
             }
@@ -267,10 +275,14 @@ impl SnapshotManager {
         
         // Get the latest value for each key
         for key in updated_keys {
-            if let Some(value) = db.get(&key)? {
-                self.key_changes.insert(key, value);
+            // Use the BST key format
+            let bst_key = [BST_KEY_PREFIX.as_bytes(), &key].concat();
+            if let Ok(Some(value)) = db.get(&bst_key) {
+                self.key_changes.insert(key, value.to_vec());
             }
         }
+        
+        info!("Tracked {} key-value changes for snapshot", self.key_changes.len());
         
         info!("Tracked {} key-value changes for snapshot", self.key_changes.len());
         Ok(())
@@ -442,8 +454,17 @@ impl SnapshotManager {
                 let value = diff_data[i..i+value_len].to_vec();
                 i += value_len;
                 
-                // Apply to database
-                db.put(&key, &value)?;
+                // Apply to database using BST approach
+                let bst_key = [crate::smt_helper::BST_KEY_PREFIX.as_bytes(), &key].concat();
+                db.put(&bst_key, &value)?;
+                
+                // Also store in height index
+                let height_index_key = format!("{}{}:{}",
+                    crate::smt_helper::BST_HEIGHT_INDEX_PREFIX,
+                    interval.end_height,
+                    hex::encode(&key)).into_bytes();
+                db.put(&height_index_key, &[0u8; 0])?;
+                
                 applied_keys += 1;
             }
             

@@ -1,14 +1,18 @@
 use anyhow::Result;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 use rocksdb::{DB, Options, WriteBatch, WriteBatchIterator};
-use std::sync::{Arc};
+use std::sync::{Arc, Mutex};
 
 const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
+
+// Type definition for key-value tracker function
+pub type KVTrackerFn = Box<dyn Fn(Vec<u8>, Vec<u8>) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct RocksDBRuntimeAdapter {
     pub db: Arc<DB>,
     pub height: u32,
+    pub kv_tracker: Arc<Mutex<Option<KVTrackerFn>>>,
 }
 
 static mut _LABEL: Option<String> = None;
@@ -66,13 +70,14 @@ pub async fn query_height(db: Arc<DB>, start_block: u32) -> Result<u32> {
 impl RocksDBRuntimeAdapter {
     pub fn open_secondary(
         primary_path: String,
-        secondary_path: String, 
+        secondary_path: String,
         opts: rocksdb::Options
     ) -> Result<Self, rocksdb::Error> {
         let db = rocksdb::DB::open_as_secondary(&opts, &primary_path, &secondary_path)?;
         Ok(RocksDBRuntimeAdapter {
             db: Arc::new(db),
-            height: 0
+            height: 0,
+            kv_tracker: Arc::new(Mutex::new(None)),
         })
     }
     pub fn open(path: String, opts: Options) -> Result<RocksDBRuntimeAdapter> {
@@ -80,6 +85,7 @@ impl RocksDBRuntimeAdapter {
         Ok(RocksDBRuntimeAdapter {
             db: Arc::new(db),
             height: 0,
+            kv_tracker: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -94,6 +100,23 @@ impl RocksDBRuntimeAdapter {
         RocksDBRuntimeAdapter {
             db: self.db.clone(),
             height: self.height,
+            kv_tracker: self.kv_tracker.clone(),
+        }
+    }
+    
+    /// Set a key-value tracker function that will be called for each key-value update
+    pub fn set_kv_tracker(&mut self, tracker: Option<KVTrackerFn>) {
+        if let Ok(mut guard) = self.kv_tracker.lock() {
+            *guard = tracker;
+        }
+    }
+    
+    /// Track a key-value update using the registered tracker function
+    pub fn track_kv_update(&self, key: Vec<u8>, value: Vec<u8>) {
+        if let Ok(guard) = self.kv_tracker.lock() {
+            if let Some(tracker) = &*guard {
+                tracker(key, value);
+            }
         }
     }
 }
@@ -110,6 +133,35 @@ impl BatchLike for RocksDBBatch {
     }
 }
 
+// BatchTracker captures key-value pairs during batch operations for tracking
+pub struct BatchTracker<'a> {
+    inner_batch: &'a mut WriteBatch,
+    kv_tracker: Arc<Mutex<Option<KVTrackerFn>>>,
+}
+
+impl<'a> WriteBatchIterator for BatchTracker<'a> {
+    fn put(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
+        // Track the key-value update if a tracker is registered
+        if let Ok(guard) = self.kv_tracker.lock() {
+            if let Some(tracker) = &*guard {
+                // Clone the key and value for tracking
+                let key_vec = key.to_vec();
+                let value_vec = value.to_vec();
+                tracker(key_vec, value_vec);
+            }
+        }
+        
+        // Forward to the inner batch
+        self.inner_batch.put(key.as_ref(), value.as_ref());
+    }
+    
+    fn delete(&mut self, key: Box<[u8]>) {
+        // Forward to the inner batch
+        self.inner_batch.delete(key.as_ref());
+    }
+}
+
+// Legacy batch cloner for compatibility
 pub struct RocksDBBatchCloner<'a>(&'a mut WriteBatch);
 
 impl<'a> WriteBatchIterator for RocksDBBatchCloner<'a> {
@@ -124,6 +176,12 @@ impl<'a> WriteBatchIterator for RocksDBBatchCloner<'a> {
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
+    
+    // Implement the track_kv_update method from the KeyValueStoreLike trait
+    fn track_kv_update(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        // Use the existing implementation
+        RocksDBRuntimeAdapter::track_kv_update(self, key, value);
+    }
 
     fn write(&mut self, batch: RocksDBBatch) -> Result<(), Self::Error> {
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
@@ -131,7 +189,16 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         
         let mut final_batch = WriteBatch::default();
         final_batch.put(&to_labeled_key(&key_bytes), &height_bytes);
-        batch.0.iterate(&mut RocksDBBatchCloner(&mut final_batch));
+        
+        // Create a batch tracker to capture key-value pairs for tracking
+        let kv_tracker_clone = self.kv_tracker.clone();
+        let mut batch_tracker = BatchTracker {
+            inner_batch: &mut final_batch,
+            kv_tracker: kv_tracker_clone,
+        };
+        
+        // Use the batch tracker to capture key-value pairs
+        batch.0.iterate(&mut batch_tracker);
         
         self.db.write(final_batch)
     }
@@ -145,6 +212,13 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
-        self.db.put(to_labeled_key(&key.as_ref().to_vec()), value)
+        let key_vec = key.as_ref().to_vec();
+        let value_vec = value.as_ref().to_vec();
+        
+        // Track the key-value update if a tracker is registered
+        self.track_kv_update(key_vec.clone(), value_vec.clone());
+        
+        // Perform the actual database update
+        self.db.put(to_labeled_key(&key_vec), value_vec)
     }
 }

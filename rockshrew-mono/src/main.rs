@@ -32,6 +32,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 mod ssh_tunnel;
 use ssh_tunnel::{SshTunnel, SshTunnelConfig, TunneledResponse, make_request_with_tunnel, parse_daemon_rpc_url};
 
+// Import our snapshot module
+mod snapshot;
+use snapshot::{SnapshotConfig, SnapshotManager};
+
 // Extension trait for RwLock to add async_read method
 trait RwLockExt<T> {
     async fn async_read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> where T: 'a;
@@ -79,6 +83,12 @@ struct Args {
     pipeline_size: Option<usize>,
     #[arg(long, help = "CORS allowed origins (e.g., '*' for all origins, or specific domains)")]
     cors: Option<String>,
+    #[arg(long, help = "Directory to store snapshots for remote sync")]
+    snapshot_directory: Option<PathBuf>,
+    #[arg(long, help = "Interval in blocks to create snapshots (e.g., 1000)", default_value_t = 1000)]
+    snapshot_interval: u32,
+    #[arg(long, help = "URL to a remote snapshot repository to sync from")]
+    repo: Option<String>,
 }
 
 #[derive(Clone)]
@@ -191,6 +201,7 @@ pub struct MetashrewRocksDBSync {
     processor_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
     fetcher_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
     processor_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
+    snapshot_manager: Option<Arc<tokio::sync::Mutex<SnapshotManager>>>,
 }
 
 impl MetashrewRocksDBSync {
@@ -297,16 +308,13 @@ impl MetashrewRocksDBSync {
         };
         
         // Set block data with better error handling
-        match runtime.context.lock() {
-            Ok(mut context) => {
-                context.block = block_data;
-                context.height = height;
-                context.db.set_height(height);
-            },
-            Err(e) => {
-                return Err(anyhow!("Failed to lock context: {}", e));
-            }
-        }
+        {
+            let mut context = runtime.context.lock()
+                .map_err(|e| anyhow!("Failed to lock context: {}", e))?;
+            context.block = block_data;
+            context.height = height;
+            context.db.set_height(height);
+        } // Release context lock
         
         // Check if memory usage is approaching the limit and refresh if needed
         if self.should_refresh_memory(&mut runtime, height) {
@@ -324,8 +332,12 @@ impl MetashrewRocksDBSync {
             Ok(_) => {
                 debug!("Successfully processed block {}", height);
                 
-                // Store the blockhash for this height to ensure it's available for future queries
-                if let Ok(mut context) = runtime.context.lock() {
+                // Get database handle and other data we need without holding the context lock across await points
+                let db = {
+                    let mut context = runtime.context.lock()
+                        .map_err(|e| anyhow!("Failed to lock context: {}", e))?;
+                    
+                    // Verify blockhash is stored
                     if let Ok(Some(_blockhash)) = context.db.get(&format!("{}{}",
                         HEIGHT_TO_HASH, height).into_bytes()) {
                         debug!("Verified blockhash is stored for block {}", height);
@@ -333,45 +345,62 @@ impl MetashrewRocksDBSync {
                         debug!("Blockhash not found for block {}, will be fetched if needed", height);
                     }
                     
-                    // Compute and store the SMT root for this block
-                    let db = context.db.db.clone();
-                    drop(context); // Release the lock before async operations
-                    
-                    // Create an SMTHelper instance
-                    let smt_helper = SMTHelper::new(db.clone());
-                    
-                    // Get the previous root (if any)
-                    let prev_height = if height > 0 { height - 1 } else { 0 };
-                    let prev_root = match smt_helper.get_smt_root_at_height(prev_height) {
-                        Ok(root) => root,
-                        Err(e) => {
-                            error!("Failed to get previous SMT root: {}", e);
-                            [0u8; 32] // Use empty root if previous can't be found
-                        }
-                    };
-                    
-                    // Compute a new root based on the current block height
-                    // This is a simplified approach - in a full implementation, we would track all DB changes
-                    let mut hasher = sha2::Sha256::new();
-                    hasher.update(&prev_root);
-                    hasher.update(&height.to_le_bytes());
-                    
-                    // Add block hash to the state root calculation if available
-                    if let Ok(Some(blockhash)) = db.get(&format!("{}{}",
-                        HEIGHT_TO_HASH, height).into_bytes()) {
-                        hasher.update(&blockhash);
+                    // Clone the database handle before releasing the lock
+                    context.db.db.clone()
+                }; // Release context lock
+                
+                // Create an SMTHelper instance
+                let smt_helper = SMTHelper::new(db.clone());
+                
+                // Get the previous root (if any)
+                let prev_height = if height > 0 { height - 1 } else { 0 };
+                let prev_root = match smt_helper.get_smt_root_at_height(prev_height) {
+                    Ok(root) => root,
+                    Err(e) => {
+                        error!("Failed to get previous SMT root: {}", e);
+                        [0u8; 32] // Use empty root if previous can't be found
                     }
-                    
-                    // Finalize the new root
-                    let mut new_root = [0u8; 32];
-                    new_root.copy_from_slice(&hasher.finalize());
-                    
-                    // Store the new root for this height
-                    let root_key = format!("{}:{}", "smt:root:", height).into_bytes();
-                    if let Err(e) = db.put(&root_key, &new_root) {
-                        error!("Failed to store SMT root for height {}: {}", height, e);
-                    } else {
-                        info!("Stored SMT root for height {}: {}", height, hex::encode(&new_root));
+                };
+                
+                // Compute a new root based on the current block height
+                // This is a simplified approach - in a full implementation, we would track all DB changes
+                let mut hasher = sha2::Sha256::new();
+                hasher.update(&prev_root);
+                hasher.update(&height.to_le_bytes());
+                
+                // Add block hash to the state root calculation if available
+                if let Ok(Some(blockhash)) = db.get(&format!("{}{}",
+                    HEIGHT_TO_HASH, height).into_bytes()) {
+                    hasher.update(&blockhash);
+                }
+                
+                // Finalize the new root
+                let mut new_root = [0u8; 32];
+                new_root.copy_from_slice(&hasher.finalize());
+                
+                // Store the new root for this height
+                let root_key = format!("{}:{}", "smt:root:", height).into_bytes();
+                if let Err(e) = db.put(&root_key, &new_root) {
+                    error!("Failed to store SMT root for height {}: {}", height, e);
+                } else {
+                    info!("Stored SMT root for height {}: {}", height, hex::encode(&new_root));
+                }
+                
+                // Handle snapshot creation if needed
+                if let Some(snapshot_manager) = &self.snapshot_manager {
+                    // Now we can safely await on the snapshot manager lock
+                    let mut manager = snapshot_manager.lock().await;
+                    if manager.should_create_snapshot(height) {
+                        // Track database changes since last snapshot
+                        let last_snapshot_height = manager.last_snapshot_height;
+                        if let Err(e) = manager.track_db_changes(&db, last_snapshot_height, height).await {
+                            error!("Failed to track database changes for snapshot: {}", e);
+                        }
+                        
+                        // Create the snapshot
+                        if let Err(e) = manager.create_snapshot(height, &new_root).await {
+                            error!("Failed to create snapshot at height {}: {}", height, e);
+                        }
                     }
                 }
                 
@@ -385,6 +414,36 @@ impl MetashrewRocksDBSync {
                         match runtime.run() {
                             Ok(_) => {
                                 debug!("Successfully processed block {} after memory refresh", height);
+                                
+                                // Handle snapshot tracking after successful retry
+                                if let Some(snapshot_manager) = &self.snapshot_manager {
+                                    // Get the database handle without holding the context lock across await points
+                                    let db = {
+                                        let context = runtime.context.lock()
+                                            .map_err(|_| anyhow!("Failed to lock context"))?;
+                                        context.db.db.clone()
+                                    }; // Release context lock
+                                    
+                                    // Create SMT helper and get root
+                                    let smt_helper = SMTHelper::new(db.clone());
+                                    if let Ok(new_root) = smt_helper.get_smt_root_at_height(height) {
+                                        // Now we can safely await on the snapshot manager lock
+                                        let mut manager = snapshot_manager.lock().await;
+                                        if manager.should_create_snapshot(height) {
+                                            // Track database changes since last snapshot
+                                            let last_snapshot_height = manager.last_snapshot_height;
+                                            if let Err(e) = manager.track_db_changes(&db, last_snapshot_height, height).await {
+                                                error!("Failed to track database changes for snapshot: {}", e);
+                                            }
+                                            
+                                            // Create the snapshot
+                                            if let Err(e) = manager.create_snapshot(height, &new_root).await {
+                                                error!("Failed to create snapshot at height {}: {}", height, e);
+                                            }
+                                        }
+                                    }
+                                }
+                                
                                 Ok(())
                             },
                             Err(run_err) => {
@@ -497,27 +556,32 @@ impl MetashrewRocksDBSync {
             let result_sender_clone = result_sender.clone();
             
             // Spawn a task for the block processor
-            tokio::spawn(async move {
-                // Register this thread as the processor thread
-                indexer.register_current_thread_as_processor();
-                info!("Block processor task started on thread {:?}", std::thread::current().id());
+            {
+                // Create a separate scope to avoid Send issues with MutexGuard
+                let indexer_clone = indexer.clone();
                 
-                while let Some((block_height, block_data)) = block_receiver.recv().await {
-                    debug!("Processing block {} ({})", block_height, block_data.len());
+                tokio::spawn(async move {
+                    // Register this thread as the processor thread
+                    indexer_clone.register_current_thread_as_processor();
+                    info!("Block processor task started on thread {:?}", std::thread::current().id());
                     
-                    let result = match indexer.process_block(block_height, block_data).await {
-                        Ok(_) => BlockResult::Success(block_height),
-                        Err(e) => BlockResult::Error(block_height, e),
-                    };
-                    
-                    // Send result
-                    if result_sender_clone.send(result).await.is_err() {
-                        break;
+                    while let Some((block_height, block_data)) = block_receiver.recv().await {
+                        debug!("Processing block {} ({})", block_height, block_data.len());
+                        
+                        let result = match indexer_clone.process_block(block_height, block_data).await {
+                            Ok(_) => BlockResult::Success(block_height),
+                            Err(e) => BlockResult::Error(block_height, e),
+                        };
+                        
+                        // Send result
+                        if result_sender_clone.send(result).await.is_err() {
+                            break;
+                        }
                     }
-                }
-                
-                debug!("Block processor task completed");
-            })
+                    
+                    debug!("Block processor task completed");
+                })
+            }
         };
         
         // Main loop to handle results
@@ -793,6 +857,7 @@ impl Clone for MetashrewRocksDBSync {
             processor_thread_id_tx: self.processor_thread_id_tx.clone(),
             fetcher_thread_id: std::sync::Mutex::new(None),
             processor_thread_id: std::sync::Mutex::new(None),
+            snapshot_manager: self.snapshot_manager.clone(),
         }
     }
 }
@@ -1130,11 +1195,11 @@ async fn handle_jsonrpc(
         };
         
         match runtime.preview_async(
-          &block_data,
-          view_name,
-          &input_data,
-          height,
-      ).await {
+            &block_data,
+            view_name,
+            &input_data,
+            height,
+        ).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(result)),
@@ -1329,7 +1394,66 @@ async fn main() -> Result<()> {
     // Removed deprecated call to set_max_background_compactions
     opts.set_disable_auto_compactions(false);
     
-    let start_block = args.start_block.unwrap_or(0);
+    let mut start_block = args.start_block.unwrap_or(0);
+    
+    // Initialize snapshot manager if snapshot directory is provided
+    let snapshot_manager = if let Some(ref snapshot_dir) = args.snapshot_directory {
+        info!("Snapshot functionality enabled with directory: {:?}", snapshot_dir);
+        info!("Snapshot interval set to {} blocks", args.snapshot_interval);
+        
+        let config = SnapshotConfig {
+            interval: args.snapshot_interval,
+            directory: snapshot_dir.clone(),
+            enabled: true,
+        };
+        
+        let mut manager = SnapshotManager::new(config);
+        
+        // Initialize snapshot directory structure
+        if let Err(e) = manager.initialize().await {
+            error!("Failed to initialize snapshot directory: {}", e);
+            return Err(anyhow!("Failed to initialize snapshot directory: {}", e));
+        }
+        
+        // Set current WASM file
+        if let Err(e) = manager.set_current_wasm(args.indexer.clone()) {
+            error!("Failed to set current WASM file for snapshots: {}", e);
+            return Err(anyhow!("Failed to set current WASM file for snapshots: {}", e));
+        }
+        
+        Some(Arc::new(tokio::sync::Mutex::new(manager)))
+    } else {
+        None
+    };
+    
+    // Handle repo flag if provided
+    if let Some(ref repo_url) = args.repo {
+        info!("Repository URL provided: {}", repo_url);
+        
+        // Create a temporary snapshot manager for repo sync
+        let config = SnapshotConfig {
+            interval: args.snapshot_interval,
+            directory: PathBuf::from("temp_sync"),
+            enabled: true,
+        };
+        
+        let mut sync_manager = SnapshotManager::new(config);
+        
+        // Sync from repository
+        match sync_manager.sync_from_repo(repo_url, &args.db_path).await {
+            Ok(height) => {
+                info!("Successfully synced from repository to height {}", height);
+                if start_block < height {
+                    info!("Adjusting start block from {} to {}", start_block, height);
+                    start_block = height;
+                }
+            },
+            Err(e) => {
+                error!("Failed to sync from repository: {}", e);
+                return Err(anyhow!("Failed to sync from repository: {}", e));
+            }
+        }
+    }
     
     // Create runtime with RocksDB adapter
     let runtime = Arc::new(RwLock::new(MetashrewRuntime::load(
@@ -1366,6 +1490,7 @@ async fn main() -> Result<()> {
         processor_thread_id_tx: Some(thread_id_tx.clone()),
         fetcher_thread_id: std::sync::Mutex::new(None),
         processor_thread_id: std::sync::Mutex::new(None),
+        snapshot_manager,
     };
     
     // Start the indexer in a separate task

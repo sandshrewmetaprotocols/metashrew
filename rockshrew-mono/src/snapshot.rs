@@ -60,9 +60,45 @@ impl SnapshotManager {
             config,
             current_wasm: None,
             current_wasm_hash: None,
-            last_snapshot_height: 0,
+            last_snapshot_height: 0, // Will be updated in initialize_with_db
             key_changes: HashMap::new(),
         }
+    }
+
+    /// Initialize with database to set the last_snapshot_height correctly
+    pub async fn initialize_with_db(&mut self, db_path: &std::path::Path) -> Result<()> {
+        if !self.config.enabled {
+            return Ok(());
+        }
+
+        // Initialize the directory structure first
+        self.initialize().await?;
+
+        // Open the database to get the current height
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        let db = rocksdb::DB::open(&opts, db_path)?;
+        
+        // Get current tip height from database
+        let tip_key = "/__INTERNAL/tip-height".as_bytes();
+        let current_db_height = match db.get(tip_key)? {
+            Some(height_bytes) if height_bytes.len() >= 4 => {
+                let height = u32::from_le_bytes([
+                    height_bytes[0], height_bytes[1], height_bytes[2], height_bytes[3]
+                ]);
+                info!("Found existing database at height {}, setting as last snapshot height", height);
+                height
+            },
+            _ => {
+                info!("No existing height found in database, keeping last_snapshot_height at 0");
+                0
+            }
+        };
+        
+        // Update the last_snapshot_height to the current database height
+        self.last_snapshot_height = current_db_height;
+        
+        Ok(())
     }
 
     /// Initialize the snapshot directory structure

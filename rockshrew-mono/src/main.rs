@@ -1535,8 +1535,8 @@ async fn main() -> Result<()> {
         
         let mut manager = SnapshotManager::new(config);
         
-        // Initialize snapshot directory structure
-        if let Err(e) = manager.initialize().await {
+        // Initialize snapshot directory structure and set last_snapshot_height
+        if let Err(e) = manager.initialize_with_db(&args.db_path).await {
             error!("Failed to initialize snapshot directory: {}", e);
             return Err(anyhow!("Failed to initialize snapshot directory: {}", e));
         }

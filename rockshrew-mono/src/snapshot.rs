@@ -570,7 +570,8 @@ impl SnapshotManager {
             // Use the diff data that was already downloaded and decompressed by the fetcher task
             
             // Apply diff to database
-            info!("Applying diff to database ({} bytes)", diff_data.diff_data.len());
+            info!("Applying diff for blocks {}-{} to database ({} bytes)",
+                interval.start_height, interval.end_height, diff_data.diff_data.len());
             
             // Parse and apply key-value pairs
             let mut i = 0;
@@ -622,7 +623,8 @@ impl SnapshotManager {
                 applied_keys += 1;
             }
             
-            info!("Applied {} key-value pairs to database", applied_keys);
+            info!("Applied {} key-value pairs for blocks {}-{} to database",
+                applied_keys, interval.start_height, interval.end_height);
             
             // Use the expected_root that was already downloaded and parsed by the fetcher task
             let expected_root = &diff_data.expected_root;
@@ -632,7 +634,7 @@ impl SnapshotManager {
             db.put(&root_key, &expected_root)?;
             
             // Verify the state root by computing it locally
-            info!("Verifying state root for height {}", interval.end_height);
+            info!("Verifying state root for blocks {}-{}", interval.start_height, interval.end_height);
             
             // Instead of computing the state root, we'll just verify that the expected root exists in the database
             let root_key = format!("{}:{}", "smt:root:", interval.end_height).into_bytes();
@@ -646,12 +648,12 @@ impl SnapshotManager {
             
             // Compare the stored root with the expected root
             if stored_root == *expected_root {
-                info!("State root verification successful for height {}", interval.end_height);
+                info!("State root verification successful for blocks {}-{}", interval.start_height, interval.end_height);
             } else {
-                error!("State root verification failed for height {}!", interval.end_height);
+                error!("State root verification failed for blocks {}-{}!", interval.start_height, interval.end_height);
                 error!("Expected: {}", hex::encode(expected_root));
                 error!("Stored: {}", hex::encode(&stored_root));
-                return Err(anyhow!("State root verification failed for height {}", interval.end_height));
+                return Err(anyhow!("State root verification failed for blocks {}-{}", interval.start_height, interval.end_height));
             }
             
             // We've already verified the state root by comparing it with what's in the database
@@ -664,7 +666,7 @@ impl SnapshotManager {
             let tip_value = current_height.to_le_bytes().to_vec();
             db.put(tip_key, &tip_value)?;
             
-            info!("Successfully processed interval up to height {}", current_height);
+            info!("Successfully processed interval {}-{}", interval.start_height, interval.end_height);
         }
         
         // If indexer path was not provided, use the latest WASM from repo

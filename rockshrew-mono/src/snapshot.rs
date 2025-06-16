@@ -351,8 +351,9 @@ impl SnapshotManager {
         };
         
         // Find the appropriate intervals to process based on current height
-        let applicable_intervals: Vec<&SnapshotMetadata> = index.intervals.iter()
+        let applicable_intervals: Vec<SnapshotMetadata> = index.intervals.iter()
             .filter(|interval| interval.end_height > current_db_height)
+            .cloned()
             .collect();
         
         if applicable_intervals.is_empty() {

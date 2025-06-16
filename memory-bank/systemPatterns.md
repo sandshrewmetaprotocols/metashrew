@@ -361,6 +361,35 @@ Key components of the snapshot system:
 7. **WASM Module Key-Value Tracking**: Captures all ~40k key-value updates per block from the WASM module
 8. **Callback-Based Tracking**: Uses a callback mechanism to track key-value updates from both direct database operations and batch operations
 9. **Integrity Verification**: Verifies locally computed state roots against remote repository state roots when syncing
+10. **Parallel Processing Pipeline**: Uses separate threads for fetching diffs and applying them, improving performance by allowing concurrent operations
+
+### 5. Repository Sync Pipeline Flow
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│             │     │             │     │             │     │             │
+│  Fetch      │────►│  Download   │────►│  Send via   │────►│  Process    │
+│  Metadata   │     │  Diffs &    │     │  Channel    │     │  Diffs in   │
+│  Index      │     │  WASM Files │     │             │     │  Order      │
+│             │     │             │     │             │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                                                                  │
+                                                                  ▼
+                                                           ┌─────────────┐
+                                                           │             │
+                                                           │  Verify     │
+                                                           │  State Root │
+                                                           │             │
+                                                           └─────────────┘
+```
+
+Key aspects of the parallel processing pipeline:
+
+1. **Concurrent Operations**: Fetcher task downloads data while processor task applies previous diffs
+2. **Channel-Based Communication**: Uses Tokio channels for thread-safe data transfer
+3. **Ordered Processing**: Ensures diffs are applied in the correct order despite parallel fetching
+4. **Error Handling**: Comprehensive error handling with detailed logging
+5. **Resource Efficiency**: Improves performance by utilizing multiple CPU cores
 
 ## Error Handling Patterns
 

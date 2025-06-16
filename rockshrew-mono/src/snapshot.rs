@@ -288,10 +288,11 @@ impl SnapshotManager {
         Ok(())
     }
 
-    /// Sync from a remote repository
+    /// Sync from a remote repository using parallel processing
     pub async fn sync_from_repo(&mut self, repo_url: &str, db_path: &std::path::Path, indexer_path: Option<&PathBuf>) -> Result<(u32, Option<PathBuf>)> {
         use std::path::Path;
         use tokio::io::AsyncWriteExt;
+        use tokio::sync::mpsc;
         use reqwest;
         use log::{debug, error, warn};
 
@@ -362,9 +363,197 @@ impl SnapshotManager {
         // Track the latest WASM file we've seen
         let mut latest_wasm_path: Option<PathBuf> = None;
         
+        // Define data structures for our parallel processing pipeline
+        #[derive(Debug)]
+        struct DiffData {
+            interval: SnapshotMetadata,
+            wasm_path: PathBuf,
+            diff_data: Vec<u8>,
+            expected_root: Vec<u8>,
+        }
+        
+        // Create channels for the pipeline
+        let (diff_sender, mut diff_receiver) = mpsc::channel::<DiffData>(5);
+        
+        // Spawn a task for fetching diffs
+        let fetch_task = {
+            let repo_url = repo_url.to_string();
+            let temp_dir = temp_dir.clone();
+            let applicable_intervals = applicable_intervals.clone();
+            
+            tokio::spawn(async move {
+                let client = reqwest::Client::new();
+                
+                for interval in applicable_intervals {
+                    info!("Fetching data for interval {}-{}", interval.start_height, interval.end_height);
+                    
+                    // Download WASM file if needed
+                    let wasm_url = format!("{}{}", repo_url, interval.wasm_file);
+                    let wasm_path = temp_dir.join(Path::new(&interval.wasm_file).file_name().unwrap());
+                    
+                    if !wasm_path.exists() {
+                        info!("Downloading WASM file: {}", wasm_url);
+                        match client.get(&wasm_url).send().await {
+                            Ok(response) => {
+                                match response.error_for_status() {
+                                    Ok(response) => {
+                                        match response.bytes().await {
+                                            Ok(wasm_bytes) => {
+                                                match tokio::fs::File::create(&wasm_path).await {
+                                                    Ok(mut file) => {
+                                                        if let Err(e) = file.write_all(&wasm_bytes).await {
+                                                            error!("Failed to write WASM file: {}", e);
+                                                            continue;
+                                                        }
+                                                        if let Err(e) = file.flush().await {
+                                                            error!("Failed to flush WASM file: {}", e);
+                                                            continue;
+                                                        }
+                                                    },
+                                                    Err(e) => {
+                                                        error!("Failed to create WASM file: {}", e);
+                                                        continue;
+                                                    }
+                                                }
+                                            },
+                                            Err(e) => {
+                                                error!("Failed to get WASM bytes: {}", e);
+                                                continue;
+                                            }
+                                        }
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to download WASM file: {}", e);
+                                        continue;
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to send WASM request: {}", e);
+                                continue;
+                            }
+                        }
+                        
+                        // Verify WASM hash
+                        match std::fs::read(&wasm_path) {
+                            Ok(wasm_data) => {
+                                let hash = hex::encode(Sha256::digest(&wasm_data));
+                                if !hash.starts_with(&interval.wasm_hash) {
+                                    warn!("WASM hash mismatch: expected {}, got {}", interval.wasm_hash, hash);
+                                    // Continue anyway, but log the warning
+                                }
+                            },
+                            Err(e) => {
+                                error!("Failed to read WASM file for hash verification: {}", e);
+                                continue;
+                            }
+                        }
+                    }
+                    
+                    // Download diff file
+                    let diff_url = format!("{}{}", repo_url, interval.diff_file);
+                    info!("Downloading diff file: {}", diff_url);
+                    
+                    let diff_data = match client.get(&diff_url).send().await {
+                        Ok(response) => {
+                            match response.error_for_status() {
+                                Ok(response) => {
+                                    match response.bytes().await {
+                                        Ok(compressed_diff) => {
+                                            match zstd::decode_all(compressed_diff.as_ref()) {
+                                                Ok(diff_data) => diff_data,
+                                                Err(e) => {
+                                                    error!("Failed to decompress diff data: {}", e);
+                                                    continue;
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("Failed to get diff bytes: {}", e);
+                                            continue;
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("Failed to download diff file: {}", e);
+                                    continue;
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to send diff request: {}", e);
+                            continue;
+                        }
+                    };
+                    
+                    // Download and parse stateroot
+                    let stateroot_url = format!("{}{}/stateroot.json",
+                        repo_url,
+                        interval.diff_file.trim_end_matches("/diff.bin.zst"));
+                    
+                    info!("Downloading stateroot: {}", stateroot_url);
+                    let expected_root = match client.get(&stateroot_url).send().await {
+                        Ok(response) => {
+                            match response.error_for_status() {
+                                Ok(response) => {
+                                    match response.text().await {
+                                        Ok(stateroot_json) => {
+                                            match serde_json::from_str::<StateRoot>(&stateroot_json) {
+                                                Ok(stateroot) => {
+                                                    match hex::decode(&stateroot.root) {
+                                                        Ok(root) => root,
+                                                        Err(e) => {
+                                                            error!("Failed to decode state root: {}", e);
+                                                            continue;
+                                                        }
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    error!("Failed to parse stateroot JSON: {}", e);
+                                                    continue;
+                                                }
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("Failed to get stateroot text: {}", e);
+                                            continue;
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    error!("Failed to download stateroot: {}", e);
+                                    continue;
+                                }
+                            }
+                        },
+                        Err(e) => {
+                            error!("Failed to send stateroot request: {}", e);
+                            continue;
+                        }
+                    };
+                    
+                    // Send the data to the processor
+                    let diff_data = DiffData {
+                        interval: interval.clone(),
+                        wasm_path: wasm_path.clone(),
+                        diff_data,
+                        expected_root,
+                    };
+                    
+                    if let Err(e) = diff_sender.send(diff_data).await {
+                        error!("Failed to send diff data to processor: {}", e);
+                        break;
+                    }
+                }
+            })
+        };
+        
         // Process applicable intervals in order
         let mut current_height = current_db_height;
-        for interval in applicable_intervals {
+        
+        // Process diffs as they become available
+        while let Some(diff_data) = diff_receiver.recv().await {
+            let interval = &diff_data.interval;
             info!("Processing interval {}-{}", interval.start_height, interval.end_height);
             
             // Check if we need to download this interval

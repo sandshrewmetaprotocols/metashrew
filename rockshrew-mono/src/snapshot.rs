@@ -564,84 +564,48 @@ impl SnapshotManager {
                 continue;
             }
             
-            // Download WASM file if needed
-            let wasm_url = format!("{}{}", repo_url, interval.wasm_file);
-            let wasm_path = temp_dir.join(Path::new(&interval.wasm_file).file_name().unwrap());
-            
-            if !wasm_path.exists() {
-                info!("Downloading WASM file: {}", wasm_url);
-                let wasm_response = client.get(&wasm_url)
-                    .send()
-                    .await?
-                    .error_for_status()?;
-                
-                let wasm_bytes = wasm_response.bytes().await?;
-                let mut file = tokio::fs::File::create(&wasm_path).await?;
-                file.write_all(&wasm_bytes).await?;
-                file.flush().await?;
-                
-                // Verify WASM hash
-                let wasm_data = std::fs::read(&wasm_path)?;
-                let hash = hex::encode(Sha256::digest(&wasm_data));
-                
-                if !hash.starts_with(&interval.wasm_hash) {
-                    warn!("WASM hash mismatch: expected {}, got {}", interval.wasm_hash, hash);
-                    // Continue anyway, but log the warning
-                }
-            }
-            
             // Keep track of the latest WASM file
-            latest_wasm_path = Some(wasm_path.clone());
+            latest_wasm_path = Some(diff_data.wasm_path.clone());
             
-            // Download diff file
-            let diff_url = format!("{}{}", repo_url, interval.diff_file);
-            info!("Downloading diff file: {}", diff_url);
-            
-            let diff_response = client.get(&diff_url)
-                .send()
-                .await?
-                .error_for_status()?;
-            
-            let compressed_diff = diff_response.bytes().await?;
-            let diff_data = zstd::decode_all(compressed_diff.as_ref())?;
+            // Use the diff data that was already downloaded and decompressed by the fetcher task
             
             // Apply diff to database
-            info!("Applying diff to database ({} bytes)", diff_data.len());
+            info!("Applying diff to database ({} bytes)", diff_data.diff_data.len());
             
             // Parse and apply key-value pairs
             let mut i = 0;
             let mut applied_keys = 0;
-            while i < diff_data.len() {
+            while i < diff_data.diff_data.len() {
                 // Read key length
-                if i + 4 > diff_data.len() {
+                if i + 4 > diff_data.diff_data.len() {
                     break;
                 }
                 let key_len = u32::from_le_bytes([
-                    diff_data[i], diff_data[i+1], diff_data[i+2], diff_data[i+3]
+                    diff_data.diff_data[i], diff_data.diff_data[i+1], diff_data.diff_data[i+2], diff_data.diff_data[i+3]
                 ]) as usize;
                 i += 4;
                 
                 // Read key
-                if i + key_len > diff_data.len() {
+                if i + key_len > diff_data.diff_data.len() {
                     break;
                 }
-                let key = diff_data[i..i+key_len].to_vec();
+                let key = diff_data.diff_data[i..i+key_len].to_vec();
                 i += key_len;
                 
                 // Read value length
-                if i + 4 > diff_data.len() {
+                if i + 4 > diff_data.diff_data.len() {
                     break;
                 }
                 let value_len = u32::from_le_bytes([
-                    diff_data[i], diff_data[i+1], diff_data[i+2], diff_data[i+3]
+                    diff_data.diff_data[i], diff_data.diff_data[i+1], diff_data.diff_data[i+2], diff_data.diff_data[i+3]
                 ]) as usize;
                 i += 4;
                 
                 // Read value
-                if i + value_len > diff_data.len() {
+                if i + value_len > diff_data.diff_data.len() {
                     break;
                 }
-                let value = diff_data[i..i+value_len].to_vec();
+                let value = diff_data.diff_data[i..i+value_len].to_vec();
                 i += value_len;
                 
                 // Apply to database using BST approach
@@ -660,22 +624,8 @@ impl SnapshotManager {
             
             info!("Applied {} key-value pairs to database", applied_keys);
             
-            // Download and verify stateroot
-            let stateroot_url = format!("{}{}/stateroot.json",
-                repo_url,
-                interval.diff_file.trim_end_matches("/diff.bin.zst"));
-            
-            info!("Downloading stateroot: {}", stateroot_url);
-            let stateroot_response = client.get(&stateroot_url)
-                .send()
-                .await?
-                .error_for_status()?;
-            
-            let stateroot_json = stateroot_response.text().await?;
-            let stateroot: StateRoot = serde_json::from_str(&stateroot_json)?;
-            
-            // Verify stateroot matches what's in the JSON
-            let expected_root = hex::decode(&stateroot.root)?;
+            // Use the expected_root that was already downloaded and parsed by the fetcher task
+            let expected_root = &diff_data.expected_root;
             
             // Store stateroot in database
             let root_key = format!("{}:{}", "smt:root:", interval.end_height).into_bytes();
@@ -695,11 +645,11 @@ impl SnapshotManager {
             };
             
             // Compare the stored root with the expected root
-            if stored_root == expected_root {
+            if stored_root == *expected_root {
                 info!("State root verification successful for height {}", interval.end_height);
             } else {
                 error!("State root verification failed for height {}!", interval.end_height);
-                error!("Expected: {}", hex::encode(&expected_root));
+                error!("Expected: {}", hex::encode(expected_root));
                 error!("Stored: {}", hex::encode(&stored_root));
                 return Err(anyhow!("State root verification failed for height {}", interval.end_height));
             }

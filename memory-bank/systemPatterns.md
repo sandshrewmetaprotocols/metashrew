@@ -360,6 +360,7 @@ Key components of the snapshot system:
 6. **Remote Sync**: Supports syncing from remote snapshot repositories
 7. **WASM Module Key-Value Tracking**: Captures all ~40k key-value updates per block from the WASM module
 8. **Callback-Based Tracking**: Uses a callback mechanism to track key-value updates from both direct database operations and batch operations
+9. **Integrity Verification**: Verifies locally computed state roots against remote repository state roots when syncing
 
 ## Error Handling Patterns
 

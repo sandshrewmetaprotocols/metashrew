@@ -1,11 +1,11 @@
-use anyhow::Result;
+use std::io::{Error, Result};
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
 pub struct MemStore {
-    db: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
+    pub db: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
 }
 
 impl MemStore {
@@ -31,9 +31,9 @@ impl BatchLike for MemStoreBatch {
 
 impl KeyValueStoreLike for MemStore {
     type Batch = MemStoreBatch;
-    type Error = anyhow::Error;
+    type Error = Error;
 
-    fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
+    fn write(&mut self, batch: Self::Batch) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         for (key, value) in batch.operations {
             db.insert(key, value);
@@ -41,12 +41,12 @@ impl KeyValueStoreLike for MemStore {
         Ok(())
     }
 
-    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>> {
         let db = self.db.lock().unwrap();
         Ok(db.get(key.as_ref()).cloned())
     }
 
-    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
+    fn put<K, V>(&mut self, key: K, value: V) -> Result<()>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -56,9 +56,15 @@ impl KeyValueStoreLike for MemStore {
         Ok(())
     }
 
-    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
+    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<()> {
         let mut db = self.db.lock().unwrap();
         db.remove(key.as_ref());
         Ok(())
+    }
+
+    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>> {
+        let db = self.db.lock().unwrap();
+        let keys = db.keys().cloned().collect::<Vec<Vec<u8>>>();
+        Ok(Box::new(keys.into_iter()))
     }
 }

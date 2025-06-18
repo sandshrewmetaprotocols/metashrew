@@ -221,4 +221,12 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         // Perform the actual database update
         self.db.put(to_labeled_key(&key_vec), value_vec)
     }
+
+    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
+        let iter = self.db.iterator(rocksdb::IteratorMode::Start);
+        Ok(Box::new(iter.map(|item| {
+            let (key, _) = item.unwrap();
+            key.to_vec()
+        })))
+    }
 }

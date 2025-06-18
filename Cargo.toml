@@ -10,5 +10,8 @@ members = [
   "rockshrew-runtime",
   "rockshrew-view",
   "rockshrew-mono",
-  "rockshrew-diff"
-, "metashrew-minimal", "memshrew-store"]
+  "rockshrew-diff",
+  "metashrew-minimal",
+  "memshrew-store",
+  "metashrew-test-harness"
+]

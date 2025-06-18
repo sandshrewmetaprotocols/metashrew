@@ -39,6 +39,7 @@ pub trait KeyValueStoreLike {
     fn track_kv_update(&mut self, _key: Vec<u8>, _value: Vec<u8>) {
         // Default implementation does nothing
     }
+    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error>;
 }
 
 //const TIP_KEY: &[u8] = b"T";
@@ -98,6 +99,11 @@ impl<T: KeyValueStoreLike + Clone> KeyValueStoreLike for PreviewDBWrapper<T> {
             value.as_ref().to_vec(),
         );
         Ok(())
+    }
+
+    fn keys(&self) -> Result<Box<dyn Iterator<Item = Vec<u8>>>, Self::Error> {
+        // For preview, we don't need to implement keys
+        Ok(Box::new(std::iter::empty()))
     }
 }
 

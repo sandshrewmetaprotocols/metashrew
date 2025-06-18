@@ -11,3 +11,6 @@ metashrew-core = { path = "../metashrew-core" }
 metashrew-support = { path = "../metashrew-support" }
 anyhow = "1.0.86"
 hex = "0.4.3"
+
+[features]
+std = []

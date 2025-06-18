@@ -11,4 +11,4 @@ members = [
   "rockshrew-view",
   "rockshrew-mono",
   "rockshrew-diff"
-]
+, "metashrew-minimal", "memshrew-store"]

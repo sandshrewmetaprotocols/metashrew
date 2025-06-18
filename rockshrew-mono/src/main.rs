@@ -1657,4 +1657,32 @@ async fn main() -> Result<()> {
     }
     
     Ok(())
-}
+    }
+    
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use memshrew_store::MemStore;
+        use std::path::PathBuf;
+        use anyhow::Result;
+    
+        #[tokio::test]
+        async fn test_minimal_indexer() -> Result<()> {
+            let wasm_path = PathBuf::from("../target/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
+            if !wasm_path.exists() {
+                panic!("metashrew-minimal.wasm not found at {:?}. Please run `cargo build --target wasm32-unknown-unknown --release -p metashrew-minimal` first.", wasm_path);
+            }
+            let mem_store = MemStore::new();
+            let mut runtime = MetashrewRuntime::load(wasm_path, mem_store)?;
+    
+            let block_data = b"test block data".to_vec();
+            runtime.context.lock().unwrap().height = 1;
+            runtime.context.lock().unwrap().block = block_data.clone();
+            runtime.run()?;
+    
+            let result = runtime.view("view_block_by_height".to_string(), &1u32.to_be_bytes().to_vec(), 1).await?;
+            assert_eq!(result, block_data);
+    
+            Ok(())
+        }
+    }

@@ -2856,6 +2856,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "memshrew-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "metashrew-runtime",
+]
+
+[[package]]
 name = "metashrew-core"
 version = "9.0.0"
 dependencies = [
@@ -2872,6 +2881,16 @@ dependencies = [
  "protoc-rust",
  "wasm-bindgen",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "metashrew-minimal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "metashrew-core",
+ "metashrew-support",
 ]
 
 [[package]]
@@ -3996,6 +4015,7 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "log",
+ "memshrew-store",
  "metashrew-runtime",
  "num_cpus",
  "once_cell",

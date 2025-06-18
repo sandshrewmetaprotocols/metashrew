@@ -1,0 +1,9 @@
+[package]
+name = "memshrew-store"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+metashrew-runtime = { path = "../runtime" }
+async-trait = "0.1.81"
+anyhow = "1.0.86"

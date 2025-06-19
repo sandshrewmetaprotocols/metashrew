@@ -47,6 +47,10 @@ fn main() -> Result<()> {
     let root_after_reorg = harness.smt.get_smt_root_at_height(2)?;
     println!("SMT root after reorg: {}", hex::encode(root_after_reorg));
 
+    // Verify view function after reorg
+    let view_result = harness.runtime.view("view_block_by_height".to_string(), &2u32.to_be_bytes().to_vec(), 2).await?;
+    assert_eq!(view_result, b"block 3 prime".to_vec());
+
     println!("All tests passed!");
 
     Ok(())

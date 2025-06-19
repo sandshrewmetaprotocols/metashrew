@@ -51,7 +51,7 @@ impl SMTHelper {
                 continue;
             }
             
-            let root_key = format!("{}:{}", SMT_ROOT_PREFIX, mid).into_bytes();
+            let root_key = format!("{}::{}", SMT_ROOT_PREFIX, mid).into_bytes();
             if let Ok(Some(_)) = self.db.get(&root_key) {
                 // Found a valid height, but continue searching for a closer one
                 found = true;
@@ -75,7 +75,7 @@ impl SMTHelper {
         
         if found {
             // Retrieve the actual root data
-            let root_key = format!("{}:{}", SMT_ROOT_PREFIX, best_match).into_bytes();
+            let root_key = format!("{}::{}", SMT_ROOT_PREFIX, best_match).into_bytes();
             if let Ok(Some(root_data)) = self.db.get(&root_key) {
                 if root_data.len() == 32 {
                     let mut root = [0u8; 32];
@@ -229,7 +229,7 @@ impl SMTHelper {
         new_root.copy_from_slice(&hasher.finalize());
         
         // Store the new root
-        let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+        let root_key = format!("{}::{}", SMT_ROOT_PREFIX, height).into_bytes();
         if let Err(e) = self.db.put(&root_key, &new_root) {
             error!("Failed to store SMT root for height {}: {}", height, e);
             return Err(anyhow!("Failed to store SMT root: {}", e));

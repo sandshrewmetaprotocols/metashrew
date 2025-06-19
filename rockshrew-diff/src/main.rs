@@ -8,7 +8,7 @@ use metashrew_runtime::MetashrewRuntime;
 use rand::Rng;
 use rockshrew_runtime::{set_label, RocksDBRuntimeAdapter};
 use rocksdb::Options;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -104,19 +104,6 @@ impl RockshrewDiffRuntime {
             diffs_found: 0,
             diff_blocks: Vec::new(),
         }
-    }
-
-    // Helper function to create a tracking runtime
-    fn create_tracking_runtime(
-        wasm_path: PathBuf,
-        db_adapter: RocksDBRuntimeAdapter,
-        prefix: Vec<u8>,
-    ) -> Result<MetashrewRuntime<TrackingAdapter>> {
-        // Create our tracking adapter that wraps the RocksDBRuntimeAdapter
-        let tracking_adapter = TrackingAdapter::new(db_adapter, prefix);
-        
-        // Create the runtime with our tracking adapter
-        MetashrewRuntime::load(wasm_path, tracking_adapter)
     }
 
     // Function to compare updates between primary and compare runtimes

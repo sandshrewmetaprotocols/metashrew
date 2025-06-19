@@ -186,7 +186,7 @@ impl Payload {
         merkle_root: Option<TapNodeHash>,
     ) -> Payload {
         let (output_key, _parity) = internal_key.tap_tweak(secp, merkle_root);
-        let prog = WitnessProgram::new(WitnessVersion::V1, &output_key.to_inner().serialize())
+        let prog = WitnessProgram::new(WitnessVersion::V1, &output_key.to_x_only_public_key().serialize())
             .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)
     }
@@ -195,7 +195,7 @@ impl Payload {
     ///
     /// This method is not recommended for use and [Payload::p2tr()] should be used where possible.
     pub fn p2tr_tweaked(output_key: TweakedPublicKey) -> Payload {
-        let prog = WitnessProgram::new(WitnessVersion::V1, &output_key.to_inner().serialize())
+        let prog = WitnessProgram::new(WitnessVersion::V1, &output_key.to_x_only_public_key().serialize())
             .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)
     }

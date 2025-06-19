@@ -13,7 +13,6 @@ use num_cpus;
 use rand::Rng;
 use rocksdb::Options;
 use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
-use sha2::Digest;
 
 // Import our SMT helper module
 mod smt_helper;
@@ -128,6 +127,7 @@ struct JsonRpcErrorObject {
 
 // JSON-RPC response structure for internal use
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct JsonRpcResponse {
     id: u32,
     result: Option<Value>,
@@ -137,6 +137,7 @@ struct JsonRpcResponse {
 
 // JSON-RPC error structure for internal use
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct JsonRpcErrorInternal {
     code: i32,
     message: String,
@@ -174,6 +175,7 @@ impl error::ResponseError for IndexerError {
 
 // Block count response structure
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct BlockCountResponse {
     id: u32,
     result: Option<u32>,
@@ -182,6 +184,7 @@ struct BlockCountResponse {
 
 // Block hash response structure
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct BlockHashResponse {
     id: u32,
     result: Option<String>,
@@ -662,12 +665,14 @@ impl MetashrewRocksDBSync {
         return Ok(best);
     }
 
+    #[allow(dead_code)]
     async fn get_once(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
         let runtime = self.runtime.async_read().await;
         let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
         context.db.get(key).map_err(|_| anyhow!("GET error against RocksDB"))
     }
 
+    #[allow(dead_code)]
     async fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
         let mut count = 0;
         loop {
@@ -794,6 +799,7 @@ impl MetashrewRocksDBSync {
         Ok(hex::decode(block_hex)?)
     }
 
+    #[allow(dead_code)]
     async fn run(&mut self) -> Result<()> {
         let mut height: u32 = self.query_height().await?;
         CURRENT_HEIGHT.store(height, Ordering::SeqCst);
@@ -929,6 +935,7 @@ impl MetashrewRocksDBSync {
         false
     }
 
+    #[allow(dead_code)]
     fn set_thread_id_senders(
         &mut self,
         fetcher_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>,
@@ -968,6 +975,7 @@ impl MetashrewRocksDBSync {
         }
     }
     
+    #[allow(dead_code)]
     fn is_fetcher_thread(&self) -> bool {
         match self.fetcher_thread_id.lock() {
             Ok(guard) => {
@@ -981,6 +989,7 @@ impl MetashrewRocksDBSync {
         }
     }
     
+    #[allow(dead_code)]
     fn is_processor_thread(&self) -> bool {
         match self.processor_thread_id.lock() {
             Ok(guard) => {

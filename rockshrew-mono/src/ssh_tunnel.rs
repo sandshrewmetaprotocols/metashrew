@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Result};
 use log::{debug, error, info};
 use russh::{client, ChannelMsg};
-use russh_keys::{self, key, ssh_key};
+use russh_keys::{self, ssh_key};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -75,6 +75,7 @@ pub struct SshTunnelConfig {
 #[derive(Clone)]
 pub struct SshTunnel {
     pub local_port: u16,
+    #[allow(dead_code)]
     session: Arc<Mutex<client::Handle<Client>>>,
     _listener_task: Arc<()>, // Keep the listener task alive
 }
@@ -127,6 +128,7 @@ impl SshTunnel {
 
         // Try to create a local listener with multiple attempts
         let max_attempts = 3;
+        #[allow(unused_assignments)]
         let mut last_error = None;
         
         for attempt in 1..=max_attempts {
@@ -155,7 +157,7 @@ impl SshTunnel {
                     let session_clone = ssh_session.clone();
                     
                     // Spawn a task to handle incoming connections
-                    let listener_task = tokio::spawn(async move {
+                    let _listener_task = tokio::spawn(async move {
                         loop {
                             match listener.accept().await {
                                 Ok((socket, addr)) => {
@@ -270,8 +272,9 @@ impl SshTunnel {
     }
 
     /// Close the SSH tunnel
+    #[allow(dead_code)]
     pub async fn close(&self) -> Result<()> {
-        let mut session = self.session.lock().await;
+        let session = self.session.lock().await;
         session
             .disconnect(russh::Disconnect::ByApplication, "", "English")
             .await?;
@@ -287,7 +290,7 @@ async fn handle_connection(
     forward_host: &str,
     forward_port: u16,
 ) -> Result<()> {
-    let mut session = session.lock().await;
+    let session = session.lock().await;
     
     // Open a direct-tcpip channel to the target
     let mut channel = session
@@ -621,6 +624,7 @@ pub async fn parse_daemon_rpc_url(url_str: &str) -> Result<(String, bool, Option
 }
 
 /// Creates a reqwest Client with appropriate SSL configuration
+#[allow(dead_code)]
 pub fn create_http_client(bypass_ssl: bool) -> Result<reqwest::Client> {
     let client_builder = reqwest::ClientBuilder::new()
         .timeout(std::time::Duration::from_secs(60))         // 60 seconds timeout
@@ -655,6 +659,7 @@ impl TunneledResponse {
     }
     
     /// Get the response bytes while keeping the tunnel alive
+    #[allow(dead_code)]
     pub async fn bytes(self) -> Result<bytes::Bytes> {
         // This consumes self, which keeps the tunnel alive until the bytes are read
         match self.response.bytes().await {
@@ -676,11 +681,13 @@ impl TunneledResponse {
     }
     
     /// Get the response headers
+    #[allow(dead_code)]
     pub fn headers(&self) -> &reqwest::header::HeaderMap {
         self.response.headers()
     }
     
     /// Get the response status
+    #[allow(dead_code)]
     pub fn status(&self) -> reqwest::StatusCode {
         self.response.status()
     }
@@ -695,7 +702,7 @@ pub async fn make_request_with_tunnel(
     bypass_ssl: bool,
     existing_tunnel: Option<SshTunnel>
 ) -> Result<TunneledResponse> {
-    use reqwest::{Client, ClientBuilder};
+    use reqwest::{ClientBuilder};
     
     // Create HTTP client with appropriate SSL configuration
     let client_builder = ClientBuilder::new()
@@ -857,7 +864,7 @@ pub async fn read_file_over_ssh(url_str: &str) -> Result<String> {
     debug!("Using SSH key: {:?}", actual_key_path);
     
     // Create SSH client config
-    let config = SshTunnelConfig {
+    let _config = SshTunnelConfig {
         ssh_host: ssh_host.clone(),
         ssh_port,
         ssh_user: ssh_user.clone(),
@@ -877,7 +884,7 @@ pub async fn read_file_over_ssh(url_str: &str) -> Result<String> {
     .await?;
     
     // Execute the command to read the file
-    let mut session = ssh_session.lock().await;
+    let session = ssh_session.lock().await;
     let mut channel = session.channel_open_session().await?;
     
     // Execute cat command

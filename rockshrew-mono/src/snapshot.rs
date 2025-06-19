@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{PathBuf};
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs as async_fs;
 use zstd;
@@ -330,7 +329,7 @@ impl SnapshotManager {
         use tokio::io::AsyncWriteExt;
         use tokio::sync::mpsc;
         use reqwest;
-        use log::{debug, error, warn};
+        use log::{error, warn};
 
         info!("Syncing from repository: {}", repo_url);
         
@@ -413,7 +412,7 @@ impl SnapshotManager {
         let (diff_sender, mut diff_receiver) = mpsc::channel::<DiffData>(5);
         
         // Spawn a task for fetching diffs
-        let fetch_task = {
+        let _fetch_task = {
             let repo_url = repo_url.to_string();
             let temp_dir = temp_dir.clone();
             let applicable_intervals = applicable_intervals.clone();

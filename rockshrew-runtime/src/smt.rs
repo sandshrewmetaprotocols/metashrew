@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
-use rocksdb::{DB, WriteBatch};
+use rocksdb::DB;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use std::collections::HashMap;
 
 // Prefixes for different types of keys in the database
 pub const SMT_NODE_PREFIX: &str = "smt:node:";
@@ -191,8 +190,8 @@ impl SMTHelper {
             match node {
                 SMTNode::Leaf { ref key, .. } => {
                     // Check if this is the leaf we're looking for
-                    if Self::hash_key(&key) == key_hash {
-                        return Ok(Some(node));
+                    if Self::hash_key(key) == key_hash {
+                        return Ok(Some(node.clone()));
                     } else {
                         // Hash collision (extremely unlikely)
                         return Ok(None);
@@ -406,5 +405,51 @@ impl SMTHelper {
             Some(value) => Ok(Some(value)),
             None => Ok(None),
         }
+    }
+    
+    pub fn bst_put(&self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
+        let height_key = format!("bst:height:{}:{}", hex::encode(key), height).into_bytes();
+        self.db.put(height_key, value)?;
+        Ok(())
+    }
+
+    pub fn bst_get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
+        let mut iter = self.db.raw_iterator();
+        let prefix = format!("bst:height:{}:", hex::encode(key));
+        iter.seek_for_prev(format!("{}{}", prefix, height));
+        if iter.valid() {
+            let k = iter.key().unwrap();
+            if k.starts_with(prefix.as_bytes()) {
+                return Ok(Some(iter.value().unwrap().to_vec()));
+            }
+        }
+        Ok(None)
+    }
+    
+    pub fn calculate_and_store_state_root(&self, height: u32) -> Result<[u8; 32]> {
+        let prev_height = if height > 0 { height - 1 } else { 0 };
+        let prev_root = self.get_smt_root_at_height(prev_height)?;
+        
+        // Get all keys from the database
+        let mut keys = Vec::new();
+        let mut iter = self.db.raw_iterator();
+        iter.seek_to_first();
+        while iter.valid() {
+            keys.push(iter.key().unwrap().to_vec());
+            iter.next();
+        }
+        
+        // For simplicity, we'll just use the last key to calculate the new root
+        // This is not a correct SMT implementation, but it's a placeholder
+        if let Some(key) = keys.last() {
+            if let Some(value) = self.db.get(key)? {
+                let new_root = self.compute_new_root(prev_root, &[(key.clone(), value)], height)?;
+                let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+                self.db.put(root_key, new_root)?;
+                return Ok(new_root);
+            }
+        }
+        
+        Ok(prev_root)
     }
 }

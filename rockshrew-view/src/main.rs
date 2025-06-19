@@ -105,7 +105,7 @@ struct JsonRpcRequest {
 #[derive(Serialize)]
 struct JsonRpcResult {
     id: u32,
-    result: String,
+    result: serde_json::Value,
     jsonrpc: String,
 }
 #[derive(Serialize)]
@@ -143,7 +143,7 @@ pub fn set_height(h: u32) -> u32 {
     }
 }
 
-pub async fn fetch_and_set_height(internal_db: &RocksDBRuntimeAdapter) -> Result<u32> {
+pub async fn fetch_and_set_height(internal_db: &RocksDBRuntimeAdapter) -> Result<u32, actix_web::Error> {
     let height = query_height(internal_db.db.clone(), 0)
         .await
         .map_err(|e| from_anyhow(e))?;
@@ -257,17 +257,16 @@ async fn jsonrpc_call(
                 return Ok(HttpResponse::Ok().json(error));
             }
         };
-// Use await with the async view function
-match context.runtime.view(
-    view_name,
-    &hex::decode(input_hex.trim_start_matches("0x"))
-        .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
-    height,
-).await {
-    Ok(res_string) => {
+        match context.runtime.view(
+            view_name,
+            &hex::decode(input_hex.trim_start_matches("0x"))
+                .map_err(|e| error::ErrorBadRequest(format!("Invalid hex input: {}", e)))?,
+            height,
+        ).await {
+            Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
-                    result: String::from("0x") + hex::encode(res_string).as_str(),
+                    result: serde_json::Value::String(format!("0x{}", hex::encode(res_string))),
                     jsonrpc: "2.0".to_string(),
                 };
                 Ok(HttpResponse::Ok().json(result))
@@ -431,7 +430,7 @@ match context.runtime.view(
             Ok(res_string) => {
                 let result = JsonRpcResult {
                     id: body.id,
-                    result: String::from("0x") + hex::encode(res_string).as_str(),
+                    result: serde_json::Value::String(format!("0x{}", hex::encode(res_string))),
                     jsonrpc: "2.0".to_string(),
                 };
                 Ok(HttpResponse::Ok().json(result))
@@ -487,7 +486,7 @@ match context.runtime.view(
             Ok(root) => {
                 let result = JsonRpcResult {
                     id: body.id,
-                    result: format!("0x{}", hex::encode(root)),
+                    result: serde_json::Value::String(format!("0x{}", hex::encode(root))),
                     jsonrpc: "2.0".to_string(),
                 };
                 Ok(HttpResponse::Ok().json(result))

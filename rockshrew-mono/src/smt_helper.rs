@@ -19,6 +19,7 @@ pub struct SMTHelper {
 
 /// Represents a key-value pair with height information
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct HeightIndexedValue {
     pub key: Vec<u8>,
     pub value: Vec<u8>,

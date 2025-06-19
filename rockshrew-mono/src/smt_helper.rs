@@ -32,12 +32,25 @@ impl SMTHelper {
 
     /// Get the SMT root for a specific height using binary search
     pub fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
-        // Try direct lookup first with the correct key format
-        let direct_key = format!("{}::{}", SMT_ROOT_PREFIX, height).into_bytes();
-        info!("Trying direct lookup with key: {:?}", String::from_utf8_lossy(&direct_key));
+        // Try direct lookup first with double colon format
+        let double_key = format!("{}::{}", SMT_ROOT_PREFIX, height).into_bytes();
+        info!("Trying direct lookup with double colon key: {:?}", String::from_utf8_lossy(&double_key));
         
-        if let Ok(Some(root_data)) = self.db.get(&direct_key) {
-            info!("Found state root directly for height {}: {}", height, hex::encode(&root_data));
+        if let Ok(Some(root_data)) = self.db.get(&double_key) {
+            info!("Found state root with double colon format for height {}: {}", height, hex::encode(&root_data));
+            if root_data.len() == 32 {
+                let mut root = [0u8; 32];
+                root.copy_from_slice(&root_data);
+                return Ok(root);
+            }
+        }
+        
+        // Try with triple colon format
+        let triple_key = format!("{}:::{}", SMT_ROOT_PREFIX, height).into_bytes();
+        info!("Trying direct lookup with triple colon key: {:?}", String::from_utf8_lossy(&triple_key));
+        
+        if let Ok(Some(root_data)) = self.db.get(&triple_key) {
+            info!("Found state root with triple colon format for height {}: {}", height, hex::encode(&root_data));
             if root_data.len() == 32 {
                 let mut root = [0u8; 32];
                 root.copy_from_slice(&root_data);

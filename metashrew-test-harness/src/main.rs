@@ -2,7 +2,8 @@ use anyhow::Result;
 use metashrew_test_harness::MetashrewTestHarness;
 use memshrew_store::MemStore;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Initialize logger
     env_logger::init();
 

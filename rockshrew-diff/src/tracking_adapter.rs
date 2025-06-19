@@ -112,6 +112,10 @@ impl KeyValueStoreLike for TrackingAdapter {
         // Forward to the inner adapter - no tracking here as it's not used by __flush
         self.inner.put(key, value)
     }
+
+    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
+        self.inner.keys()
+    }
 }
 
 impl TrackingAdapter {

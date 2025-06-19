@@ -1228,12 +1228,18 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_height" {
-        // No need to lock the runtime for this operation
-        Ok(HttpResponse::Ok().json(JsonRpcResult {
-            id: body.id,
-            result: CURRENT_HEIGHT.load(Ordering::SeqCst).to_string(),
-            jsonrpc: "2.0".to_string(),
-        }))
+        // Get the current height
+        let current_height = CURRENT_HEIGHT.load(Ordering::SeqCst);
+        
+        // If the current height is greater than 0, subtract 1 to get the actual latest block
+        let latest_block = if current_height > 0 { current_height - 1 } else { 0 };
+        
+        // Return the latest block height as a number
+        Ok(HttpResponse::Ok().json(serde_json::json!({
+            "id": body.id,
+            "result": latest_block,
+            "jsonrpc": "2.0"
+        })))
     } else if body.method == "metashrew_getblockhash" {
         // Acquire a read lock on the runtime
         let runtime = state.runtime.read().await;
@@ -1294,7 +1300,12 @@ async fn handle_jsonrpc(
     } else if body.method == "metashrew_stateroot" {
         // Get the stateroot from the SMT adapter
         let height = match &body.params[0] {
-            Value::String(s) if s == "latest" => CURRENT_HEIGHT.load(Ordering::SeqCst),
+            Value::String(s) if s == "latest" => {
+                // Get the current height
+                let current_height = CURRENT_HEIGHT.load(Ordering::SeqCst);
+                // If the current height is greater than 0, subtract 1 to get the actual latest block
+                if current_height > 0 { current_height - 1 } else { 0 }
+            },
             Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
             _ => {
                 return Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -1317,10 +1328,26 @@ async fn handle_jsonrpc(
             .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
         
         // Try to directly query the database for a state root key
+        // First try with double colon format
         let direct_key = format!("{}::{}", "smt:root", height).into_bytes();
-        info!("Directly checking for key: {:?}", String::from_utf8_lossy(&direct_key));
+        info!("Directly checking for key with double colon: {:?}", String::from_utf8_lossy(&direct_key));
         
-        match context.db.db.get(&direct_key) {
+        let result = context.db.db.get(&direct_key);
+        
+        if let Ok(Some(value)) = result {
+            info!("Found state root with double colon format: {}", hex::encode(&value));
+            return Ok(HttpResponse::Ok().json(JsonRpcResult {
+                id: body.id,
+                result: format!("0x{}", hex::encode(value)),
+                jsonrpc: "2.0".to_string(),
+            }));
+        }
+        
+        // If not found, try with triple colon format
+        let triple_key = format!("{}:::{}", "smt:root", height).into_bytes();
+        info!("Directly checking for key with triple colon: {:?}", String::from_utf8_lossy(&triple_key));
+        
+        match context.db.db.get(&triple_key) {
             Ok(Some(value)) => {
                 info!("Found state root directly in DB: {}", hex::encode(&value));
                 Ok(HttpResponse::Ok().json(JsonRpcResult {

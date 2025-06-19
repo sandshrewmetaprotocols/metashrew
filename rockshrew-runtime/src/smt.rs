@@ -189,7 +189,7 @@ impl SMTHelper {
             };
             
             match node {
-                SMTNode::Leaf { key, .. } => {
+                SMTNode::Leaf { ref key, .. } => {
                     // Check if this is the leaf we're looking for
                     if Self::hash_key(&key) == key_hash {
                         return Ok(Some(node));

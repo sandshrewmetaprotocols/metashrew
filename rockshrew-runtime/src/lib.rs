@@ -2,6 +2,7 @@ use anyhow::Result;
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
 use rocksdb::{DB, Options, WriteBatch, WriteBatchIterator};
 use std::sync::{Arc, Mutex};
+pub mod smt;
 
 const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 

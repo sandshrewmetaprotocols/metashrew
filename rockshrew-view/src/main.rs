@@ -4,10 +4,12 @@ use actix_web::http::{StatusCode};
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result};
 use anyhow;
 use clap::{Parser};
+use hex;
 use lazy_static::lazy_static;
 use log::{debug, info};
 use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 use metashrew_runtime::MetashrewRuntime;
+use rockshrew_runtime::smt::SMTHelper;
 use rocksdb::Options;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -209,7 +211,8 @@ async fn jsonrpc_call(
 
         let height: u32 = match &body.params[2] {
             serde_json::Value::String(s) if s == "latest" => {
-                fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?
+                let height = fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+                if height > 0 { height - 1 } else { 0 }
             }
             serde_json::Value::Number(n) => {
                 let h = n.as_u64().unwrap_or(0) as u32;
@@ -284,12 +287,12 @@ match context.runtime.view(
         }
     } else if body.method == "metashrew_height" {
         let height = fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
-        let result = JsonRpcResult {
-            id: body.id,
-            result: height.to_string(),
-            jsonrpc: "2.0".to_string(),
-        };
-        Ok(HttpResponse::Ok().json(result))
+        let latest_block = if height > 0 { height - 1 } else { 0 };
+        Ok(HttpResponse::Ok().json(serde_json::json!({
+            "id": body.id,
+            "result": latest_block,
+            "jsonrpc": "2.0"
+        })))
     } else if body.method == "metashrew_preview" {
         // Ensure we have required params
         if body.params.len() < 4 {
@@ -439,6 +442,62 @@ match context.runtime.view(
                     error: JsonRpcErrorObject {
                         code: -32000,
                         message: err.to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                Ok(HttpResponse::Ok().json(error))
+            }
+        }
+    } else if body.method == "metashrew_stateroot" {
+        if body.params.len() < 1 {
+            let error = JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32602,
+                    message: "Invalid params: requires [height]".to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            };
+            return Ok(HttpResponse::Ok().json(error));
+        }
+        let height: u32 = match &body.params[0] {
+            serde_json::Value::String(s) if s == "latest" => {
+                let height = fetch_and_set_height(&context.runtime.context.lock().unwrap().db).await?;
+                if height > 0 { height - 1 } else { 0 }
+            }
+            serde_json::Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+            _ => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid params: height must be a number or 'latest'".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                };
+                return Ok(HttpResponse::Ok().json(error));
+            }
+        };
+        let db = context.runtime.context.lock().unwrap().db.db.clone();
+        let smt_helper = SMTHelper::new(db);
+        match smt_helper.get_smt_root_at_height(height) {
+            Ok(root) => {
+                let result = JsonRpcResult {
+                    id: body.id,
+                    result: format!("0x{}", hex::encode(root)),
+                    jsonrpc: "2.0".to_string(),
+                };
+                Ok(HttpResponse::Ok().json(result))
+            }
+            Err(e) => {
+                let error = JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32000,
+                        message: format!("Failed to get stateroot: {}", e),
                         data: None,
                     },
                     jsonrpc: "2.0".to_string(),

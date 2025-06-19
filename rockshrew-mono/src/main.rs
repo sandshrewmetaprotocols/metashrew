@@ -1309,30 +1309,68 @@ async fn handle_jsonrpc(
             }
         };
         
+        info!("metashrew_stateroot called with height: {}", height);
+        
         // Get the stateroot from the SMT adapter
         let runtime = state.runtime.read().await;
         let context = runtime.context.lock()
             .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
         
-        // Create an SMTHelper instance
-        let smt_helper = SMTHelper::new(context.db.db.clone());
+        // Try to directly query the database for a state root key
+        let direct_key = format!("{}::{}", "smt:root", height).into_bytes();
+        info!("Directly checking for key: {:?}", String::from_utf8_lossy(&direct_key));
         
-        // Get the stateroot using the SMTHelper
-        match smt_helper.get_smt_root_at_height(height) {
-            Ok(root) => Ok(HttpResponse::Ok().json(JsonRpcResult {
-                id: body.id,
-                result: format!("0x{}", hex::encode(root)),
-                jsonrpc: "2.0".to_string(),
-            })),
-            Err(e) => Ok(HttpResponse::Ok().json(JsonRpcError {
-                id: body.id,
-                error: JsonRpcErrorObject {
-                    code: -32000,
-                    message: format!("Failed to get stateroot: {}", e),
-                    data: None,
-                },
-                jsonrpc: "2.0".to_string(),
-            })),
+        match context.db.db.get(&direct_key) {
+            Ok(Some(value)) => {
+                info!("Found state root directly in DB: {}", hex::encode(&value));
+                Ok(HttpResponse::Ok().json(JsonRpcResult {
+                    id: body.id,
+                    result: format!("0x{}", hex::encode(value)),
+                    jsonrpc: "2.0".to_string(),
+                }))
+            },
+            Ok(None) => {
+                info!("No state root found directly in DB for key: {:?}", String::from_utf8_lossy(&direct_key));
+                
+                // Create an SMTHelper instance
+                let smt_helper = SMTHelper::new(context.db.db.clone());
+                
+                // Get the stateroot using the SMTHelper
+                match smt_helper.get_smt_root_at_height(height) {
+                    Ok(root) => {
+                        info!("SMTHelper returned root: {}", hex::encode(&root));
+                        Ok(HttpResponse::Ok().json(JsonRpcResult {
+                            id: body.id,
+                            result: format!("0x{}", hex::encode(root)),
+                            jsonrpc: "2.0".to_string(),
+                        }))
+                    },
+                    Err(e) => {
+                        error!("Failed to get stateroot: {}", e);
+                        Ok(HttpResponse::Ok().json(JsonRpcError {
+                            id: body.id,
+                            error: JsonRpcErrorObject {
+                                code: -32000,
+                                message: format!("Failed to get stateroot: {}", e),
+                                data: None,
+                            },
+                            jsonrpc: "2.0".to_string(),
+                        }))
+                    },
+                }
+            },
+            Err(e) => {
+                error!("Error querying database: {}", e);
+                Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32000,
+                        message: format!("Database error: {}", e),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
         }
     } else if body.method == "metashrew_snapshot" {
         // Get snapshot information from the database

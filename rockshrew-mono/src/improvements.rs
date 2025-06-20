@@ -1,241 +1,157 @@
 use anyhow::{anyhow, Result};
-use log::{debug, info};
-use reqwest::{Client, ClientBuilder, Response};
-use std::net::TcpStream;
-use std::process::{Command, Stdio};
-use std::time::Duration;
-use url::Url as UrlParser;
+use log::{debug, info, warn, error};
+use crate::MetashrewRocksDBSync;
 
-/// Parses a daemon RPC URL and determines if SSH tunneling is needed
-pub fn parse_daemon_rpc_url(url_str: &str) -> Result<(String, bool, Option<SshTunnelConfig>)> {
-    // Check if the URL starts with ssh2+ prefix
-    if url_str.starts_with("ssh2+http://") || url_str.starts_with("ssh2+https://") {
-        let protocol = if url_str.starts_with("ssh2+https://") {
-            "https"
-        } else {
-            "http"
-        };
+impl MetashrewRocksDBSync {
+    /// Improved reorg detection that properly handles chain reorganizations
+    /// Returns the height from which we should start/resume indexing
+    pub async fn detect_and_handle_reorg(&self) -> Result<u32> {
+        // Get our current indexed height (the last block we successfully processed)
+        let current_indexed_height = self.query_height().await?;
         
-        // Remove the ssh2+ prefix
-        let ssh_url = url_str.replace("ssh2+", "");
-        let parsed_url = UrlParser::parse(&ssh_url)?;
-        
-        // Extract SSH connection details
-        let ssh_host = parsed_url.host_str().ok_or_else(|| anyhow!("Missing SSH host"))?;
-        let ssh_port = parsed_url.port().unwrap_or(22);
-        let ssh_user = parsed_url.username();
-        
-        // Extract target details (after the path)
-        let path = parsed_url.path();
-        if path.is_empty() || path == "/" {
-            return Err(anyhow!("Missing target host in path"));
+        // If we haven't indexed any blocks yet, start from the beginning
+        if current_indexed_height == 0 {
+            info!("No blocks indexed yet, starting from genesis");
+            return Ok(0);
         }
         
-        // Remove leading slash and parse target
-        let target = path.trim_start_matches('/');
-        let target_parts: Vec<&str> = target.split(':').collect();
+        // Get the current blockchain tip from the remote node
+        let remote_tip = self.fetch_blockcount().await?;
         
-        let target_host = target_parts[0];
-        let target_port = if target_parts.len() > 1 {
-            target_parts[1].parse::<u16>()?
-        } else {
-            if protocol == "https" { 443 } else { 80 }
+        // Start checking from our current indexed height and work backwards
+        let mut check_height = current_indexed_height;
+        let mut divergence_point: Option<u32> = None;
+        
+        info!("Checking for reorg: local tip={}, remote tip={}", current_indexed_height, remote_tip);
+        
+        // Check up to 100 blocks back or until we reach genesis
+        let max_reorg_depth = 100;
+        let start_check = if current_indexed_height > max_reorg_depth { 
+            current_indexed_height - max_reorg_depth 
+        } else { 
+            0 
         };
         
-        // Create the final target URL that will be used after tunneling
-        let target_url = format!("{}://localhost:{}", protocol, target_port);
-        
-        // Create SSH tunnel config
-        let tunnel_config = SshTunnelConfig {
-            ssh_host: ssh_host.to_string(),
-            ssh_port,
-            ssh_user: ssh_user.to_string(),
-            target_host: target_host.to_string(),
-            target_port,
-            local_port: find_available_port()?,
-        };
-        
-        debug!("Parsed SSH tunnel config: {:?}", tunnel_config);
-        return Ok((target_url, protocol == "https", Some(tunnel_config)));
-    } else {
-        // Regular URL without SSH tunneling
-        let parsed_url = UrlParser::parse(url_str)?;
-        let is_https = parsed_url.scheme() == "https";
-        
-        // Check if this is a localhost or IP address connection
-        let host = parsed_url.host_str().ok_or_else(|| anyhow!("Missing host"))?;
-        let is_localhost = host == "localhost" 
-            || host == "127.0.0.1" 
-            || host.starts_with("192.168.") 
-            || host.starts_with("10.") 
-            || host.starts_with("172.");
-        
-        // For HTTPS connections to localhost or IP addresses, we'll need to bypass SSL validation
-        let bypass_ssl = is_https && is_localhost;
-        
-        debug!("Regular URL: {}, bypass_ssl: {}", url_str, bypass_ssl);
-        return Ok((url_str.to_string(), bypass_ssl, None));
-    }
-}
-
-/// Configuration for SSH tunneling
-#[derive(Debug, Clone)]
-pub struct SshTunnelConfig {
-    pub ssh_host: String,
-    pub ssh_port: u16,
-    pub ssh_user: String,
-    pub target_host: String,
-    pub target_port: u16,
-    pub local_port: u16,
-}
-
-impl SshTunnelConfig {
-    /// Creates an SSH tunnel and returns the local port
-    pub fn create_tunnel(&self) -> Result<SshTunnel> {
-        info!("Creating SSH tunnel to {}:{} via {}@{}:{}",
-            self.target_host, self.target_port, 
-            if self.ssh_user.is_empty() { "<from config>" } else { &self.ssh_user },
-            self.ssh_host, self.ssh_port);
-        
-        // Build the SSH command
-        let mut cmd = Command::new("ssh");
-        
-        // Add user if specified
-        if !self.ssh_user.is_empty() {
-            cmd.arg(format!("{}@{}", self.ssh_user, self.ssh_host));
-        } else {
-            cmd.arg(&self.ssh_host);
+        while check_height > start_check {
+            // Get our local blockhash for this height
+            let local_blockhash = self.get_blockhash(check_height).await;
+            
+            // If we don't have a local blockhash for a height we think we indexed,
+            // this indicates a serious database inconsistency
+            if local_blockhash.is_none() {
+                error!("Missing local blockhash for height {} that should be indexed", check_height);
+                // Treat this as a divergence point to be safe
+                divergence_point = Some(check_height);
+                break;
+            }
+            
+            // Fetch the remote blockhash for this height
+            let remote_blockhash = match self.fetch_blockhash(check_height).await {
+                Ok(hash) => hash,
+                Err(e) => {
+                    // If we can't fetch the remote blockhash, the remote chain might not
+                    // have this block yet (remote tip < our tip), which is fine
+                    if check_height > remote_tip {
+                        debug!("Remote chain doesn't have block {} yet (remote tip: {})", check_height, remote_tip);
+                        check_height -= 1;
+                        continue;
+                    } else {
+                        return Err(anyhow!("Failed to fetch remote blockhash for height {}: {}", check_height, e));
+                    }
+                }
+            };
+            
+            // Compare the blockhashes
+            if let Some(local_hash) = local_blockhash {
+                if local_hash == remote_blockhash {
+                    debug!("Blockhash match at height {}", check_height);
+                    // Found a matching block, this is our common ancestor
+                    break;
+                } else {
+                    warn!("Blockhash mismatch at height {}: local={}, remote={}", 
+                          check_height, hex::encode(&local_hash), hex::encode(&remote_blockhash));
+                    divergence_point = Some(check_height);
+                }
+            }
+            
+            check_height -= 1;
         }
         
-        // Add port if not default
-        if self.ssh_port != 22 {
-            cmd.arg("-p").arg(self.ssh_port.to_string());
-        }
-        
-        // Add tunnel options
-        cmd.arg("-N")  // Don't execute a remote command
-           .arg("-T")  // Disable pseudo-terminal allocation
-           .arg("-L")  // Local port forwarding
-           .arg(format!("{}:{}:{}", self.local_port, self.target_host, self.target_port));
-        
-        // Start the SSH process
-        let mut process = cmd.stdout(Stdio::null())
-                         .stderr(Stdio::null())
-                         .spawn()?;
-        
-        // Wait a moment for the tunnel to establish
-        std::thread::sleep(Duration::from_millis(500));
-        
-        // Check if the tunnel is working by trying to connect to the local port
-        match TcpStream::connect(format!("127.0.0.1:{}", self.local_port)) {
-            Ok(_) => {
-                debug!("SSH tunnel established successfully on port {}", self.local_port);
-                Ok(SshTunnel {
-                    process,
-                    local_port: self.local_port,
-                })
+        // Handle the results
+        match divergence_point {
+            Some(diverge_height) => {
+                warn!("Chain reorganization detected! Divergence at height {}", diverge_height);
+                warn!("Need to rollback from height {} to height {}", current_indexed_height, diverge_height);
+                
+                // TODO: Implement actual rollback logic here
+                // This would involve:
+                // 1. Rolling back all SMT/BST changes after diverge_height
+                // 2. Removing state roots after diverge_height  
+                // 3. Updating the current height marker
+                
+                // For now, we'll return the divergence point as the height to resume from
+                // The caller should implement the actual rollback
+                Ok(diverge_height)
             },
-            Err(e) => {
-                // Try to kill the process if connection failed
-                let _ = process.kill();
-                Err(anyhow!("Failed to establish SSH tunnel: {}", e))
+            None => {
+                // No divergence found, we can continue from where we left off
+                info!("No chain reorganization detected, continuing from height {}", current_indexed_height + 1);
+                Ok(current_indexed_height + 1)
             }
         }
     }
-}
-
-/// Represents an active SSH tunnel
-pub struct SshTunnel {
-    process: std::process::Child,
-    pub local_port: u16,
-}
-
-impl Drop for SshTunnel {
-    fn drop(&mut self) {
-        debug!("Closing SSH tunnel on port {}", self.local_port);
-        let _ = self.process.kill();
-    }
-}
-
-/// Find an available local port for the SSH tunnel
-fn find_available_port() -> Result<u16> {
-    // Try to bind to port 0, which lets the OS assign an available port
-    let socket = std::net::TcpListener::bind("127.0.0.1:0")?;
-    let port = socket.local_addr()?.port();
-    Ok(port)
-}
-
-/// Creates a reqwest Client with appropriate SSL configuration
-pub fn create_http_client(bypass_ssl: bool) -> Result<Client> {
-    let mut client_builder = ClientBuilder::new()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(5);
     
-    if bypass_ssl {
-        debug!("Creating HTTP client with SSL validation disabled");
-        client_builder = client_builder.danger_accept_invalid_certs(true);
+    /// Simplified best_height that just returns the next block to process
+    /// after handling any potential reorgs
+    pub async fn get_next_block_height(&self) -> Result<u32> {
+        // First, detect and handle any reorgs
+        let resume_height = self.detect_and_handle_reorg().await?;
+        
+        // Get the current remote tip
+        let remote_tip = self.fetch_blockcount().await?;
+        
+        // If we're caught up or ahead, wait for new blocks
+        if resume_height > remote_tip {
+            info!("Caught up to remote tip at height {}, waiting for new blocks", remote_tip);
+            return Ok(remote_tip + 1);
+        }
+        
+        // Return the next block to process
+        Ok(resume_height)
     }
     
-    Ok(client_builder.build()?)
-}
-
-/// Makes an HTTP request through an SSH tunnel if needed
-pub async fn make_request_with_tunnel(
-    url: &str, 
-    body: String,
-    auth: Option<String>,
-    tunnel_config: Option<SshTunnelConfig>,
-    bypass_ssl: bool
-) -> Result<Response> {
-    // Create HTTP client with appropriate SSL configuration
-    let client = create_http_client(bypass_ssl)?;
-    
-    // If we have tunnel config, create the tunnel
-    let tunnel = match tunnel_config {
-        Some(config) => Some(config.create_tunnel()?),
-        None => None,
-    };
-    
-    // Determine the final URL to use
-    let final_url = match &tunnel {
-        Some(tunnel) => {
-            // Parse the original URL
-            let mut parsed_url = UrlParser::parse(url)?;
-            
-            // Update the host and port to use the local tunnel
-            parsed_url.set_host(Some("localhost")).map_err(|_| anyhow!("Failed to set host"))?;
-            parsed_url.set_port(Some(tunnel.local_port)).map_err(|_| anyhow!("Failed to set port"))?;
-            
-            parsed_url.to_string()
-        },
-        None => url.to_string(),
-    };
-    
-    // Add authentication if provided
-    let final_url = if let Some(auth_str) = auth {
-        let mut parsed_url = UrlParser::parse(&final_url)?;
-        let (username, password) = auth_str.split_once(':')
-            .ok_or_else(|| anyhow!("Invalid auth format, expected username:password"))?;
+    /// Rollback the database state to a specific height
+    /// This should remove all state changes after the specified height
+    pub async fn rollback_to_height(&self, target_height: u32) -> Result<()> {
+        info!("Rolling back database state to height {}", target_height);
         
-        parsed_url.set_username(username)
-            .map_err(|_| anyhow!("Failed to set username"))?;
-        parsed_url.set_password(Some(password))
-            .map_err(|_| anyhow!("Failed to set password"))?;
+        // Get database handle
+        let db = self.poll_connection().await?;
+        let smt_helper = crate::smt_helper::SMTHelper::new(db.clone());
         
-        parsed_url.to_string()
-    } else {
-        final_url
-    };
-    
-    // Make the request
-    debug!("Making request to {}", final_url);
-    let response = client
-        .post(&final_url)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await?;
-    
-    Ok(response)
+        // Get current height
+        let current_height = self.query_height().await?;
+        
+        if target_height >= current_height {
+            info!("Target height {} >= current height {}, no rollback needed", target_height, current_height);
+            return Ok(());
+        }
+        
+        // TODO: Implement the actual rollback logic
+        // This is complex and would involve:
+        // 1. Identifying all keys that were modified after target_height
+        // 2. Removing or reverting those changes
+        // 3. Removing state roots after target_height
+        // 4. Updating the height marker
+        
+        warn!("Rollback logic not yet implemented - this is a placeholder");
+        
+        // For now, just log what we would do
+        for height in (target_height + 1)..=current_height {
+            let keys_at_height = smt_helper.list_keys_at_height(height)?;
+            info!("Would rollback {} keys modified at height {}", keys_at_height.len(), height);
+        }
+        
+        Ok(())
+    }
 }

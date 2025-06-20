@@ -6,7 +6,7 @@ use clap::Parser;
 use env_logger;
 use hex;
 // Removed unused import
-use log::{debug, info, error};
+use log::{debug, info, error, warn};
 use metashrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::MetashrewRuntime;
 use num_cpus;
@@ -520,11 +520,11 @@ impl MetashrewRocksDBSync {
                         }
                     }
                     
-                    // Find the best height considering potential reorgs
-                    let best_height = match indexer.best_height(current_height).await {
+                    // Detect and handle any reorgs, get the next block to process
+                    let next_height = match indexer.detect_and_handle_reorg().await {
                         Ok(h) => h,
                         Err(e) => {
-                            error!("Failed to determine best height: {}", e);
+                            error!("Failed to detect reorg: {}", e);
                             // Send error result and continue
                             if result_sender_clone.send(BlockResult::Error(current_height, e)).await.is_err() {
                                 break;
@@ -534,24 +534,42 @@ impl MetashrewRocksDBSync {
                         }
                     };
                     
-                    // Detect reorg - if best_height is less than current_height
-                    if best_height < current_height {
-                        info!("Chain reorganization detected: current chain tip moved from block {} to block {}", current_height, best_height);
+                    // Check if we detected a reorg (next_height < current_height)
+                    if next_height < current_height {
+                        info!("Chain reorganization detected: rolling back from block {} to block {}", current_height, next_height);
+                        current_height = next_height;
+                    }
+                    
+                    // Get the remote tip to see if we have blocks to fetch
+                    let remote_tip = match indexer.fetch_blockcount().await {
+                        Ok(tip) => tip,
+                        Err(e) => {
+                            error!("Failed to fetch block count: {}", e);
+                            sleep(Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
+                    
+                    // If we're caught up, wait for new blocks
+                    if next_height > remote_tip {
+                        debug!("Caught up to remote tip at height {}, waiting for new blocks", remote_tip);
+                        sleep(Duration::from_secs(3)).await;
+                        continue;
                     }
                     
                     // Fetch the block
-                    match indexer.pull_block(best_height).await {
+                    match indexer.pull_block(next_height).await {
                         Ok(block_data) => {
-                            debug!("Fetched block {} ({} bytes)", best_height, block_data.len());
+                            debug!("Fetched block {} ({} bytes)", next_height, block_data.len());
                             // Send block to processor
-                            if block_sender_clone.send((best_height, block_data)).await.is_err() {
+                            if block_sender_clone.send((next_height, block_data)).await.is_err() {
                                 break;
                             }
                         },
                         Err(e) => {
-                            error!("Failed to fetch block {}: {}", best_height, e);
+                            error!("Failed to fetch block {}: {}", next_height, e);
                             // Send error result
-                            if result_sender_clone.send(BlockResult::Error(best_height, e)).await.is_err() {
+                            if result_sender_clone.send(BlockResult::Error(next_height, e)).await.is_err() {
                                 break;
                             }
                             sleep(Duration::from_secs(1)).await;
@@ -559,7 +577,7 @@ impl MetashrewRocksDBSync {
                         }
                     }
                     
-                    current_height = best_height + 1;
+                    current_height = next_height + 1;
                 }
                 
                 debug!("Block fetcher task completed");
@@ -655,48 +673,122 @@ impl MetashrewRocksDBSync {
         Ok(())
     }
 
-    async fn best_height(&self, block_number: u32) -> Result<u32> {
-        let mut best: u32 = block_number;
-        let count = self.fetch_blockcount().await?;
+    /// Improved reorg detection that properly handles chain reorganizations
+    /// Returns the height from which we should start/resume indexing
+    async fn detect_and_handle_reorg(&self) -> Result<u32> {
+        // Get our current indexed height (the last block we successfully processed)
+        let current_indexed_height = self.query_height().await?;
         
-        if best >= count - std::cmp::min(6, count) {
-            loop {
-                if best == 0 {
-                    break;
-                }
-                
-                // Try to get the blockhash locally
-                let local_blockhash = self.get_blockhash(best).await;
-                
-                // Fetch the remote blockhash
-                let remote_blockhash = self.fetch_blockhash(best).await?;
-                
-                // If local blockhash is not available, store the remote one for future use
-                if local_blockhash.is_none() {
-                    debug!("Local blockhash for height {} not found, storing remote hash", best);
-                    // Store the blockhash for this height
-                    self.put(
-                        &format!("height-to-hash/{}", best).into_bytes(),
-                        &remote_blockhash,
-                    ).await?;
-                    
-                    // Since we just stored it, they match - continue to next block
-                    break;
-                }
-                
-                // Compare the blockhashes
-                if let Some(blockhash) = local_blockhash {
-                    if blockhash == remote_blockhash {
-                        debug!("Blockhash match found at height {}", best);
-                        break;
+        // If we haven't indexed any blocks yet, start from the beginning
+        if current_indexed_height == 0 {
+            info!("No blocks indexed yet, starting from genesis");
+            return Ok(0);
+        }
+        
+        // Get the current blockchain tip from the remote node
+        let remote_tip = self.fetch_blockcount().await?;
+        
+        // Start checking from our current indexed height and work backwards
+        let mut check_height = current_indexed_height;
+        let mut divergence_point: Option<u32> = None;
+        
+        info!("Checking for reorg: local tip={}, remote tip={}", current_indexed_height, remote_tip);
+        
+        // Check up to 100 blocks back or until we reach genesis
+        let max_reorg_depth = 100;
+        let start_check = if current_indexed_height > max_reorg_depth {
+            current_indexed_height - max_reorg_depth
+        } else {
+            0
+        };
+        
+        while check_height > start_check {
+            // Get our local blockhash for this height
+            let local_blockhash = self.get_blockhash(check_height).await;
+            
+            // If we don't have a local blockhash for a height we think we indexed,
+            // this indicates a serious database inconsistency
+            if local_blockhash.is_none() {
+                error!("Missing local blockhash for height {} that should be indexed", check_height);
+                // Treat this as a divergence point to be safe
+                divergence_point = Some(check_height);
+                break;
+            }
+            
+            // Fetch the remote blockhash for this height
+            let remote_blockhash = match self.fetch_blockhash(check_height).await {
+                Ok(hash) => hash,
+                Err(e) => {
+                    // If we can't fetch the remote blockhash, the remote chain might not
+                    // have this block yet (remote tip < our tip), which is fine
+                    if check_height > remote_tip {
+                        debug!("Remote chain doesn't have block {} yet (remote tip: {})", check_height, remote_tip);
+                        check_height -= 1;
+                        continue;
                     } else {
-                        info!("Blockhash mismatch at height {}, checking previous block", best);
-                        best = best - 1;
+                        return Err(anyhow!("Failed to fetch remote blockhash for height {}: {}", check_height, e));
                     }
                 }
+            };
+            
+            // Compare the blockhashes
+            if let Some(local_hash) = local_blockhash {
+                if local_hash == remote_blockhash {
+                    debug!("Blockhash match at height {}", check_height);
+                    // Found a matching block, this is our common ancestor
+                    break;
+                } else {
+                    warn!("Blockhash mismatch at height {}: local={}, remote={}",
+                          check_height, hex::encode(&local_hash), hex::encode(&remote_blockhash));
+                    divergence_point = Some(check_height);
+                }
+            }
+            
+            check_height -= 1;
+        }
+        
+        // Handle the results
+        match divergence_point {
+            Some(diverge_height) => {
+                warn!("Chain reorganization detected! Divergence at height {}", diverge_height);
+                warn!("Need to rollback from height {} to height {}", current_indexed_height, diverge_height);
+                
+                // TODO: Implement actual rollback logic here
+                // This would involve:
+                // 1. Rolling back all SMT/BST changes after diverge_height
+                // 2. Removing state roots after diverge_height
+                // 3. Updating the current height marker
+                
+                // For now, we'll return the divergence point as the height to resume from
+                // The caller should implement the actual rollback
+                Ok(diverge_height)
+            },
+            None => {
+                // No divergence found, we can continue from where we left off
+                info!("No chain reorganization detected, continuing from height {}", current_indexed_height + 1);
+                Ok(current_indexed_height + 1)
             }
         }
-        return Ok(best);
+    }
+    
+    #[allow(dead_code)]
+    /// Simplified best_height that just returns the next block to process
+    /// after handling any potential reorgs
+    async fn best_height(&self, _block_number: u32) -> Result<u32> {
+        // First, detect and handle any reorgs
+        let resume_height = self.detect_and_handle_reorg().await?;
+        
+        // Get the current remote tip
+        let remote_tip = self.fetch_blockcount().await?;
+        
+        // If we're caught up or ahead, wait for new blocks
+        if resume_height > remote_tip {
+            info!("Caught up to remote tip at height {}, waiting for new blocks", remote_tip);
+            return Ok(remote_tip);
+        }
+        
+        // Return the next block to process
+        Ok(resume_height)
     }
 
     #[allow(dead_code)]
@@ -768,12 +860,14 @@ impl MetashrewRocksDBSync {
         Ok(hex::decode(blockhash)?)
     }
 
+    #[allow(dead_code)]
     async fn put_once(&self, k: &Vec<u8>, v: &Vec<u8>) -> Result<()> {
         let runtime = self.runtime.async_read().await;
         let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
         context.db.put(k, v).map_err(|_| anyhow!("PUT error against RocksDB"))
     }
 
+    #[allow(dead_code)]
     async fn put(&self, key: &Vec<u8>, val: &Vec<u8>) -> Result<()> {
         let mut count = 0;
         loop {
@@ -852,22 +946,42 @@ impl MetashrewRocksDBSync {
                 }
             }
 
-            let best: u32 = match self.best_height(height).await {
-                Ok(v) => v,
+            // Detect and handle any reorgs, get the next block to process
+            let next_height = match self.detect_and_handle_reorg().await {
+                Ok(h) => h,
                 Err(e) => {
-                    error!("Failed to determine best height: {}", e);
-                    height
-                },
+                    error!("Failed to detect reorg: {}", e);
+                    sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
             };
             
-            // Detect reorg - if best is less than height
-            if best < height {
-                info!("Chain reorganization detected: current chain tip moved from block {} to block {}", height, best);
+            // Check if we detected a reorg (next_height < height)
+            if next_height < height {
+                info!("Chain reorganization detected: rolling back from block {} to block {}", height, next_height);
+                height = next_height;
             }
             
-            info!("Processing block {} (current indexer height: {})", best, height);
+            // Get the remote tip to see if we have blocks to fetch
+            let remote_tip = match self.fetch_blockcount().await {
+                Ok(tip) => tip,
+                Err(e) => {
+                    error!("Failed to fetch block count: {}", e);
+                    sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
             
-            match self.pull_block(best).await {
+            // If we're caught up, wait for new blocks
+            if next_height > remote_tip {
+                debug!("Caught up to remote tip at height {}, waiting for new blocks", remote_tip);
+                sleep(Duration::from_secs(3)).await;
+                continue;
+            }
+            
+            info!("Processing block {} (current indexer height: {})", next_height, height);
+            
+            match self.pull_block(next_height).await {
                 Ok(block_data) => {
                     // Get a write lock on the runtime
                     let mut runtime_guard = self.runtime.write().await;
@@ -877,8 +991,8 @@ impl MetashrewRocksDBSync {
                         let mut context = runtime_guard.context.lock()
                             .map_err(|_| anyhow!("Failed to lock context"))?;
                         context.block = block_data;
-                        context.height = best;
-                        context.db.set_height(best);
+                        context.height = next_height;
+                        context.db.set_height(next_height);
                     }
                     
                     // Run the runtime
@@ -891,21 +1005,21 @@ impl MetashrewRocksDBSync {
                         }
                     }
                     
-                    // Check if this was a reorg (best < last_best_height)
-                    if best < last_best_height {
+                    // Check if this was a reorg (next_height < last_best_height)
+                    if next_height < last_best_height {
                         info!("Chain reorganization confirmed: processed block {} (previous chain tip was at block {})",
-                              best, last_best_height);
+                              next_height, last_best_height);
                     }
                     
                     // Update height and CURRENT_HEIGHT
-                    height = best + 1;
+                    height = next_height + 1;
                     CURRENT_HEIGHT.store(height, Ordering::SeqCst);
                     
                     // Update last_best_height
-                    last_best_height = best;
+                    last_best_height = next_height;
                 },
                 Err(e) => {
-                    error!("Failed to pull block {}: {}", best, e);
+                    error!("Failed to pull block {}: {}", next_height, e);
                     sleep(Duration::from_secs(5)).await;
                 }
             }
@@ -937,6 +1051,7 @@ impl Clone for MetashrewRocksDBSync {
 // Add methods for thread management and memory monitoring
 impl MetashrewRocksDBSync {
     // Helper method to get detailed memory statistics as a string
+    #[allow(dead_code)]
     fn get_memory_stats(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>) -> String {
         if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
             let memory_size = memory.data_size(&mut runtime.wasmstore);

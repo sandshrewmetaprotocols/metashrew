@@ -313,6 +313,9 @@ impl MetashrewRocksDBSync {
         // Create a key-value tracker for the WASM module updates
         let snapshot_manager_clone = self.snapshot_manager.clone();
         
+        // Get the block data size for logging
+        let block_size = block_data.len();
+        
         // Set block data with better error handling
         {
             let mut context = runtime.context.lock()
@@ -337,9 +340,10 @@ impl MetashrewRocksDBSync {
         // Check if memory usage is approaching the limit and refresh if needed
         if self.should_refresh_memory(&mut runtime, height) {
             match runtime.refresh_memory() {
-                Ok(_) => debug!("Successfully refreshed memory preemptively for block {}", height),
+                Ok(_) => info!("Successfully performed preemptive memory refresh at block {}", height),
                 Err(e) => {
-                    error!("Failed to preemptively refresh memory: {}", e);
+                    error!("Failed to perform preemptive memory refresh: {}", e);
+                    info!("Continuing execution despite memory refresh failure");
                     // Continue with execution even if preemptive refresh fails
                 }
             }
@@ -348,7 +352,7 @@ impl MetashrewRocksDBSync {
         // Execute the runtime with better error handling
         match runtime.run() {
             Ok(_) => {
-                debug!("Successfully processed block {}", height);
+                info!("Successfully processed block {} (size: {} bytes)", height, block_size);
                 
                 // Get database handle without holding the context lock across await points
                 let db = {
@@ -365,12 +369,12 @@ impl MetashrewRocksDBSync {
                 // Fetch blockhash after releasing the context lock
                 let blockhash = self.fetch_blockhash(height).await?;
                 
-                // Store blockhash using BST approach
-                let blockhash_key = format!("{}{}",HEIGHT_TO_HASH, height).into_bytes();
+                // Store blockhash for future reference
+                let blockhash_key = format!("height-to-hash/{}", height).into_bytes();
                 if let Err(e) = smt_helper.bst_put(&blockhash_key, &blockhash, height) {
-                    error!("Failed to store blockhash in BST for height {}: {}", height, e);
+                    error!("Failed to store blockhash for height {}: {}", height, e);
                 } else {
-                    debug!("Stored blockhash in BST for block {}", height);
+                    debug!("Successfully stored blockhash for block {}", height);
                     
                     // If snapshot manager is enabled, track this key change directly
                     // (The WASM module updates are tracked through the kv_tracker)
@@ -416,7 +420,7 @@ impl MetashrewRocksDBSync {
                         // Try running again after memory refresh
                         match runtime.run() {
                             Ok(_) => {
-                                debug!("Successfully processed block {} after memory refresh", height);
+                                info!("Successfully processed block {} after memory refresh (size: {} bytes)", height, block_size);
                                 
                                 // Handle snapshot tracking after successful retry
                                 if let Some(snapshot_manager) = &self.snapshot_manager {
@@ -450,7 +454,7 @@ impl MetashrewRocksDBSync {
                                 Ok(())
                             },
                             Err(run_err) => {
-                                error!("Runtime execution failed after memory refresh: {}", run_err);
+                                error!("Failed to process block {} after memory refresh: {}", height, run_err);
                                 Err(anyhow!(run_err))
                             }
                         }
@@ -502,7 +506,8 @@ impl MetashrewRocksDBSync {
             tokio::spawn(async move {
                 // Register this thread as the fetcher thread
                 indexer.register_current_thread_as_fetcher();
-                info!("Block fetcher task started on thread {:?}", std::thread::current().id());
+                info!("Block fetcher process started on thread {:?}", std::thread::current().id());
+                info!("Starting to fetch blocks from height {}", height);
                 
                 let mut current_height = height;
                 
@@ -531,13 +536,13 @@ impl MetashrewRocksDBSync {
                     
                     // Detect reorg - if best_height is less than current_height
                     if best_height < current_height {
-                        info!("Reorg detected: best_height ({}) < current_height ({})", best_height, current_height);
+                        info!("Chain reorganization detected: current chain tip moved from block {} to block {}", current_height, best_height);
                     }
                     
                     // Fetch the block
                     match indexer.pull_block(best_height).await {
                         Ok(block_data) => {
-                            debug!("Fetched block {} ({})", best_height, block_data.len());
+                            debug!("Fetched block {} ({} bytes)", best_height, block_data.len());
                             // Send block to processor
                             if block_sender_clone.send((best_height, block_data)).await.is_err() {
                                 break;
@@ -574,10 +579,11 @@ impl MetashrewRocksDBSync {
                 tokio::spawn(async move {
                     // Register this thread as the processor thread
                     indexer_clone.register_current_thread_as_processor();
-                    info!("Block processor task started on thread {:?}", std::thread::current().id());
+                    info!("Block processor process started on thread {:?}", std::thread::current().id());
+                    info!("Ready to process incoming blocks");
                     
                     while let Some((block_height, block_data)) = block_receiver.recv().await {
-                        debug!("Processing block {} ({})", block_height, block_data.len());
+                        debug!("Processing block {} ({} bytes)", block_height, block_data.len());
                         
                         let result = match indexer_clone.process_block(block_height, block_data).await {
                             Ok(_) => BlockResult::Success(block_height),
@@ -599,11 +605,11 @@ impl MetashrewRocksDBSync {
         while let Some(result) = result_receiver.recv().await {
             match result {
                 BlockResult::Success(processed_height) => {
-                    debug!("Successfully processed block {}", processed_height);
+                    info!("Block {} successfully processed and indexed", processed_height);
                     
                     // Check if this was a reorg (processed_height < last_best_height)
                     if processed_height < last_best_height {
-                        info!("Reorg confirmed: processed block {} is lower than last best height {}",
+                        info!("Chain reorganization confirmed: processed block {} (previous chain tip was at block {})",
                               processed_height, last_best_height);
                         
                         // Update height to reflect the reorg
@@ -623,6 +629,7 @@ impl MetashrewRocksDBSync {
                 },
                 BlockResult::Error(failed_height, error) => {
                     error!("Failed to process block {}: {}", failed_height, error);
+                    info!("Waiting 5 seconds before retrying...");
                     // We could implement more sophisticated error handling here
                     // For now, just wait and continue
                     sleep(Duration::from_secs(5)).await;
@@ -632,7 +639,7 @@ impl MetashrewRocksDBSync {
             // Check if we should exit
             if let Some(exit_at) = self.args.exit_at {
                 if height > exit_at {
-                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    info!("Reached configured exit height at block {}, shutting down gracefully", exit_at);
                     break;
                 }
             }
@@ -667,8 +674,9 @@ impl MetashrewRocksDBSync {
                 // If local blockhash is not available, store the remote one for future use
                 if local_blockhash.is_none() {
                     debug!("Local blockhash for height {} not found, storing remote hash", best);
+                    // Store the blockhash for this height
                     self.put(
-                        &(String::from(HEIGHT_TO_HASH) + &best.to_string()).into_bytes(),
+                        &format!("height-to-hash/{}", best).into_bytes(),
                         &remote_blockhash,
                     ).await?;
                     
@@ -733,7 +741,8 @@ impl MetashrewRocksDBSync {
         let smt_helper = SMTHelper::new(db);
         
         // Use BST to get blockhash
-        let blockhash_key = format!("{}{}",HEIGHT_TO_HASH, block_number).into_bytes();
+        // Look up the blockhash for the specified height
+        let blockhash_key = format!("height-to-hash/{}", block_number).into_bytes();
         match smt_helper.bst_get_at_height(&blockhash_key, block_number) {
             Ok(Some(value)) => Some(value),
             _ => None
@@ -800,7 +809,8 @@ impl MetashrewRocksDBSync {
         // Store blockhash using BST approach
         let db = self.poll_connection().await?;
         let smt_helper = SMTHelper::new(db);
-        let blockhash_key = format!("{}{}",HEIGHT_TO_HASH, block_number).into_bytes();
+        // Store the blockhash for this block
+        let blockhash_key = format!("height-to-hash/{}", block_number).into_bytes();
         smt_helper.bst_put(&blockhash_key, &blockhash, block_number)?;
         
         let tunneled_response = self
@@ -852,10 +862,10 @@ impl MetashrewRocksDBSync {
             
             // Detect reorg - if best is less than height
             if best < height {
-                info!("Reorg detected: best height ({}) < current height ({})", best, height);
+                info!("Chain reorganization detected: current chain tip moved from block {} to block {}", height, best);
             }
             
-            info!("Processing block {} (best height: {})", best, height);
+            info!("Processing block {} (current indexer height: {})", best, height);
             
             match self.pull_block(best).await {
                 Ok(block_data) => {
@@ -883,7 +893,7 @@ impl MetashrewRocksDBSync {
                     
                     // Check if this was a reorg (best < last_best_height)
                     if best < last_best_height {
-                        info!("Reorg confirmed: processed block {} is lower than last best height {}",
+                        info!("Chain reorganization confirmed: processed block {} (previous chain tip was at block {})",
                               best, last_best_height);
                     }
                     
@@ -960,17 +970,22 @@ impl MetashrewRocksDBSync {
             let threshold_gb = 1.75;
             let threshold_bytes = (threshold_gb * 1024.0 * 1024.0 * 1024.0) as usize;
             
-            // Get detailed memory stats for logging
-            let memory_stats = self.get_memory_stats(runtime);
-            
             // Check if memory size is approaching the limit
             if memory_size >= threshold_bytes {
-                info!("Memory usage approaching threshold of {:.2}GB for block {}: {}", threshold_gb, height, memory_stats);
-                info!("Preemptively refreshing memory to avoid OOM errors");
+                info!("Memory usage approaching threshold of {:.2}GB at block {}", threshold_gb, height);
+                info!("Performing preemptive memory refresh to prevent out-of-memory errors");
                 return true;
             } else if height % 1000 == 0 {
                 // Log memory stats periodically for monitoring
-                info!("Memory stats at block {}: {}", height, memory_stats);
+                if height % 1000 == 0 {
+                    let memory_size_mb = if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
+                        let memory_size = memory.data_size(&mut runtime.wasmstore);
+                        memory_size as f64 / 1_048_576.0
+                    } else {
+                        0.0
+                    };
+                    info!("Memory usage at block {}: {:.2} MB", height, memory_size_mb);
+                }
             }
         } else {
             debug!("Could not get memory instance for block {}", height);
@@ -1384,15 +1399,14 @@ async fn handle_jsonrpc(
         let context = runtime.context.lock()
             .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
         
-        // Try to directly query the database for a state root key
-        // First try with double colon format
-        let direct_key = format!("{}::{}", "smt:root", height).into_bytes();
-        info!("Directly checking for key with double colon: {:?}", String::from_utf8_lossy(&direct_key));
+        // Try to query the database for the state root at the specified height
+        info!("Looking up state root for height {}", height);
         
-        let result = context.db.db.get(&direct_key);
+        // Check for state root in the database using standard format
+        let result = context.db.db.get(format!("smt:root::{}", height).into_bytes());
         
         if let Ok(Some(value)) = result {
-            info!("Found state root with double colon format: {}", hex::encode(&value));
+            info!("Found state root for height {}", height);
             return Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(value)),
@@ -1400,13 +1414,10 @@ async fn handle_jsonrpc(
             }));
         }
         
-        // If not found, try with triple colon format
-        let triple_key = format!("{}:::{}", "smt:root", height).into_bytes();
-        info!("Directly checking for key with triple colon: {:?}", String::from_utf8_lossy(&triple_key));
-        
-        match context.db.db.get(&triple_key) {
+        // Try alternative format if standard format not found
+        match context.db.db.get(format!("smt:root:::{}", height).into_bytes()) {
             Ok(Some(value)) => {
-                info!("Found state root directly in DB: {}", hex::encode(&value));
+                info!("Found state root for height {}", height);
                 Ok(HttpResponse::Ok().json(JsonRpcResult {
                     id: body.id,
                     result: format!("0x{}", hex::encode(value)),
@@ -1414,7 +1425,7 @@ async fn handle_jsonrpc(
                 }))
             },
             Ok(None) => {
-                info!("No state root found directly in DB for key: {:?}", String::from_utf8_lossy(&direct_key));
+                info!("No direct state root found for height {}, attempting to calculate", height);
                 
                 // Create an SMTHelper instance
                 let smt_helper = SMTHelper::new(context.db.db.clone());
@@ -1422,7 +1433,7 @@ async fn handle_jsonrpc(
                 // Get the stateroot using the SMTHelper
                 match smt_helper.get_smt_root_at_height(height) {
                     Ok(root) => {
-                        info!("SMTHelper returned root: {}", hex::encode(&root));
+                        info!("Successfully retrieved state root for height {}", height);
                         Ok(HttpResponse::Ok().json(JsonRpcResult {
                             id: body.id,
                             result: format!("0x{}", hex::encode(root)),
@@ -1535,8 +1546,13 @@ async fn handle_jsonrpc(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logger
-    env_logger::init();
+    // Initialize logger with timestamp
+    env_logger::builder()
+        .format_timestamp_secs()
+        .init();
+    
+    info!("Starting Metashrew Indexer (rockshrew-mono)");
+    info!("System has {} CPU cores available", num_cpus::get());
     
     // Parse command line arguments
     let args_arc = Arc::new(Args::parse());
@@ -1573,7 +1589,7 @@ async fn main() -> Result<()> {
         12  // Cap at a reasonable maximum
     ).try_into().unwrap();
     
-    info!("Configuring RocksDB with {} background jobs and {} write buffers", background_jobs, write_buffer_number);
+    info!("Configuring RocksDB with {} background jobs and {} write buffers for optimal performance", background_jobs, write_buffer_number);
     
     opts.create_if_missing(true);
     opts.set_max_open_files(10000);
@@ -1680,6 +1696,8 @@ async fn main() -> Result<()> {
         RocksDBRuntimeAdapter::open(args.db_path.to_string_lossy().to_string(), opts)?
     )?));
     
+    info!("Successfully loaded WASM module from {}", indexer_path.display());
+    
     // Create app state for JSON-RPC server
     let app_state = web::Data::new(AppState {
         runtime: runtime.clone(),
@@ -1714,7 +1732,7 @@ async fn main() -> Result<()> {
     
     // Start the indexer in a separate task
     let indexer_handle = tokio::spawn(async move {
-        info!("Starting indexer task");
+        info!("Starting block indexing process from height {}", start_block);
         
         if let Err(e) = sync.run_pipeline().await {
             error!("Indexer error: {}", e);
@@ -1762,7 +1780,9 @@ async fn main() -> Result<()> {
         .bind((args_arc.host.as_str(), args_arc.port))?
         .run()
     });
-    info!("Server running at http://{}:{}", args_arc.host, args_arc.port);
+    info!("JSON-RPC server running at http://{}:{}", args_arc.host, args_arc.port);
+    info!("Indexer is ready and processing blocks");
+    info!("Available RPC methods: metashrew_view, metashrew_preview, metashrew_height, metashrew_getblockhash, metashrew_stateroot, metashrew_snapshot");
     
     // Wait for either component to finish (or fail)
     tokio::select! {

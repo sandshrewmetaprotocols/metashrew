@@ -35,10 +35,10 @@ impl SMTHelper {
     pub fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
         // Try direct lookup first with double colon format
         let double_key = format!("{}::{}", SMT_ROOT_PREFIX, height).into_bytes();
-        info!("Trying direct lookup with double colon key: {:?}", String::from_utf8_lossy(&double_key));
+        debug!("Looking up state root for height {}", height);
         
         if let Ok(Some(root_data)) = self.db.get(&double_key) {
-            info!("Found state root with double colon format for height {}: {}", height, hex::encode(&root_data));
+            debug!("Found state root for height {}", height);
             if root_data.len() == 32 {
                 let mut root = [0u8; 32];
                 root.copy_from_slice(&root_data);
@@ -48,10 +48,10 @@ impl SMTHelper {
         
         // Try with triple colon format
         let triple_key = format!("{}:::{}", SMT_ROOT_PREFIX, height).into_bytes();
-        info!("Trying direct lookup with triple colon key: {:?}", String::from_utf8_lossy(&triple_key));
+        debug!("Checking alternative format for state root");
         
         if let Ok(Some(root_data)) = self.db.get(&triple_key) {
-            info!("Found state root with triple colon format for height {}: {}", height, hex::encode(&root_data));
+            debug!("Found state root using alternative format for height {}", height);
             if root_data.len() == 32 {
                 let mut root = [0u8; 32];
                 root.copy_from_slice(&root_data);
@@ -61,11 +61,11 @@ impl SMTHelper {
         
         // If direct lookup fails, fall back to binary search
         if height == 0 {
-            info!("Height is 0, returning empty node hash");
+            debug!("Height is 0, returning empty state root");
             return Ok(EMPTY_NODE_HASH);
         }
         
-        info!("Direct lookup failed, trying binary search for height {}", height);
+        debug!("Direct lookup failed, searching for nearest state root for height {}", height);
         
         let mut low = 0;
         let mut high = height;
@@ -82,9 +82,7 @@ impl SMTHelper {
             }
             
             let root_key = format!("{}::{}", SMT_ROOT_PREFIX, mid).into_bytes();
-            info!("Checking key: {:?}", String::from_utf8_lossy(&root_key));
             let get_result = self.db.get(&root_key);
-            info!("Get result for key {:?}: {:?}", String::from_utf8_lossy(&root_key), get_result);
             if let Ok(Some(_)) = get_result {
                 // Found a valid height, but continue searching for a closer one
                 found = true;
@@ -110,7 +108,7 @@ impl SMTHelper {
             // Retrieve the actual root data
             let root_key = format!("{}::{}", SMT_ROOT_PREFIX, best_match).into_bytes();
             if let Ok(Some(root_data)) = self.db.get(&root_key) {
-                info!("Found state root via binary search for height {}: {}", height, hex::encode(&root_data));
+                debug!("Found nearest state root at height {} for requested height {}", best_match, height);
                 if root_data.len() == 32 {
                     let mut root = [0u8; 32];
                     root.copy_from_slice(&root_data);
@@ -120,7 +118,7 @@ impl SMTHelper {
         }
         
         // If no root found, return the default (empty) root
-        info!("No state root found for height {}, returning empty node hash", height);
+        debug!("No state root found for height {}, returning empty state root", height);
         Ok(EMPTY_NODE_HASH)
     }
     
@@ -270,7 +268,7 @@ impl SMTHelper {
             return Err(anyhow!("Failed to store SMT root: {}", e));
         }
         
-        info!("Calculated and stored new SMT root for height {}: {}", height, hex::encode(&new_root));
+        info!("Generated new state root for block {}", height);
         Ok(new_root)
     }
 }

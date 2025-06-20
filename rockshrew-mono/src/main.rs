@@ -688,86 +688,81 @@ impl MetashrewRocksDBSync {
         // Get the current blockchain tip from the remote node
         let remote_tip = self.fetch_blockcount().await?;
         
-        // Start checking from our current indexed height and work backwards
-        let mut check_height = current_indexed_height;
-        let mut divergence_point: Option<u32> = None;
-        
-        info!("Checking for reorg: local tip={}, remote tip={}", current_indexed_height, remote_tip);
-        
-        // Check up to 100 blocks back or until we reach genesis
-        let max_reorg_depth = 100;
-        let start_check = if current_indexed_height > max_reorg_depth {
-            current_indexed_height - max_reorg_depth
-        } else {
-            0
-        };
-        
-        while check_height > start_check {
-            // Get our local blockhash for this height
-            let local_blockhash = self.get_blockhash(check_height).await;
+        // If we're ahead of the remote tip, we need to check for reorg
+        if current_indexed_height > remote_tip {
+            warn!("Local tip ({}) is ahead of remote tip ({}), checking for reorg", current_indexed_height, remote_tip);
             
-            // If we don't have a local blockhash for a height we think we indexed,
-            // this indicates a serious database inconsistency
-            if local_blockhash.is_none() {
-                error!("Missing local blockhash for height {} that should be indexed", check_height);
-                // Treat this as a divergence point to be safe
-                divergence_point = Some(check_height);
-                break;
-            }
+            // Start checking from the remote tip and work backwards
+            let mut check_height = remote_tip;
+            let mut divergence_point: Option<u32> = None;
             
-            // Fetch the remote blockhash for this height
-            let remote_blockhash = match self.fetch_blockhash(check_height).await {
-                Ok(hash) => hash,
-                Err(e) => {
-                    // If we can't fetch the remote blockhash, the remote chain might not
-                    // have this block yet (remote tip < our tip), which is fine
-                    if check_height > remote_tip {
-                        debug!("Remote chain doesn't have block {} yet (remote tip: {})", check_height, remote_tip);
-                        check_height -= 1;
-                        continue;
-                    } else {
-                        return Err(anyhow!("Failed to fetch remote blockhash for height {}: {}", check_height, e));
-                    }
-                }
+            // Check up to 100 blocks back or until we reach genesis
+            let max_reorg_depth = 100;
+            let start_check = if remote_tip > max_reorg_depth {
+                remote_tip - max_reorg_depth
+            } else {
+                0
             };
             
-            // Compare the blockhashes
-            if let Some(local_hash) = local_blockhash {
-                if local_hash == remote_blockhash {
-                    debug!("Blockhash match at height {}", check_height);
-                    // Found a matching block, this is our common ancestor
-                    break;
+            while check_height > start_check {
+                // Get our local blockhash for this height
+                let local_blockhash = self.get_blockhash(check_height).await;
+                
+                // Fetch the remote blockhash for this height
+                let remote_blockhash = match self.fetch_blockhash(check_height).await {
+                    Ok(hash) => hash,
+                    Err(e) => {
+                        return Err(anyhow!("Failed to fetch remote blockhash for height {}: {}", check_height, e));
+                    }
+                };
+                
+                // Compare the blockhashes
+                if let Some(local_hash) = local_blockhash {
+                    if local_hash == remote_blockhash {
+                        debug!("Blockhash match at height {}", check_height);
+                        // Found a matching block, this is our common ancestor
+                        break;
+                    } else {
+                        warn!("Blockhash mismatch at height {}: local={}, remote={}",
+                              check_height, hex::encode(&local_hash), hex::encode(&remote_blockhash));
+                        divergence_point = Some(check_height);
+                    }
                 } else {
-                    warn!("Blockhash mismatch at height {}: local={}, remote={}",
-                          check_height, hex::encode(&local_hash), hex::encode(&remote_blockhash));
-                    divergence_point = Some(check_height);
+                    // If we don't have a local blockhash for this height, it means we haven't
+                    // indexed this block yet, so we can start from here
+                    debug!("No local blockhash for height {}, will start indexing from here", check_height);
+                    return Ok(check_height);
                 }
+                
+                check_height -= 1;
             }
             
-            check_height -= 1;
-        }
-        
-        // Handle the results
-        match divergence_point {
-            Some(diverge_height) => {
-                warn!("Chain reorganization detected! Divergence at height {}", diverge_height);
-                warn!("Need to rollback from height {} to height {}", current_indexed_height, diverge_height);
-                
-                // TODO: Implement actual rollback logic here
-                // This would involve:
-                // 1. Rolling back all SMT/BST changes after diverge_height
-                // 2. Removing state roots after diverge_height
-                // 3. Updating the current height marker
-                
-                // For now, we'll return the divergence point as the height to resume from
-                // The caller should implement the actual rollback
-                Ok(diverge_height)
-            },
-            None => {
-                // No divergence found, we can continue from where we left off
-                info!("No chain reorganization detected, continuing from height {}", current_indexed_height + 1);
-                Ok(current_indexed_height + 1)
+            // Handle the results
+            match divergence_point {
+                Some(diverge_height) => {
+                    warn!("Chain reorganization detected! Divergence at height {}", diverge_height);
+                    warn!("Need to rollback from height {} to height {}", current_indexed_height, diverge_height);
+                    
+                    // TODO: Implement actual rollback logic here
+                    // This would involve:
+                    // 1. Rolling back all SMT/BST changes after diverge_height
+                    // 2. Removing state roots after diverge_height
+                    // 3. Updating the current height marker
+                    
+                    // For now, we'll return the divergence point as the height to resume from
+                    // The caller should implement the actual rollback
+                    Ok(diverge_height)
+                },
+                None => {
+                    // No divergence found, continue from remote tip + 1
+                    info!("No chain reorganization detected, continuing from height {}", remote_tip + 1);
+                    Ok(remote_tip + 1)
+                }
             }
+        } else {
+            // We're at or behind the remote tip, continue normally
+            debug!("Local tip ({}) <= remote tip ({}), continuing from height {}", current_indexed_height, remote_tip, current_indexed_height + 1);
+            Ok(current_indexed_height + 1)
         }
     }
     

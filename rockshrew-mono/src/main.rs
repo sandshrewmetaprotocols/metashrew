@@ -369,12 +369,13 @@ impl MetashrewRocksDBSync {
                 // Fetch blockhash after releasing the context lock
                 let blockhash = self.fetch_blockhash(height).await?;
                 
-                // Store blockhash for future reference
+                // Store blockhash for future reference using direct storage
                 let blockhash_key = format!("height-to-hash/{}", height).into_bytes();
-                if let Err(e) = smt_helper.bst_put(&blockhash_key, &blockhash, height) {
+                debug!("Storing blockhash for height {} with key: {}", height, hex::encode(&blockhash_key));
+                if let Err(e) = db.put(&blockhash_key, &blockhash) {
                     error!("Failed to store blockhash for height {}: {}", height, e);
                 } else {
-                    debug!("Successfully stored blockhash for block {}", height);
+                    debug!("Successfully stored blockhash for block {}: {}", height, hex::encode(&blockhash));
                     
                     // If snapshot manager is enabled, track this key change directly
                     // (The WASM module updates are tracked through the kv_tracker)
@@ -824,15 +825,23 @@ impl MetashrewRocksDBSync {
             Err(_) => return None,
         };
         
-        // Create SMTHelper
-        let smt_helper = SMTHelper::new(db);
-        
-        // Use BST to get blockhash
-        // Look up the blockhash for the specified height
+        // Use direct key-value lookup for blockhashes (simpler and more reliable)
         let blockhash_key = format!("height-to-hash/{}", block_number).into_bytes();
-        match smt_helper.bst_get_at_height(&blockhash_key, block_number) {
-            Ok(Some(value)) => Some(value),
-            _ => None
+        debug!("Looking up blockhash for height {} with key: {}", block_number, hex::encode(&blockhash_key));
+        
+        match db.get(&blockhash_key) {
+            Ok(Some(value)) => {
+                debug!("Found blockhash for height {}: {}", block_number, hex::encode(&value));
+                Some(value)
+            },
+            Ok(None) => {
+                debug!("No blockhash found for height {}", block_number);
+                None
+            },
+            Err(e) => {
+                error!("Error looking up blockhash for height {}: {}", block_number, e);
+                None
+            }
         }
     }
 
@@ -895,12 +904,12 @@ impl MetashrewRocksDBSync {
         }
         let blockhash = self.fetch_blockhash(block_number).await?;
         
-        // Store blockhash using BST approach
+        // Store blockhash using direct key-value storage (simpler and more reliable)
         let db = self.poll_connection().await?;
-        let smt_helper = SMTHelper::new(db);
-        // Store the blockhash for this block
         let blockhash_key = format!("height-to-hash/{}", block_number).into_bytes();
-        smt_helper.bst_put(&blockhash_key, &blockhash, block_number)?;
+        debug!("Storing blockhash for height {} with key: {}", block_number, hex::encode(&blockhash_key));
+        db.put(&blockhash_key, &blockhash).map_err(|e| anyhow!("Failed to store blockhash: {}", e))?;
+        debug!("Successfully stored blockhash for height {}: {}", block_number, hex::encode(&blockhash));
         
         let tunneled_response = self
             .post(serde_json::to_string(&JsonRpcRequest {

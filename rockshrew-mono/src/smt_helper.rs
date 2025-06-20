@@ -132,6 +132,9 @@ impl SMTHelper {
         // Create the height index key
         let height_index_key = format!("{}{}:{}", BST_HEIGHT_INDEX_PREFIX, height, hex::encode(key)).into_bytes();
         
+        debug!("BST PUT: height={}, key={}, bst_key={}, height_index_key={}",
+               height, hex::encode(key), hex::encode(&bst_key), hex::encode(&height_index_key));
+        
         // Store the value with the BST key
         batch.put(&bst_key, value);
         
@@ -142,6 +145,20 @@ impl SMTHelper {
         self.db.write(batch).map_err(|e| anyhow!("Failed to write to database: {}", e))?;
         
         debug!("Stored value in BST at height {}: key={}", height, hex::encode(key));
+        
+        // Immediately verify the write
+        match self.db.get(&bst_key) {
+            Ok(Some(stored_value)) => {
+                debug!("BST PUT verification: Successfully stored and retrieved value for key={}", hex::encode(key));
+            },
+            Ok(None) => {
+                error!("BST PUT verification: Value not found immediately after storage for key={}", hex::encode(key));
+            },
+            Err(e) => {
+                error!("BST PUT verification: Error retrieving value after storage for key={}: {}", hex::encode(key), e);
+            }
+        }
+        
         Ok(())
     }
     
@@ -150,12 +167,17 @@ impl SMTHelper {
         // First, check if the key exists in the BST
         let bst_key = [BST_KEY_PREFIX.as_bytes(), key].concat();
         
+        debug!("BST GET: height={}, key={}, bst_key={}",
+               height, hex::encode(key), hex::encode(&bst_key));
+        
         // Find the closest height less than or equal to the requested height
         // that has this key using binary search
         let mut low = 0;
         let mut high = height;
         let mut best_match = 0;
         let mut found = false;
+        
+        debug!("BST GET: Starting binary search from {} to {}", low, high);
         
         while low <= high {
             let mid = low + (high - low) / 2;
@@ -166,13 +188,17 @@ impl SMTHelper {
             }
             
             let height_index_key = format!("{}{}:{}", BST_HEIGHT_INDEX_PREFIX, mid, hex::encode(key)).into_bytes();
+            debug!("BST GET: Checking height {} with index key: {}", mid, hex::encode(&height_index_key));
+            
             if let Ok(Some(_)) = self.db.get(&height_index_key) {
                 // Found a valid height, but continue searching for a closer one
+                debug!("BST GET: Found height index at height {}", mid);
                 found = true;
                 best_match = mid;
                 
                 if mid == height {
                     // Exact match found
+                    debug!("BST GET: Exact height match at {}", mid);
                     break;
                 } else if mid < height {
                     // Look for a closer match in the upper half
@@ -182,12 +208,14 @@ impl SMTHelper {
                     high = mid - 1;
                 }
             } else {
+                debug!("BST GET: No height index found at height {}", mid);
                 // No entry at this height, check lower heights
                 high = mid - 1;
             }
         }
         
         if found {
+            debug!("BST GET: Best match found at height {}, retrieving value with bst_key={}", best_match, hex::encode(&bst_key));
             // Get the value using the BST key
             match self.db.get(&bst_key) {
                 Ok(Some(value)) => {

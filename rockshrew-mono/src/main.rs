@@ -689,6 +689,66 @@ impl MetashrewRocksDBSync {
         // Get the current blockchain tip from the remote node
         let remote_tip = self.fetch_blockcount().await?;
         
+        // Always check the current indexed height for reorgs, regardless of whether
+        // we're ahead of or behind the remote tip
+        
+        // Get our local blockhash for the current indexed height
+        let local_blockhash = self.get_blockhash(current_indexed_height).await;
+        
+        // If we have a local blockhash, check if it matches the remote
+        if let Some(local_hash) = local_blockhash {
+            // Fetch the remote blockhash for this height
+            match self.fetch_blockhash(current_indexed_height).await {
+                Ok(remote_hash) => {
+                    // Compare the blockhashes
+                    if local_hash != remote_hash {
+                        warn!("Chain reorganization detected! Blockhash mismatch at height {}: local={}, remote={}",
+                              current_indexed_height, hex::encode(&local_hash), hex::encode(&remote_hash));
+                        
+                        // Find the divergence point by checking previous blocks
+                        let mut check_height = current_indexed_height - 1;
+                        let max_reorg_depth = 100;
+                        let start_check = if check_height > max_reorg_depth {
+                            check_height - max_reorg_depth
+                        } else {
+                            0
+                        };
+                        
+                        while check_height > start_check {
+                            let prev_local_hash = self.get_blockhash(check_height).await;
+                            
+                            if let Some(local_hash) = prev_local_hash {
+                                match self.fetch_blockhash(check_height).await {
+                                    Ok(remote_hash) => {
+                                        if local_hash == remote_hash {
+                                            debug!("Found common ancestor at height {}", check_height);
+                                            // Return the common ancestor height
+                                            return Ok(check_height);
+                                        }
+                                    },
+                                    Err(e) => {
+                                        error!("Failed to fetch remote blockhash for height {}: {}", check_height, e);
+                                        // Continue checking previous blocks
+                                    }
+                                }
+                            }
+                            
+                            check_height -= 1;
+                        }
+                        
+                        // If we couldn't find a common ancestor, return a safe fallback
+                        warn!("Could not find common ancestor within {} blocks, falling back to height {}",
+                              max_reorg_depth, start_check);
+                        return Ok(start_check);
+                    }
+                },
+                Err(e) => {
+                    warn!("Failed to fetch remote blockhash for height {}: {}", current_indexed_height, e);
+                    // Continue with normal processing if we can't fetch the remote hash
+                }
+            }
+        }
+        
         // If we're ahead of the remote tip, we need to check for reorg
         if current_indexed_height > remote_tip {
             warn!("Local tip ({}) is ahead of remote tip ({}), checking for reorg", current_indexed_height, remote_tip);

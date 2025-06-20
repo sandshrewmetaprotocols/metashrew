@@ -469,6 +469,9 @@ impl MetashrewRocksDBSync {
         let mut height: u32 = self.query_height().await?;
         CURRENT_HEIGHT.store(height, Ordering::SeqCst);
         
+        // Track the last known best height to detect reorgs
+        let mut last_best_height: u32 = height;
+        
         // Determine optimal pipeline size based on CPU cores if not specified
         let pipeline_size = match self.args.pipeline_size {
             Some(size) => size,
@@ -525,6 +528,11 @@ impl MetashrewRocksDBSync {
                             continue;
                         }
                     };
+                    
+                    // Detect reorg - if best_height is less than current_height
+                    if best_height < current_height {
+                        info!("Reorg detected: best_height ({}) < current_height ({})", best_height, current_height);
+                    }
                     
                     // Fetch the block
                     match indexer.pull_block(best_height).await {
@@ -592,8 +600,26 @@ impl MetashrewRocksDBSync {
             match result {
                 BlockResult::Success(processed_height) => {
                     debug!("Successfully processed block {}", processed_height);
-                    height = processed_height + 1;
-                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+                    
+                    // Check if this was a reorg (processed_height < last_best_height)
+                    if processed_height < last_best_height {
+                        info!("Reorg confirmed: processed block {} is lower than last best height {}",
+                              processed_height, last_best_height);
+                        
+                        // Update height to reflect the reorg
+                        height = processed_height + 1;
+                        
+                        // Update CURRENT_HEIGHT to reflect the reorg
+                        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+                        info!("Updated CURRENT_HEIGHT to {} after reorg", height);
+                    } else {
+                        // Normal case - no reorg
+                        height = processed_height + 1;
+                        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+                    }
+                    
+                    // Update last_best_height
+                    last_best_height = processed_height;
                 },
                 BlockResult::Error(failed_height, error) => {
                     error!("Failed to process block {}: {}", failed_height, error);
@@ -804,6 +830,9 @@ impl MetashrewRocksDBSync {
         let mut height: u32 = self.query_height().await?;
         CURRENT_HEIGHT.store(height, Ordering::SeqCst);
         
+        // Track the last known best height to detect reorgs
+        let mut last_best_height: u32 = height;
+        
         loop {
             // Check if we should exit before processing the next block
             if let Some(exit_at) = self.args.exit_at {
@@ -820,6 +849,11 @@ impl MetashrewRocksDBSync {
                     height
                 },
             };
+            
+            // Detect reorg - if best is less than height
+            if best < height {
+                info!("Reorg detected: best height ({}) < current height ({})", best, height);
+            }
             
             info!("Processing block {} (best height: {})", best, height);
             
@@ -847,8 +881,18 @@ impl MetashrewRocksDBSync {
                         }
                     }
                     
+                    // Check if this was a reorg (best < last_best_height)
+                    if best < last_best_height {
+                        info!("Reorg confirmed: processed block {} is lower than last best height {}",
+                              best, last_best_height);
+                    }
+                    
+                    // Update height and CURRENT_HEIGHT
                     height = best + 1;
                     CURRENT_HEIGHT.store(height, Ordering::SeqCst);
+                    
+                    // Update last_best_height
+                    last_best_height = best;
                 },
                 Err(e) => {
                     error!("Failed to pull block {}: {}", best, e);
@@ -1242,6 +1286,10 @@ async fn handle_jsonrpc(
         
         // If the current height is greater than 0, subtract 1 to get the actual latest block
         let latest_block = if current_height > 0 { current_height - 1 } else { 0 };
+        
+        // Log the height being returned for debugging
+        debug!("metashrew_height returning latest_block={} (from current_height={})",
+               latest_block, current_height);
         
         // Return the latest block height as a number
         Ok(HttpResponse::Ok().json(serde_json::json!({

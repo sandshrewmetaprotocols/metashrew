@@ -2847,6 +2847,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "metashrew-tests"
+version = "9.0.0"
+dependencies = [
+ "anyhow",
+ "bitcoin 0.32.6",
+ "futures",
+ "memshrew-runtime",
+ "metashrew-runtime",
+ "metashrew-support",
+ "tokio",
+ "tokio-test",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"

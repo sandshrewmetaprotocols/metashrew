@@ -691,7 +691,24 @@ pub fn try_read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Result<Vec<u
 pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     match try_read_arraybuffer_as_vec(data, data_start) {
         Ok(v) => v,
-        Err(_) => Vec::<u8>::new(),
+        Err(_) => {
+            // If the standard format fails, try to read directly from the pointer
+            // This handles cases where the WASM function returns a raw pointer
+            if data_start >= 0 && (data_start as usize) < data.len() {
+                // Try to read a length prefix at the pointer location
+                if (data_start as usize + 4) <= data.len() {
+                    let len_bytes = &data[data_start as usize..(data_start as usize + 4)];
+                    if let Ok(len_array) = len_bytes.try_into() {
+                        let len = u32::from_le_bytes(len_array) as usize;
+                        let start = data_start as usize + 4;
+                        if start + len <= data.len() && len > 0 && len < 1000000 { // Sanity check
+                            return data[start..start + len].to_vec();
+                        }
+                    }
+                }
+            }
+            Vec::<u8>::new()
+        }
     }
 }
 

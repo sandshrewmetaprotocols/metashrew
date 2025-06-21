@@ -11,3 +11,35 @@ log = "0.4.22"
 metashrew-runtime = { path = "crates/metashrew-runtime" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 memshrew-runtime = { path = "crates/memshrew" }
+
+# Root package for running tests
+[package]
+name = "metashrew-tests"
+version = "9.0.0"
+edition = "2021"
+
+[dependencies]
+# Core dependencies
+anyhow = "1.0.86"
+tokio = { version = "1.43.0", features = ["full"] }
+futures = "0.3.30"
+
+# Metashrew dependencies
+metashrew-runtime = { path = "crates/metashrew-runtime" }
+metashrew-support = { path = "crates/metashrew-support" }
+memshrew-runtime = { path = "crates/memshrew" }
+
+# Bitcoin dependencies
+bitcoin = "0.32.6"
+
+# Test dependencies
+[dev-dependencies]
+tokio-test = "0.4.4"
+
+# Build dependencies for compiling WASM
+[build-dependencies]
+# No additional build dependencies needed - using cargo directly
+
+[[test]]
+name = "integration"
+path = "src/tests/mod.rs"

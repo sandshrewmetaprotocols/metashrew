@@ -1,70 +1,23 @@
-use std::io::{Error, Result};
-use metashrew_runtime::{BatchLike, KeyValueStoreLike};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+//! In-memory implementation of MetashrewRuntime for fast testing
 
-#[derive(Clone, Default)]
-pub struct MemStore {
-    pub db: Arc<Mutex<HashMap<Vec<u8>, Vec<u8>>>>,
-}
+pub mod adapter;
 
-impl MemStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+// Re-export the adapter and related types
+pub use adapter::{MemStoreAdapter, MemStoreBatch};
 
-#[derive(Default)]
-pub struct MemStoreBatch {
-    operations: Vec<(Vec<u8>, Vec<u8>)>,
-}
+// Re-export core runtime with MemStore adapter
+pub use metashrew_runtime::{MetashrewRuntime, MetashrewRuntimeContext};
 
-impl BatchLike for MemStoreBatch {
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.operations
-            .push((key.as_ref().to_vec(), value.as_ref().to_vec()));
-    }
-    fn default() -> Self {
-        Default::default()
-    }
-}
+/// Type alias for MetashrewRuntime using in-memory backend
+pub type MemStoreRuntime = MetashrewRuntime<MemStoreAdapter>;
 
-impl KeyValueStoreLike for MemStore {
-    type Batch = MemStoreBatch;
-    type Error = Error;
+/// Type alias for MetashrewRuntimeContext using in-memory backend
+pub type MemStoreRuntimeContext = MetashrewRuntimeContext<MemStoreAdapter>;
 
-    fn write(&mut self, batch: Self::Batch) -> Result<()> {
-        let mut db = self.db.lock().unwrap();
-        for (key, value) in batch.operations {
-            db.insert(key, value);
-        }
-        Ok(())
-    }
-
-    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>> {
-        let db = self.db.lock().unwrap();
-        Ok(db.get(key.as_ref()).cloned())
-    }
-
-    fn put<K, V>(&mut self, key: K, value: V) -> Result<()>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-    {
-        let mut db = self.db.lock().unwrap();
-        db.insert(key.as_ref().to_vec(), value.as_ref().to_vec());
-        Ok(())
-    }
-
-    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<()> {
-        let mut db = self.db.lock().unwrap();
-        db.remove(key.as_ref());
-        Ok(())
-    }
-
-    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>> {
-        let db = self.db.lock().unwrap();
-        let keys = db.keys().cloned().collect::<Vec<Vec<u8>>>();
-        Ok(Box::new(keys.into_iter()))
-    }
-}
+// Re-export other useful types from metashrew-runtime
+pub use metashrew_runtime::{
+    BatchLike, KeyValueStoreLike, KVTrackerFn,
+    BSTHelper, BSTStatistics,
+    OptimizedBST, OptimizedBSTStatistics,
+    set_label, get_label, has_label, to_labeled_key, wait_timeout
+};

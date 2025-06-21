@@ -3,6 +3,7 @@ use rocksdb::{DB, WriteBatch};
 use std::sync::Arc;
 use log::{trace, debug, info, error};
 use sha2::Digest;
+use rockshrew_runtime::RocksDBRuntimeAdapter;
 
 // Prefixes for different types of keys in the database
 pub const SMT_ROOT_PREFIX: &str = "smt:root:";
@@ -15,6 +16,13 @@ const EMPTY_NODE_HASH: [u8; 32] = [0; 32];
 /// Helper functions for SMT and BST operations
 pub struct SMTHelper {
     db: Arc<DB>,
+}
+
+impl SMTHelper {
+    /// Create a new SMTHelper from a RocksDB adapter
+    pub fn from_adapter(adapter: &RocksDBRuntimeAdapter) -> Self {
+        Self { db: adapter.db.clone() }
+    }
 }
 
 /// Represents a key-value pair with height information
@@ -271,7 +279,9 @@ impl SMTHelper {
         info!("Starting state root calculation for height {}", height);
         
         // Use OptimizedBST to get keys updated at this height
-        let optimized_bst = OptimizedBST::new(self.db.clone());
+        // Create a RocksDB adapter from our DB handle
+        let adapter = RocksDBRuntimeAdapter::from_db(self.db.clone());
+        let optimized_bst = OptimizedBST::new(adapter);
         let updated_keys = optimized_bst.get_keys_at_height(height)?;
         
         info!("Found {} keys updated at height {}", updated_keys.len(), height);
@@ -418,7 +428,9 @@ impl SMTHelper {
         use metashrew_runtime::OptimizedBST;
         
         // Use OptimizedBST to get heights for this key
-        let optimized_bst = OptimizedBST::new(self.db.clone());
+        // Create a RocksDB adapter from our DB handle
+        let adapter = RocksDBRuntimeAdapter::from_db(self.db.clone());
+        let optimized_bst = OptimizedBST::new(adapter);
         optimized_bst.get_heights_for_key(key)
     }
     

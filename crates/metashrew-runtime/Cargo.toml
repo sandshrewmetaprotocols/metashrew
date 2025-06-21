@@ -7,7 +7,7 @@ edition = "2021"
 anyhow = "1.0.86"
 env_logger = "0.11.5"
 log = "0.4.22"
-rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
+# Removed rocksdb dependency - now generic over storage backends
 zstd = "0.13.0"
 snap = "1.1.0"
 serde = { version = "1.0.205", features = ["derive"] }

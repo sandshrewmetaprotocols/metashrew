@@ -391,6 +391,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.88"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2748,12 +2770,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "memshrew-store"
+name = "memshrew-runtime"
 version = "9.0.0"
 dependencies = [
  "anyhow",
- "async-trait",
+ "log",
  "metashrew-runtime",
+ "tempfile",
 ]
 
 [[package]]
@@ -2799,7 +2822,6 @@ dependencies = [
  "protobuf-codegen 3.7.2",
  "protoc-bin-vendored",
  "protoc-rust",
- "rocksdb",
  "serde",
  "serde_json",
  "sha2",
@@ -3805,20 +3827,34 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "log",
+ "memshrew-runtime",
  "metashrew-runtime",
  "num_cpus",
  "once_cell",
  "rand 0.8.5",
  "reqwest 0.12.20",
  "rocksdb",
+ "rockshrew-runtime",
  "russh",
  "russh-keys",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
+ "tokio-test",
  "url",
  "zstd 0.13.3",
+]
+
+[[package]]
+name = "rockshrew-runtime"
+version = "9.0.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "metashrew-runtime",
+ "rocksdb",
+ "tempfile",
 ]
 
 [[package]]
@@ -4727,6 +4763,19 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "tokio-test"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2468baabc3311435b55dd935f702f42cd1b8abb7e754fb7dfb16bd36aa88f9f7"
+dependencies = [
+ "async-stream",
+ "bytes",
+ "futures-core",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

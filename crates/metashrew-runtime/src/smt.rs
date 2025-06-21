@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
-use rocksdb::DB;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use std::collections::BTreeMap;
+use crate::traits::KeyValueStoreLike;
 
 // Prefixes for different types of keys in the database
 pub const SMT_NODE_PREFIX: &str = "smt:node:";
@@ -30,13 +29,13 @@ pub enum SMTNode {
 }
 
 /// Helper functions for SMT operations
-pub struct SMTHelper {
-    db: Arc<DB>,
+pub struct SMTHelper<T: KeyValueStoreLike> {
+    storage: T,
 }
 
-impl SMTHelper {
-    pub fn new(db: Arc<DB>) -> Self {
-        Self { db }
+impl<T: KeyValueStoreLike> SMTHelper<T> {
+    pub fn new(storage: T) -> Self {
+        Self { storage }
     }
 
     /// Hash a key to get a fixed-length path
@@ -148,7 +147,7 @@ impl SMTHelper {
         
         while target_height > 0 {
             let root_key = format!("{}:{}", SMT_ROOT_PREFIX, target_height).into_bytes();
-            if let Ok(Some(root_data)) = self.db.get(&root_key) {
+            if let Some(root_data) = self.storage.get_immutable(&root_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 if root_data.len() == 32 {
                     let mut root = [0u8; 32];
                     root.copy_from_slice(&root_data);
@@ -169,7 +168,7 @@ impl SMTHelper {
         }
         
         let node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(node_hash)).into_bytes();
-        match self.db.get(&node_key)? {
+        match self.storage.get_immutable(&node_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(node_data) => Ok(Some(Self::deserialize_node(&node_data)?)),
             None => Ok(None),
         }
@@ -389,7 +388,7 @@ impl SMTHelper {
         -> Result<Option<Vec<u8>>> {
         // Try to get the value at the exact height first
         let exact_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
-        if let Ok(Some(value)) = self.db.get(&exact_key) {
+        if let Some(value) = self.storage.get_immutable(&exact_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             return Ok(Some(value));
         }
         
@@ -398,24 +397,24 @@ impl SMTHelper {
         while target_height > 0 {
             target_height -= 1;
             let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), target_height).into_bytes();
-            if let Ok(Some(value)) = self.db.get(&value_key) {
+            if let Some(value) = self.storage.get_immutable(&value_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 return Ok(Some(value));
             }
         }
         
         // If still not found, try to get by value hash
         let value_key = format!("{}:{}", "value:", hex::encode(value_hash)).into_bytes();
-        match self.db.get(&value_key)? {
+        match self.storage.get_immutable(&value_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(value) => Ok(Some(value)),
             None => Ok(None),
         }
     }
     
     /// Store a key-value pair in the BST with height indexing
-    pub fn bst_put(&self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
+    pub fn bst_put(&mut self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
         // Store the value with height annotation
         let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
-        self.db.put(height_key, value)?;
+        self.storage.put(&height_key, value).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         
         // Track that this key was updated at this height
         self.track_key_at_height(key, height)?;
@@ -436,7 +435,7 @@ impl SMTHelper {
             let mid = (low + high) / 2;
             let mid_key = format!("{}{}", prefix, mid).into_bytes();
             
-            if let Ok(Some(value)) = self.db.get(&mid_key) {
+            if let Some(value) = self.storage.get_immutable(&mid_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 result = Some(value);
                 low = mid + 1;
             } else {
@@ -455,24 +454,14 @@ impl SMTHelper {
         let mut heights = Vec::new();
         let prefix = format!("{}{}:", BST_HEIGHT_PREFIX, hex::encode(key));
         
-        let mut iter = self.db.raw_iterator();
-        iter.seek(prefix.as_bytes());
-        
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(prefix.as_bytes()) {
-                    break;
-                }
-                
-                // Extract height from key
-                let key_str = String::from_utf8_lossy(db_key);
-                if let Some(height_str) = key_str.strip_prefix(&prefix) {
-                    if let Ok(height) = height_str.parse::<u32>() {
-                        heights.push(height);
-                    }
+        // Get all keys with this prefix and extract heights
+        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(height_str) = key_str.strip_prefix(&prefix) {
+                if let Ok(height) = height_str.parse::<u32>() {
+                    heights.push(height);
                 }
             }
-            iter.next();
         }
         
         heights.sort();
@@ -480,9 +469,9 @@ impl SMTHelper {
     }
     
     /// Track that a key was updated at a specific height
-    pub fn track_key_at_height(&self, key: &[u8], height: u32) -> Result<()> {
+    pub fn track_key_at_height(&mut self, key: &[u8], height: u32) -> Result<()> {
         let keys_key = format!("{}{}:{}", KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
-        self.db.put(keys_key, b"")?; // Empty value, we just need the key
+        self.storage.put(&keys_key, b"").map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?; // Empty value, we just need the key
         Ok(())
     }
     
@@ -491,42 +480,32 @@ impl SMTHelper {
         let mut keys = Vec::new();
         let prefix = format!("{}{}:", KEYS_AT_HEIGHT_PREFIX, height);
         
-        let mut iter = self.db.raw_iterator();
-        iter.seek(prefix.as_bytes());
-        
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(prefix.as_bytes()) {
-                    break;
-                }
-                
-                // Extract the original key from the database key
-                let key_str = String::from_utf8_lossy(db_key);
-                if let Some(hex_key) = key_str.strip_prefix(&prefix) {
-                    if let Ok(original_key) = hex::decode(hex_key) {
-                        keys.push(original_key);
-                    }
+        // Get all keys with this prefix
+        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(hex_key) = key_str.strip_prefix(&prefix) {
+                if let Ok(original_key) = hex::decode(hex_key) {
+                    keys.push(original_key);
                 }
             }
-            iter.next();
         }
         
         Ok(keys)
     }
     
     /// Rollback a key to its state before a specific height
-    pub fn bst_rollback_key(&self, key: &[u8], target_height: u32) -> Result<()> {
+    pub fn bst_rollback_key(&mut self, key: &[u8], target_height: u32) -> Result<()> {
         let heights = self.bst_get_heights_for_key(key)?;
         
         // Remove all entries at heights greater than target_height
         for height in heights {
             if height > target_height {
                 let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
-                self.db.delete(height_key)?;
+                self.storage.delete(&height_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
                 
                 // Also remove from keys-at-height tracking
                 let keys_key = format!("{}{}:{}", KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
-                self.db.delete(keys_key)?;
+                self.storage.delete(&keys_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             }
         }
         
@@ -534,33 +513,24 @@ impl SMTHelper {
     }
     
     /// Rollback all keys to their state before a specific height
-    pub fn bst_rollback_to_height(&self, target_height: u32) -> Result<()> {
+    pub fn bst_rollback_to_height(&mut self, target_height: u32) -> Result<()> {
         // Get all heights greater than target_height that have updates
         let mut heights_to_rollback = Vec::new();
         let prefix = format!("{}:", KEYS_AT_HEIGHT_PREFIX);
         
-        let mut iter = self.db.raw_iterator();
-        iter.seek(prefix.as_bytes());
-        
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(prefix.as_bytes()) {
-                    break;
-                }
-                
-                let key_str = String::from_utf8_lossy(db_key);
-                if let Some(rest) = key_str.strip_prefix(&prefix) {
-                    if let Some(colon_pos) = rest.find(':') {
-                        let height_str = &rest[..colon_pos];
-                        if let Ok(height) = height_str.parse::<u32>() {
-                            if height > target_height {
-                                heights_to_rollback.push(height);
-                            }
+        // Get all keys with this prefix and extract heights
+        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(rest) = key_str.strip_prefix(&prefix) {
+                if let Some(colon_pos) = rest.find(':') {
+                    let height_str = &rest[..colon_pos];
+                    if let Ok(height) = height_str.parse::<u32>() {
+                        if height > target_height {
+                            heights_to_rollback.push(height);
                         }
                     }
                 }
             }
-            iter.next();
         }
         
         // Remove duplicates and sort
@@ -591,7 +561,7 @@ impl SMTHelper {
         
         for height in filtered_heights {
             let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
-            if let Ok(Some(value)) = self.db.get(&height_key) {
+            if let Some(value) = self.storage.get_immutable(&height_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 results.push((height, value));
             }
         }
@@ -600,7 +570,7 @@ impl SMTHelper {
     }
     
     /// Calculate and store the SMT state root for a specific height
-    pub fn calculate_and_store_state_root(&self, height: u32) -> Result<[u8; 32]> {
+    pub fn calculate_and_store_state_root(&mut self, height: u32) -> Result<[u8; 32]> {
         let prev_height = if height > 0 { height - 1 } else { 0 };
         let prev_root = self.get_smt_root_at_height(prev_height)?;
         
@@ -610,7 +580,7 @@ impl SMTHelper {
         if updated_keys.is_empty() {
             // No updates at this height, return previous root
             let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
-            self.db.put(root_key, prev_root)?;
+            self.storage.put(&root_key, &prev_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
         }
         
@@ -619,28 +589,19 @@ impl SMTHelper {
         
         // Get all keys that exist in the database up to this height
         let prefix = format!("{}:", BST_HEIGHT_PREFIX);
-        let mut iter = self.db.raw_iterator();
-        iter.seek(prefix.as_bytes());
         
         let mut all_keys = std::collections::HashSet::new();
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(prefix.as_bytes()) {
-                    break;
-                }
-                
-                // Extract the original key
-                let key_str = String::from_utf8_lossy(db_key);
-                if let Some(rest) = key_str.strip_prefix(&prefix) {
-                    if let Some(colon_pos) = rest.find(':') {
-                        let hex_key = &rest[..colon_pos];
-                        if let Ok(original_key) = hex::decode(hex_key) {
-                            all_keys.insert(original_key);
-                        }
+        // Get all keys with this prefix and extract original keys
+        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(rest) = key_str.strip_prefix(&prefix) {
+                if let Some(colon_pos) = rest.find(':') {
+                    let hex_key = &rest[..colon_pos];
+                    if let Ok(original_key) = hex::decode(hex_key) {
+                        all_keys.insert(original_key);
                     }
                 }
             }
-            iter.next();
         }
         
         // For each key, get its value at this height
@@ -655,7 +616,7 @@ impl SMTHelper {
         
         // Store the new root
         let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
-        self.db.put(root_key, new_root)?;
+        self.storage.put(&root_key, &new_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         
         Ok(new_root)
     }
@@ -682,22 +643,29 @@ impl SMTHelper {
     pub fn get_current_state_root(&self) -> Result<[u8; 32]> {
         // Find the highest height with a stored root
         let prefix = format!("{}:", SMT_ROOT_PREFIX);
-        let mut iter = self.db.raw_iterator();
-        iter.seek_to_last();
         
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if db_key.starts_with(prefix.as_bytes()) {
-                    if let Some(value) = iter.value() {
+        // Get all keys with this prefix and find the highest height
+        let mut highest_height = None;
+        let mut highest_root = None;
+        
+        for (key, value) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(height_str) = key_str.strip_prefix(&prefix) {
+                if let Ok(height) = height_str.parse::<u32>() {
+                    if highest_height.is_none() || height > highest_height.unwrap() {
                         if value.len() == 32 {
-                            let mut root = [0u8; 32];
-                            root.copy_from_slice(value);
-                            return Ok(root);
+                            highest_height = Some(height);
+                            highest_root = Some(value);
                         }
                     }
                 }
             }
-            iter.prev();
+        }
+        
+        if let Some(root_data) = highest_root {
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&root_data);
+            return Ok(root);
         }
         
         Ok(EMPTY_NODE_HASH)

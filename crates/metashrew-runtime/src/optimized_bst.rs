@@ -7,9 +7,8 @@
 //! - Maintains append-only structure for historical queries
 
 use anyhow::{anyhow, Result};
-use rocksdb::{DB, WriteBatch};
-use std::sync::Arc;
 use log::{trace, debug, info, warn, error};
+use crate::traits::{KeyValueStoreLike, BatchLike};
 
 // Prefixes for different types of keys in the database
 pub const CURRENT_VALUE_PREFIX: &str = "current:";
@@ -19,19 +18,19 @@ pub const KEYS_AT_HEIGHT_PREFIX: &str = "keys:";
 
 /// Optimized BST helper that provides fast current state access
 /// and efficient historical queries
-pub struct OptimizedBST {
-    db: Arc<DB>,
+pub struct OptimizedBST<T: KeyValueStoreLike> {
+    storage: T,
 }
 
-impl OptimizedBST {
-    pub fn new(db: Arc<DB>) -> Self {
-        Self { db }
+impl<T: KeyValueStoreLike> OptimizedBST<T> {
+    pub fn new(storage: T) -> Self {
+        Self { storage }
     }
 
     /// Store a key-value pair at a specific height
     /// This is the main write operation used during indexing
-    pub fn put(&self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
-        let mut batch = WriteBatch::default();
+    pub fn put(&mut self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
+        let mut batch = self.storage.create_batch();
         
         // 1. Store the current value for O(1) access
         let current_key = format!("{}{}", CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
@@ -50,7 +49,7 @@ impl OptimizedBST {
         batch.put(&keys_at_height_key, b"");
         
         // Write the batch atomically
-        self.db.write(batch)?;
+        self.storage.write_batch(batch)?;
         
         trace!("Stored key {} at height {} with optimized BST", hex::encode(key), height);
         Ok(())
@@ -61,7 +60,7 @@ impl OptimizedBST {
     pub fn get_current(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let current_key = format!("{}{}", CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
         
-        match self.db.get(&current_key)? {
+        match self.storage.get_immutable(&current_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(value) => {
                 trace!("Retrieved current value for key {} (O(1) lookup)", hex::encode(key));
                 Ok(Some(value))
@@ -79,14 +78,14 @@ impl OptimizedBST {
         // CRITICAL OPTIMIZATION: First check if this key has ANY current value
         // If there's no current value, there's no point in searching historical data
         let current_key = format!("{}{}", CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
-        if let Ok(None) = self.db.get(&current_key) {
+        if let None = self.storage.get_immutable(&current_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             trace!("No current value exists for key {} - skipping historical search (O(1) optimization)", hex::encode(key));
             return Ok(None);
         }
         
         // First try direct lookup at the exact height
         let exact_key = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-        if let Ok(Some(value)) = self.db.get(&exact_key) {
+        if let Some(value) = self.storage.get_immutable(&exact_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             trace!("Found exact value for key {} at height {} (direct lookup)", hex::encode(key), height);
             return Ok(Some(value));
         }
@@ -103,7 +102,7 @@ impl OptimizedBST {
             let mid = low + (high - low) / 2;
             let mid_key = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), mid).into_bytes();
             
-            if let Ok(Some(_)) = self.db.get(&mid_key) {
+            if let Some(_) = self.storage.get_immutable(&mid_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 // Found a value at this height, but continue searching for a more recent one
                 best_height = Some(mid);
                 low = mid + 1;
@@ -117,7 +116,7 @@ impl OptimizedBST {
         
         if let Some(found_height) = best_height {
             let found_key = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), found_height).into_bytes();
-            if let Ok(Some(value)) = self.db.get(&found_key) {
+            if let Some(value) = self.storage.get_immutable(&found_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 trace!("Found value for key {} at height {} (binary search result)", hex::encode(key), found_height);
                 return Ok(Some(value));
             }
@@ -133,24 +132,14 @@ impl OptimizedBST {
         let prefix = format!("{}{}:", KEYS_AT_HEIGHT_PREFIX, height);
         let mut keys = Vec::new();
         
-        let mut iter = self.db.raw_iterator();
-        iter.seek(prefix.as_bytes());
-        
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(prefix.as_bytes()) {
-                    break;
-                }
-                
-                // Extract the original key from the database key
-                let key_str = String::from_utf8_lossy(db_key);
-                if let Some(hex_key) = key_str.strip_prefix(&prefix) {
-                    if let Ok(original_key) = hex::decode(hex_key) {
-                        keys.push(original_key);
-                    }
+        // Get all keys with this prefix
+        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(hex_key) = key_str.strip_prefix(&prefix) {
+                if let Ok(original_key) = hex::decode(hex_key) {
+                    keys.push(original_key);
                 }
             }
-            iter.next();
         }
         
         trace!("Found {} keys updated at height {}", keys.len(), height);
@@ -159,8 +148,8 @@ impl OptimizedBST {
 
     /// Rollback a specific key to its state before a target height
     /// This removes all updates after the target height
-    pub fn rollback_key(&self, key: &[u8], target_height: u32) -> Result<()> {
-        let mut batch = WriteBatch::default();
+    pub fn rollback_key(&mut self, key: &[u8], target_height: u32) -> Result<()> {
+        let mut batch = self.storage.create_batch();
         
         // Get all heights for this key
         let heights = self.get_heights_for_key(key)?;
@@ -172,7 +161,7 @@ impl OptimizedBST {
         for &height in &heights {
             if height <= target_height {
                 let historical_key = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-                if let Ok(Some(value)) = self.db.get(&historical_key) {
+                if let Some(value) = self.storage.get_immutable(&historical_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                     latest_valid_value = Some(value);
                     latest_valid_height = Some(height);
                 }
@@ -202,13 +191,13 @@ impl OptimizedBST {
             trace!("Rolled back key {} - no valid value found, removed current entry", hex::encode(key));
         }
         
-        self.db.write(batch)?;
+        self.storage.write_batch(batch).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         Ok(())
     }
 
     /// Rollback all keys to their state before a target height
     /// This is the main reorg handling function
-    pub fn rollback_to_height(&self, target_height: u32) -> Result<()> {
+    pub fn rollback_to_height(&mut self, target_height: u32) -> Result<()> {
         info!("Starting optimized BST rollback to height {}", target_height);
         
         // Get all heights that need to be rolled back
@@ -216,28 +205,20 @@ impl OptimizedBST {
         
         // Scan for all heights greater than target_height
         let prefix = format!("{}:", KEYS_AT_HEIGHT_PREFIX);
-        let mut iter = self.db.raw_iterator();
-        iter.seek(prefix.as_bytes());
         
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(prefix.as_bytes()) {
-                    break;
-                }
-                
-                let key_str = String::from_utf8_lossy(db_key);
-                if let Some(rest) = key_str.strip_prefix(&prefix) {
-                    if let Some(colon_pos) = rest.find(':') {
-                        let height_str = &rest[..colon_pos];
-                        if let Ok(height) = height_str.parse::<u32>() {
-                            if height > target_height {
-                                heights_to_rollback.push(height);
-                            }
+        // Get all keys with this prefix and extract heights
+        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(rest) = key_str.strip_prefix(&prefix) {
+                if let Some(colon_pos) = rest.find(':') {
+                    let height_str = &rest[..colon_pos];
+                    if let Ok(height) = height_str.parse::<u32>() {
+                        if height > target_height {
+                            heights_to_rollback.push(height);
                         }
                     }
                 }
             }
-            iter.next();
         }
         
         // Remove duplicates and sort
@@ -265,24 +246,14 @@ impl OptimizedBST {
         let mut heights = Vec::new();
         let prefix = format!("{}{}:", HISTORICAL_VALUE_PREFIX, hex::encode(key));
         
-        let mut iter = self.db.raw_iterator();
-        iter.seek(prefix.as_bytes());
-        
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(prefix.as_bytes()) {
-                    break;
-                }
-                
-                // Extract height from key
-                let key_str = String::from_utf8_lossy(db_key);
-                if let Some(height_str) = key_str.strip_prefix(&prefix) {
-                    if let Ok(height) = height_str.parse::<u32>() {
-                        heights.push(height);
-                    }
+        // Get all keys with this prefix and extract heights
+        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(height_str) = key_str.strip_prefix(&prefix) {
+                if let Ok(height) = height_str.parse::<u32>() {
+                    heights.push(height);
                 }
             }
-            iter.next();
         }
         
         heights.sort();
@@ -302,7 +273,7 @@ impl OptimizedBST {
         
         for height in filtered_heights {
             let historical_key = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-            if let Ok(Some(value)) = self.db.get(&historical_key) {
+            if let Some(value) = self.storage.get_immutable(&historical_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 results.push((height, value));
             }
         }
@@ -316,24 +287,16 @@ impl OptimizedBST {
         
         // Iterate over all current values
         let current_prefix = CURRENT_VALUE_PREFIX;
-        let mut iter = self.db.raw_iterator();
-        iter.seek(current_prefix.as_bytes());
         
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(current_prefix.as_bytes()) {
-                    break;
-                }
-                
-                // Extract the original key by removing the prefix
-                if db_key.len() > current_prefix.len() {
-                    let original_key_hex = &db_key[current_prefix.len()..];
-                    if let Ok(original_key) = hex::decode(original_key_hex) {
-                        keys.push(original_key);
-                    }
+        // Get all keys with this prefix
+        for (key, _) in self.storage.scan_prefix(current_prefix.as_bytes())? {
+            // Extract the original key by removing the prefix
+            if key.len() > current_prefix.len() {
+                let original_key_hex = &key[current_prefix.len()..];
+                if let Ok(original_key) = hex::decode(original_key_hex) {
+                    keys.push(original_key);
                 }
             }
-            iter.next();
         }
         
         trace!("Retrieved {} current keys from OptimizedBST", keys.len());
@@ -347,31 +310,14 @@ impl OptimizedBST {
         
         // Count current keys
         let current_prefix = CURRENT_VALUE_PREFIX;
-        let mut iter = self.db.raw_iterator();
-        iter.seek(current_prefix.as_bytes());
-        
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(current_prefix.as_bytes()) {
-                    break;
-                }
-                current_keys += 1;
-            }
-            iter.next();
+        for (_, _) in self.storage.scan_prefix(current_prefix.as_bytes())? {
+            current_keys += 1;
         }
         
         // Count historical entries
         let historical_prefix = HISTORICAL_VALUE_PREFIX;
-        iter.seek(historical_prefix.as_bytes());
-        
-        while iter.valid() {
-            if let Some(db_key) = iter.key() {
-                if !db_key.starts_with(historical_prefix.as_bytes()) {
-                    break;
-                }
-                historical_entries += 1;
-            }
-            iter.next();
+        for (_, _) in self.storage.scan_prefix(historical_prefix.as_bytes())? {
+            historical_entries += 1;
         }
         
         Ok(OptimizedBSTStatistics {

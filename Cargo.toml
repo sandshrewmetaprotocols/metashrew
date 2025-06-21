@@ -3,3 +3,11 @@ resolver = "2"
 members = [
   "crates/*"
 ]
+
+# Workspace dependencies for consistency
+[workspace.dependencies]
+anyhow = "1.0.86"
+log = "0.4.22"
+metashrew-runtime = { path = "crates/metashrew-runtime" }
+rockshrew-runtime = { path = "crates/rockshrew-runtime" }
+memshrew-runtime = { path = "crates/memshrew" }

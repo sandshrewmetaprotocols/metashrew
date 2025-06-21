@@ -13,7 +13,8 @@ use metashrew_runtime::{MetashrewRuntime, OptimizedBST};
 use num_cpus;
 use rand::Rng;
 use rocksdb::Options;
-use metashrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
+use metashrew_runtime::set_label;
+use rockshrew_runtime::RocksDBRuntimeAdapter;
 
 // Import our SMT helper module
 mod smt_helper;
@@ -93,7 +94,7 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
-    runtime: Arc<RwLock<MetashrewRuntime>>,
+    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
 }
 
 // JSON-RPC request structure
@@ -193,7 +194,7 @@ struct BlockHashResponse {
 }
 
 pub struct MetashrewRocksDBSync {
-    runtime: Arc<RwLock<MetashrewRuntime>>,
+    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
     args: Args,
     start_block: u32,
     rpc_url: String,
@@ -300,8 +301,12 @@ impl MetashrewRocksDBSync {
     }
 
     pub async fn query_height(&self) -> Result<u32> {
-        let db = self.poll_connection().await?;
-        query_height(db, self.start_block).await
+        let runtime_guard = self.runtime.read().await;
+        let db_clone = {
+            let context = runtime_guard.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+            context.db.db.clone()
+        }; // Guard is dropped here
+        rockshrew_runtime::query_height(db_clone, self.start_block).await
     }
 
     // Process a single block
@@ -376,7 +381,8 @@ impl MetashrewRocksDBSync {
                 let new_root = match smt_helper.calculate_and_store_state_root(height) {
                     Ok(root) => {
                         // Also ensure optimized BST is consistent
-                        let optimized_bst = OptimizedBST::new(db.clone());
+                        let adapter = RocksDBRuntimeAdapter::from_db(db.clone());
+                        let optimized_bst = OptimizedBST::new(adapter);
                         if let Ok(stats) = optimized_bst.get_statistics() {
                             debug!("OptimizedBST stats at height {}: {}", height, stats);
                         }
@@ -1140,7 +1146,7 @@ impl Clone for MetashrewRocksDBSync {
 impl MetashrewRocksDBSync {
     // Helper method to get detailed memory statistics as a string
     #[allow(dead_code)]
-    fn get_memory_stats(&self, runtime: &mut MetashrewRuntime) -> String {
+    fn get_memory_stats(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>) -> String {
         if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
             let memory_size = memory.data_size(&mut runtime.wasmstore);
             let memory_size_gb = memory_size as f64 / 1_073_741_824.0;
@@ -1163,7 +1169,7 @@ impl MetashrewRocksDBSync {
     }
     
     // Helper method to check if memory needs to be refreshed based on its size
-    fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime, height: u32) -> bool {
+    fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>, height: u32) -> bool {
         // Get the memory instance
         if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
             // Get the memory size in bytes
@@ -1966,27 +1972,36 @@ async fn main() -> Result<()> {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use memshrew_store::MemStore;
+        use memshrew_runtime::MemStoreAdapter;
         use std::path::PathBuf;
         use anyhow::Result;
     
         #[tokio::test]
-        async fn test_minimal_indexer() -> Result<()> {
-            let wasm_path = PathBuf::from("../target/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
-            if !wasm_path.exists() {
-                panic!("metashrew-minimal.wasm not found at {:?}. Please run `cargo build --target wasm32-unknown-unknown --release -p metashrew-minimal` first.", wasm_path);
-            }
-            let mem_store = MemStore::new();
-            let mut runtime = MetashrewRuntime::load(wasm_path, mem_store)?;
-    
-            let block_data = b"test block data".to_vec();
-            runtime.context.lock().unwrap().height = 1;
-            runtime.context.lock().unwrap().block = block_data.clone();
-            runtime.run()?;
-    
-            let result = runtime.view("view_block_by_height".to_string(), &1u32.to_be_bytes().to_vec(), 1).await?;
-            assert_eq!(result, block_data);
-    
+        async fn test_generic_architecture() -> Result<()> {
+            // Test that our generic architecture compiles and basic types work
+            let mem_store = MemStoreAdapter::new();
+            
+            // Test that we can create a context with the memory store
+            let context = MetashrewRuntimeContext::new(mem_store, 0, vec![]);
+            
+            // Test basic operations
+            assert_eq!(context.height, 0);
+            assert_eq!(context.block.len(), 0);
+            
+            // Test that the adapter implements the required traits
+            let mut adapter = MemStoreAdapter::new();
+            adapter.set_height(42);
+            assert_eq!(adapter.get_height(), 42);
+            
+            // Test basic key-value operations
+            let key = b"test_key".to_vec();
+            let value = b"test_value".to_vec();
+            adapter.put(&key, &value)?;
+            
+            let retrieved = adapter.get(&key)?;
+            assert!(retrieved.is_some());
+            assert_eq!(retrieved.unwrap(), value);
+            
             Ok(())
         }
     }

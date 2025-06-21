@@ -1,9 +1,12 @@
 [package]
-name = "memshrew-store"
+name = "memshrew-runtime"
 version = "9.0.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 metashrew-runtime = { path = "../metashrew-runtime" }
-async-trait = "0.1.81"
 anyhow = "1.0.86"
+log = "0.4.22"
+
+[dev-dependencies]
+tempfile = "3.8.1"

@@ -654,11 +654,46 @@ where
     pub fn handle_reorg(&mut self) -> Result<()> {
         let context = self.context.clone();
         let height = { context.lock().map_err(lock_err)?.height };
-        let latest = Self::check_latest_block_for_reorg(context.clone(), height)?;
         
+        // Use binary search to find the first height that doesn't have data
+        // This handles cases where blocks might be skipped forward
+        let mut low = height;
+        let mut high = height + 1000; // Look ahead up to 1000 blocks
+        let mut latest = height;
+        
+        while low <= high {
+            let mid = low + (high - low) / 2;
+            
+            // Check if this height has data
+            let key = u32_to_vec(mid)?;
+            let updated_key = db_make_updated_key(&key);
+            let length_key = db_make_length_key(&updated_key)?;
+            
+            let result = context
+                .lock()
+                .map_err(lock_err)?
+                .db
+                .get(&length_key)
+                .map_err(|e| anyhow!("Database error: {:?}", e))?;
+                
+            if result.is_some() {
+                // This height has data, look higher
+                low = mid + 1;
+                latest = mid;
+            } else {
+                // This height doesn't have data, look lower
+                high = mid - 1;
+            }
+        }
+        
+        // latest is now the highest height that has data
+        // If it's the same as our current height, no reorg needed
         if latest == height {
             return Ok(());
         }
+        
+        // If latest > height, we have blocks ahead that we need to process
+        // If latest < height, we have a reorg and need to rollback
         
         let set = Self::db_updated_keys_for_block_range(context.clone(), height, latest)?;
         if !set.is_empty() {

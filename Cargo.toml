@@ -1,17 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-  "runtime",
-  "memshrew",
-  "metashrew-core",
-  "metashrew-support",
-  "memshrew-p2p",
-  "rockshrew",
-  "rockshrew-runtime",
-  "rockshrew-view",
-  "rockshrew-mono",
-  "rockshrew-diff",
-  "metashrew-minimal",
-  "memshrew-store",
-  "metashrew-test-harness"
+  "crates/*"
 ]
+
+# Workspace dependencies for consistency
+[workspace.dependencies]
+anyhow = "1.0.86"
+log = "0.4.22"
+metashrew-runtime = { path = "crates/metashrew-runtime" }
+rockshrew-runtime = { path = "crates/rockshrew-runtime" }
+memshrew-runtime = { path = "crates/memshrew" }

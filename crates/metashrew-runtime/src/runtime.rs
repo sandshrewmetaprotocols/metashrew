@@ -132,6 +132,7 @@ pub fn try_read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Result<Vec<u
     }
     
     // data_start points to the data portion, length is at data_start - 4
+    // This matches metashrew-support export_bytes which returns pointer + 4
     let len_offset = (data_start as usize) - 4;
     let len = u32::from_le_bytes(
         data[len_offset..len_offset + 4]

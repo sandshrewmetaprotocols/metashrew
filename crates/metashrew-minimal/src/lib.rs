@@ -1,8 +1,8 @@
 use std::io::{Cursor};
 use metashrew_support;
 use bitcoin;
-use metashrew_core::{index_pointer::{IndexPointer}, export_bytes, flush, get, input};
-use metashrew_support::index_pointer::KeyValuePointer;
+use metashrew_core::{index_pointer::{IndexPointer}, flush, get, input};
+use metashrew_support::{index_pointer::KeyValuePointer, compat::export_bytes};
 use std::sync::{Arc};
 
 #[unsafe(no_mangle)]

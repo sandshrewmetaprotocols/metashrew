@@ -422,31 +422,17 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(())
     }
 
-    /// Get the value of a key at a specific height using binary search
+    /// Get the value of a key at a specific height using linear search
     pub fn bst_get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        let prefix = format!("{}{}:", BST_HEIGHT_PREFIX, hex::encode(key));
-        
-        // Use binary search to find the value at or before the specified height
-        let mut low = 0u32;
-        let mut high = height;
-        let mut result = None;
-        
-        while low <= high {
-            let mid = (low + high) / 2;
-            let mid_key = format!("{}{}", prefix, mid).into_bytes();
-            
-            if let Some(value) = self.storage.get_immutable(&mid_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-                result = Some(value);
-                low = mid + 1;
-            } else {
-                if mid == 0 {
-                    break;
-                }
-                high = mid - 1;
+        // Search backwards from the requested height to find the most recent value
+        for h in (0..=height).rev() {
+            let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), h).into_bytes();
+            if let Some(value) = self.storage.get_immutable(&height_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                return Ok(Some(value));
             }
         }
         
-        Ok(result)
+        Ok(None)
     }
     
     /// Get all heights at which a key was updated

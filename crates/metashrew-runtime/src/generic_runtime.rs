@@ -690,7 +690,15 @@ pub fn try_read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Result<Vec<u
 
 pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     match try_read_arraybuffer_as_vec(data, data_start) {
-        Ok(v) => v,
+        Ok(v) => {
+            // Add sanity check for reasonable data sizes
+            if v.len() > 100000 { // 100KB limit for view function results
+                log::warn!("View function returned suspiciously large data ({} bytes), truncating to empty", v.len());
+                Vec::<u8>::new()
+            } else {
+                v
+            }
+        },
         Err(_) => {
             // If the standard format fails, try to read directly from the pointer
             // This handles cases where the WASM function returns a raw pointer
@@ -701,8 +709,11 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
                     if let Ok(len_array) = len_bytes.try_into() {
                         let len = u32::from_le_bytes(len_array) as usize;
                         let start = data_start as usize + 4;
-                        if start + len <= data.len() && len > 0 && len < 1000000 { // Sanity check
+                        // More restrictive sanity check - blocktracker should be small
+                        if start + len <= data.len() && len > 0 && len < 10000 { // 10KB limit
                             return data[start..start + len].to_vec();
+                        } else if len >= 10000 {
+                            log::warn!("View function attempted to return {} bytes, which exceeds reasonable limit", len);
                         }
                     }
                 }

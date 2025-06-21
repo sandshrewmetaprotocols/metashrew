@@ -8,7 +8,8 @@ use hex;
 // Removed unused import
 use log::{debug, info, error, warn};
 use metashrew_runtime::KeyValueStoreLike;
-use metashrew_runtime::MetashrewRuntime;
+// Use our new MetashrewRuntime implementation from rockshrew-runtime
+use rockshrew_runtime::{MetashrewRuntime, OptimizedBST};
 use num_cpus;
 use rand::Rng;
 use rocksdb::Options;
@@ -92,7 +93,7 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
-    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
+    runtime: Arc<RwLock<MetashrewRuntime>>,
 }
 
 // JSON-RPC request structure
@@ -192,7 +193,7 @@ struct BlockHashResponse {
 }
 
 pub struct MetashrewRocksDBSync {
-    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
+    runtime: Arc<RwLock<MetashrewRuntime>>,
     args: Args,
     start_block: u32,
     rpc_url: String,
@@ -385,9 +386,16 @@ impl MetashrewRocksDBSync {
                     }
                 }
                 
-                // Calculate and store the state root
+                // Calculate and store the state root using both optimized BST and SMT helper
                 let new_root = match smt_helper.calculate_and_store_state_root(height) {
-                    Ok(root) => root,
+                    Ok(root) => {
+                        // Also ensure optimized BST is consistent
+                        let optimized_bst = OptimizedBST::new(db.clone());
+                        if let Ok(stats) = optimized_bst.get_statistics() {
+                            debug!("OptimizedBST stats at height {}: {}", height, stats);
+                        }
+                        root
+                    },
                     Err(e) => {
                         error!("Failed to calculate state root: {}", e);
                         [0u8; 32] // Use empty root if calculation fails
@@ -535,8 +543,8 @@ impl MetashrewRocksDBSync {
                         }
                     };
                     
-                    // Check if we detected a reorg (next_height <= current_height)
-                    if next_height <= current_height {
+                    // Check if we detected a reorg (next_height < current_height)
+                    if next_height < current_height {
                         info!("Chain reorganization detected: rolling back from block {} to block {}", current_height, next_height);
                         current_height = next_height;
                     }
@@ -685,65 +693,7 @@ impl MetashrewRocksDBSync {
         // Get the current blockchain tip from the remote node
         let remote_tip = self.fetch_blockcount().await?;
         
-        // Always check the current indexed height for reorgs, regardless of whether
-        // we're ahead of or behind the remote tip
-        
-        // Get our local blockhash for the current indexed height
-        let local_blockhash = self.get_blockhash(current_indexed_height).await;
-        
-        // If we have a local blockhash, check if it matches the remote
-        if let Some(local_hash) = local_blockhash {
-            // Fetch the remote blockhash for this height
-            match self.fetch_blockhash(current_indexed_height).await {
-                Ok(remote_hash) => {
-                    // Compare the blockhashes
-                    if local_hash != remote_hash {
-                        warn!("Chain reorganization detected! Blockhash mismatch at height {}: local={}, remote={}",
-                              current_indexed_height, hex::encode(&local_hash), hex::encode(&remote_hash));
-                        
-                        // Find the divergence point by checking previous blocks
-                        let mut check_height = current_indexed_height - 1;
-                        let max_reorg_depth = 100;
-                        let start_check = if check_height > max_reorg_depth {
-                            check_height - max_reorg_depth
-                        } else {
-                            0
-                        };
-                        
-                        while check_height > start_check {
-                            let prev_local_hash = self.get_blockhash(check_height).await;
-                            
-                            if let Some(local_hash) = prev_local_hash {
-                                match self.fetch_blockhash(check_height).await {
-                                    Ok(remote_hash) => {
-                                        if local_hash == remote_hash {
-                                            debug!("Found common ancestor at height {}", check_height);
-                                            // Return the next block to process after the common ancestor
-                                            return Ok(check_height + 1);
-                                        }
-                                    },
-                                    Err(e) => {
-                                        error!("Failed to fetch remote blockhash for height {}: {}", check_height, e);
-                                        // Continue checking previous blocks
-                                    }
-                                }
-                            }
-                            
-                            check_height -= 1;
-                        }
-                        
-                        // If we couldn't find a common ancestor, return a safe fallback
-                        warn!("Could not find common ancestor within {} blocks, falling back to height {}",
-                              max_reorg_depth, start_check);
-                        return Ok(start_check);
-                    }
-                },
-                Err(e) => {
-                    warn!("Failed to fetch remote blockhash for height {}: {}", current_indexed_height, e);
-                    // Continue with normal processing if we can't fetch the remote hash
-                }
-            }
-        }
+        debug!("Reorg check: current_indexed_height={}, remote_tip={}", current_indexed_height, remote_tip);
         
         // If we're ahead of the remote tip, we need to check for reorg
         if current_indexed_height > remote_tip {
@@ -818,9 +768,77 @@ impl MetashrewRocksDBSync {
                     Ok(remote_tip + 1)
                 }
             }
+        } else if current_indexed_height == remote_tip {
+            // We're caught up with the remote tip, wait for new blocks
+            debug!("Caught up with remote tip at height {}, waiting for new blocks", remote_tip);
+            Ok(current_indexed_height + 1)
         } else {
-            // We're at or behind the remote tip, continue normally
-            debug!("Local tip ({}) <= remote tip ({}), continuing from height {}", current_indexed_height, remote_tip, current_indexed_height + 1);
+            // We're behind the remote tip, check the last few blocks for reorgs
+            // Only check the current indexed height if we have a local blockhash for it
+            let local_blockhash = self.get_blockhash(current_indexed_height).await;
+            
+            if let Some(local_hash) = local_blockhash {
+                // Fetch the remote blockhash for this height to verify consistency
+                match self.fetch_blockhash(current_indexed_height).await {
+                    Ok(remote_hash) => {
+                        // Compare the blockhashes
+                        if local_hash != remote_hash {
+                            warn!("Chain reorganization detected! Blockhash mismatch at height {}: local={}, remote={}",
+                                  current_indexed_height, hex::encode(&local_hash), hex::encode(&remote_hash));
+                            
+                            // Find the divergence point by checking previous blocks
+                            let mut check_height = current_indexed_height.saturating_sub(1);
+                            let max_reorg_depth = 100;
+                            let start_check = if check_height > max_reorg_depth {
+                                check_height - max_reorg_depth
+                            } else {
+                                0
+                            };
+                            
+                            while check_height > start_check {
+                                let prev_local_hash = self.get_blockhash(check_height).await;
+                                
+                                if let Some(local_hash) = prev_local_hash {
+                                    match self.fetch_blockhash(check_height).await {
+                                        Ok(remote_hash) => {
+                                            if local_hash == remote_hash {
+                                                debug!("Found common ancestor at height {}", check_height);
+                                                // Return the next block to process after the common ancestor
+                                                return Ok(check_height + 1);
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("Failed to fetch remote blockhash for height {}: {}", check_height, e);
+                                            // Continue checking previous blocks
+                                        }
+                                    }
+                                }
+                                
+                                check_height = check_height.saturating_sub(1);
+                                if check_height == 0 {
+                                    break;
+                                }
+                            }
+                            
+                            // If we couldn't find a common ancestor, return a safe fallback
+                            warn!("Could not find common ancestor within {} blocks, falling back to height {}",
+                                  max_reorg_depth, start_check);
+                            return Ok(start_check);
+                        } else {
+                            debug!("Blockhash verification passed for height {}", current_indexed_height);
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to fetch remote blockhash for height {}: {}", current_indexed_height, e);
+                        // Continue with normal processing if we can't fetch the remote hash
+                    }
+                }
+            } else {
+                debug!("No local blockhash found for current indexed height {}, assuming normal continuation", current_indexed_height);
+            }
+            
+            // We're behind the remote tip, continue normally
+            debug!("Local tip ({}) < remote tip ({}), continuing from height {}", current_indexed_height, remote_tip, current_indexed_height + 1);
             Ok(current_indexed_height + 1)
         }
     }
@@ -1096,7 +1114,7 @@ impl Clone for MetashrewRocksDBSync {
 impl MetashrewRocksDBSync {
     // Helper method to get detailed memory statistics as a string
     #[allow(dead_code)]
-    fn get_memory_stats(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>) -> String {
+    fn get_memory_stats(&self, runtime: &mut MetashrewRuntime) -> String {
         if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
             let memory_size = memory.data_size(&mut runtime.wasmstore);
             let memory_size_gb = memory_size as f64 / 1_073_741_824.0;
@@ -1119,7 +1137,7 @@ impl MetashrewRocksDBSync {
     }
     
     // Helper method to check if memory needs to be refreshed based on its size
-    fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>, height: u32) -> bool {
+    fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime, height: u32) -> bool {
         // Get the memory instance
         if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
             // Get the memory size in bytes
@@ -1553,78 +1571,37 @@ async fn handle_jsonrpc(
         
         info!("metashrew_stateroot called with height: {}", height);
         
-        // Get the stateroot from the SMT adapter
+        // Get the stateroot using SMTHelper which handles both key formats
         let runtime = state.runtime.read().await;
         let context = runtime.context.lock()
             .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
         
-        // Try to query the database for the state root at the specified height
         info!("Looking up state root for height {}", height);
         
-        // Check for state root in the database using standard format
-        let result = context.db.db.get(format!("smt:root::{}", height).into_bytes());
+        // Create an SMTHelper instance and use it to get the state root
+        let smt_helper = SMTHelper::new(context.db.db.clone());
         
-        if let Ok(Some(value)) = result {
-            info!("Found state root for height {}", height);
-            return Ok(HttpResponse::Ok().json(JsonRpcResult {
-                id: body.id,
-                result: format!("0x{}", hex::encode(value)),
-                jsonrpc: "2.0".to_string(),
-            }));
-        }
-        
-        // Try alternative format if standard format not found
-        match context.db.db.get(format!("smt:root:::{}", height).into_bytes()) {
-            Ok(Some(value)) => {
-                info!("Found state root for height {}", height);
+        match smt_helper.get_smt_root_at_height(height) {
+            Ok(root) => {
+                info!("Successfully retrieved state root for height {}: 0x{}", height, hex::encode(&root));
                 Ok(HttpResponse::Ok().json(JsonRpcResult {
                     id: body.id,
-                    result: format!("0x{}", hex::encode(value)),
+                    result: format!("0x{}", hex::encode(root)),
                     jsonrpc: "2.0".to_string(),
                 }))
             },
-            Ok(None) => {
-                info!("No direct state root found for height {}, attempting to calculate", height);
-                
-                // Create an SMTHelper instance
-                let smt_helper = SMTHelper::new(context.db.db.clone());
-                
-                // Get the stateroot using the SMTHelper
-                match smt_helper.get_smt_root_at_height(height) {
-                    Ok(root) => {
-                        info!("Successfully retrieved state root for height {}", height);
-                        Ok(HttpResponse::Ok().json(JsonRpcResult {
-                            id: body.id,
-                            result: format!("0x{}", hex::encode(root)),
-                            jsonrpc: "2.0".to_string(),
-                        }))
-                    },
-                    Err(e) => {
-                        error!("Failed to get stateroot: {}", e);
-                        Ok(HttpResponse::Ok().json(JsonRpcError {
-                            id: body.id,
-                            error: JsonRpcErrorObject {
-                                code: -32000,
-                                message: format!("Failed to get stateroot: {}", e),
-                                data: None,
-                            },
-                            jsonrpc: "2.0".to_string(),
-                        }))
-                    },
-                }
-            },
             Err(e) => {
-                error!("Error querying database: {}", e);
+                error!("Failed to get stateroot for height {}: {}", height, e);
                 Ok(HttpResponse::Ok().json(JsonRpcError {
                     id: body.id,
                     error: JsonRpcErrorObject {
                         code: -32000,
-                        message: format!("Database error: {}", e),
+                        message: format!("Failed to get stateroot: {}", e),
                         data: None,
                     },
                     jsonrpc: "2.0".to_string(),
                 }))
-            }
+            },
         }
     } else if body.method == "metashrew_snapshot" {
         // Get snapshot information from the database

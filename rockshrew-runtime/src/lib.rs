@@ -1,10 +1,19 @@
 use anyhow::Result;
-use metashrew_runtime::{BatchLike, KeyValueStoreLike};
+use metashrew_runtime::{TIP_HEIGHT_KEY, BatchLike, KeyValueStoreLike};
 use rocksdb::{DB, Options, WriteBatch, WriteBatchIterator};
 use std::sync::{Arc, Mutex};
 pub mod smt;
+pub mod runtime;
+pub mod helpers;
+pub mod optimized_bst;
 
-const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
+// Re-export important types from the runtime module
+pub use runtime::{MetashrewRuntime, MetashrewRuntimeContext};
+
+// Re-export helper types
+pub use helpers::{BSTHelper, BSTStatistics};
+pub use optimized_bst::{OptimizedBST, OptimizedBSTStatistics};
+
 
 // Type definition for key-value tracker function
 pub type KVTrackerFn = Box<dyn Fn(Vec<u8>, Vec<u8>) + Send + Sync>;

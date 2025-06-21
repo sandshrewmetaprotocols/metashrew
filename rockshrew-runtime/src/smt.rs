@@ -2,12 +2,16 @@ use anyhow::{anyhow, Result};
 use rocksdb::DB;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::collections::BTreeMap;
 
 // Prefixes for different types of keys in the database
 pub const SMT_NODE_PREFIX: &str = "smt:node:";
 pub const SMT_ROOT_PREFIX: &str = "smt:root:";
 pub const SMT_LEAF_PREFIX: &str = "smt:leaf:";
 pub const HEIGHT_INDEX_PREFIX: &str = "smt:height:";
+pub const BST_PREFIX: &str = "bst:";
+pub const BST_HEIGHT_PREFIX: &str = "bst:height:";
+pub const KEYS_AT_HEIGHT_PREFIX: &str = "keys:height:";
 
 // Default empty hash (represents empty nodes)
 const EMPTY_NODE_HASH: [u8; 32] = [0; 32];
@@ -407,49 +411,295 @@ impl SMTHelper {
         }
     }
     
+    /// Store a key-value pair in the BST with height indexing
     pub fn bst_put(&self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
-        let height_key = format!("bst:height:{}:{}", hex::encode(key), height).into_bytes();
+        // Store the value with height annotation
+        let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
         self.db.put(height_key, value)?;
+        
+        // Track that this key was updated at this height
+        self.track_key_at_height(key, height)?;
+        
         Ok(())
     }
 
+    /// Get the value of a key at a specific height using binary search
     pub fn bst_get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        let mut iter = self.db.raw_iterator();
-        let prefix = format!("bst:height:{}:", hex::encode(key));
-        iter.seek_for_prev(format!("{}{}", prefix, height));
-        if iter.valid() {
-            let k = iter.key().unwrap();
-            if k.starts_with(prefix.as_bytes()) {
-                return Ok(Some(iter.value().unwrap().to_vec()));
+        let prefix = format!("{}{}:", BST_HEIGHT_PREFIX, hex::encode(key));
+        
+        // Use binary search to find the value at or before the specified height
+        let mut low = 0u32;
+        let mut high = height;
+        let mut result = None;
+        
+        while low <= high {
+            let mid = (low + high) / 2;
+            let mid_key = format!("{}{}", prefix, mid).into_bytes();
+            
+            if let Ok(Some(value)) = self.db.get(&mid_key) {
+                result = Some(value);
+                low = mid + 1;
+            } else {
+                if mid == 0 {
+                    break;
+                }
+                high = mid - 1;
             }
         }
-        Ok(None)
+        
+        Ok(result)
     }
     
+    /// Get all heights at which a key was updated
+    pub fn bst_get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
+        let mut heights = Vec::new();
+        let prefix = format!("{}{}:", BST_HEIGHT_PREFIX, hex::encode(key));
+        
+        let mut iter = self.db.raw_iterator();
+        iter.seek(prefix.as_bytes());
+        
+        while iter.valid() {
+            if let Some(db_key) = iter.key() {
+                if !db_key.starts_with(prefix.as_bytes()) {
+                    break;
+                }
+                
+                // Extract height from key
+                let key_str = String::from_utf8_lossy(db_key);
+                if let Some(height_str) = key_str.strip_prefix(&prefix) {
+                    if let Ok(height) = height_str.parse::<u32>() {
+                        heights.push(height);
+                    }
+                }
+            }
+            iter.next();
+        }
+        
+        heights.sort();
+        Ok(heights)
+    }
+    
+    /// Track that a key was updated at a specific height
+    pub fn track_key_at_height(&self, key: &[u8], height: u32) -> Result<()> {
+        let keys_key = format!("{}{}:{}", KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
+        self.db.put(keys_key, b"")?; // Empty value, we just need the key
+        Ok(())
+    }
+    
+    /// Get all keys that were updated at a specific height
+    pub fn get_keys_at_height(&self, height: u32) -> Result<Vec<Vec<u8>>> {
+        let mut keys = Vec::new();
+        let prefix = format!("{}{}:", KEYS_AT_HEIGHT_PREFIX, height);
+        
+        let mut iter = self.db.raw_iterator();
+        iter.seek(prefix.as_bytes());
+        
+        while iter.valid() {
+            if let Some(db_key) = iter.key() {
+                if !db_key.starts_with(prefix.as_bytes()) {
+                    break;
+                }
+                
+                // Extract the original key from the database key
+                let key_str = String::from_utf8_lossy(db_key);
+                if let Some(hex_key) = key_str.strip_prefix(&prefix) {
+                    if let Ok(original_key) = hex::decode(hex_key) {
+                        keys.push(original_key);
+                    }
+                }
+            }
+            iter.next();
+        }
+        
+        Ok(keys)
+    }
+    
+    /// Rollback a key to its state before a specific height
+    pub fn bst_rollback_key(&self, key: &[u8], target_height: u32) -> Result<()> {
+        let heights = self.bst_get_heights_for_key(key)?;
+        
+        // Remove all entries at heights greater than target_height
+        for height in heights {
+            if height > target_height {
+                let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
+                self.db.delete(height_key)?;
+                
+                // Also remove from keys-at-height tracking
+                let keys_key = format!("{}{}:{}", KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
+                self.db.delete(keys_key)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Rollback all keys to their state before a specific height
+    pub fn bst_rollback_to_height(&self, target_height: u32) -> Result<()> {
+        // Get all heights greater than target_height that have updates
+        let mut heights_to_rollback = Vec::new();
+        let prefix = format!("{}:", KEYS_AT_HEIGHT_PREFIX);
+        
+        let mut iter = self.db.raw_iterator();
+        iter.seek(prefix.as_bytes());
+        
+        while iter.valid() {
+            if let Some(db_key) = iter.key() {
+                if !db_key.starts_with(prefix.as_bytes()) {
+                    break;
+                }
+                
+                let key_str = String::from_utf8_lossy(db_key);
+                if let Some(rest) = key_str.strip_prefix(&prefix) {
+                    if let Some(colon_pos) = rest.find(':') {
+                        let height_str = &rest[..colon_pos];
+                        if let Ok(height) = height_str.parse::<u32>() {
+                            if height > target_height {
+                                heights_to_rollback.push(height);
+                            }
+                        }
+                    }
+                }
+            }
+            iter.next();
+        }
+        
+        // Remove duplicates and sort
+        heights_to_rollback.sort();
+        heights_to_rollback.dedup();
+        
+        // Rollback each height
+        for height in heights_to_rollback {
+            let keys = self.get_keys_at_height(height)?;
+            for key in keys {
+                self.bst_rollback_key(&key, target_height)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Iterate backwards through all values of a key from most recent
+    pub fn bst_iterate_backwards(&self, key: &[u8], from_height: u32) -> Result<Vec<(u32, Vec<u8>)>> {
+        let heights = self.bst_get_heights_for_key(key)?;
+        let mut results = Vec::new();
+        
+        // Filter heights to only include those <= from_height and sort in descending order
+        let mut filtered_heights: Vec<u32> = heights.into_iter()
+            .filter(|&h| h <= from_height)
+            .collect();
+        filtered_heights.sort_by(|a, b| b.cmp(a)); // Descending order
+        
+        for height in filtered_heights {
+            let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
+            if let Ok(Some(value)) = self.db.get(&height_key) {
+                results.push((height, value));
+            }
+        }
+        
+        Ok(results)
+    }
+    
+    /// Calculate and store the SMT state root for a specific height
     pub fn calculate_and_store_state_root(&self, height: u32) -> Result<[u8; 32]> {
         let prev_height = if height > 0 { height - 1 } else { 0 };
         let prev_root = self.get_smt_root_at_height(prev_height)?;
         
-        // Get all keys from the database
-        let mut keys = Vec::new();
+        // Get all keys that were updated at this height
+        let updated_keys = self.get_keys_at_height(height)?;
+        
+        if updated_keys.is_empty() {
+            // No updates at this height, return previous root
+            let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+            self.db.put(root_key, prev_root)?;
+            return Ok(prev_root);
+        }
+        
+        // Build a map of all current key-value pairs for SMT calculation
+        let mut current_state = BTreeMap::new();
+        
+        // Get all keys that exist in the database up to this height
+        let prefix = format!("{}:", BST_HEIGHT_PREFIX);
         let mut iter = self.db.raw_iterator();
-        iter.seek_to_first();
+        iter.seek(prefix.as_bytes());
+        
+        let mut all_keys = std::collections::HashSet::new();
         while iter.valid() {
-            keys.push(iter.key().unwrap().to_vec());
+            if let Some(db_key) = iter.key() {
+                if !db_key.starts_with(prefix.as_bytes()) {
+                    break;
+                }
+                
+                // Extract the original key
+                let key_str = String::from_utf8_lossy(db_key);
+                if let Some(rest) = key_str.strip_prefix(&prefix) {
+                    if let Some(colon_pos) = rest.find(':') {
+                        let hex_key = &rest[..colon_pos];
+                        if let Ok(original_key) = hex::decode(hex_key) {
+                            all_keys.insert(original_key);
+                        }
+                    }
+                }
+            }
             iter.next();
         }
         
-        // For simplicity, we'll just use the last key to calculate the new root
-        // This is not a correct SMT implementation, but it's a placeholder
-        if let Some(key) = keys.last() {
-            if let Some(value) = self.db.get(key)? {
-                let new_root = self.compute_new_root(prev_root, &[(key.clone(), value)], height)?;
-                let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
-                self.db.put(root_key, new_root)?;
-                return Ok(new_root);
+        // For each key, get its value at this height
+        for key in all_keys {
+            if let Ok(Some(value)) = self.bst_get_at_height(&key, height) {
+                current_state.insert(key, value);
             }
         }
         
-        Ok(prev_root)
+        // Calculate the new SMT root based on current state
+        let new_root = self.compute_smt_root_from_state(&current_state)?;
+        
+        // Store the new root
+        let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+        self.db.put(root_key, new_root)?;
+        
+        Ok(new_root)
+    }
+    
+    /// Compute SMT root from a complete state map
+    fn compute_smt_root_from_state(&self, state: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<[u8; 32]> {
+        if state.is_empty() {
+            return Ok(EMPTY_NODE_HASH);
+        }
+        
+        // For a simple implementation, we'll hash all key-value pairs together
+        // In a production SMT, this would build the actual tree structure
+        let mut hasher = Sha256::new();
+        
+        for (key, value) in state.iter() {
+            hasher.update(key);
+            hasher.update(value);
+        }
+        
+        Ok(hasher.finalize().into())
+    }
+    
+    /// Get the current state root (most recent)
+    pub fn get_current_state_root(&self) -> Result<[u8; 32]> {
+        // Find the highest height with a stored root
+        let prefix = format!("{}:", SMT_ROOT_PREFIX);
+        let mut iter = self.db.raw_iterator();
+        iter.seek_to_last();
+        
+        while iter.valid() {
+            if let Some(db_key) = iter.key() {
+                if db_key.starts_with(prefix.as_bytes()) {
+                    if let Some(value) = iter.value() {
+                        if value.len() == 32 {
+                            let mut root = [0u8; 32];
+                            root.copy_from_slice(value);
+                            return Ok(root);
+                        }
+                    }
+                }
+            }
+            iter.prev();
+        }
+        
+        Ok(EMPTY_NODE_HASH)
     }
 }

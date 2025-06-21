@@ -1,152 +1,30 @@
 use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
-//use rlp;
 use protobuf::Message;
-// use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 
-pub const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
+use metashrew_runtime::{BatchLike, KeyValueStoreLike};
+use crate::{RocksDBRuntimeAdapter, RocksDBBatch};
+use crate::smt::SMTHelper;
+use crate::optimized_bst::OptimizedBST;
 
 fn lock_err<T>(err: std::sync::PoisonError<T>) -> anyhow::Error {
     anyhow!("Mutex lock error: {}", err)
 }
 
-
 fn try_into_vec<const N: usize>(bytes: [u8; N]) -> Result<Vec<u8>> {
     Vec::<u8>::try_from(bytes).map_err(|e| anyhow!("Failed to convert bytes to Vec: {:?}", e))
 }
 
-use crate::proto::metashrew::KeyValueFlush;
+use metashrew_runtime::proto::metashrew::KeyValueFlush;
 
 type SerBlock = Vec<u8>;
-pub trait BatchLike {
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V);
-    fn default() -> Self;
-}
-pub trait KeyValueStoreLike {
-    type Error: std::fmt::Debug;
-    type Batch: BatchLike;
-    fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error>;
-    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
-    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error>;
-    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>;
-    
-    // Optional method to track key-value updates
-    // Default implementation does nothing
-    fn track_kv_update(&mut self, _key: Vec<u8>, _value: Vec<u8>) {
-        // Default implementation does nothing
-    }
-    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error>;
-}
-
-//const TIP_KEY: &[u8] = b"T";
-//const HEADERS_CF: &str = "headers";
 
 pub struct State {
     limits: StoreLimits,
     had_failure: bool,
-}
-
-#[derive(Debug)]
-pub struct PreviewDBWrapper<T: KeyValueStoreLike + Clone> {
-    underlying_db: T,
-    overlay: std::collections::HashMap<Vec<u8>, Vec<u8>>,
-}
-
-impl<T: KeyValueStoreLike + Clone> Clone for PreviewDBWrapper<T> {
-    fn clone(&self) -> Self {
-        Self {
-            underlying_db: self.underlying_db.clone(),
-            overlay: self.overlay.clone(),
-        }
-    }
-}
-
-impl<T: KeyValueStoreLike + Clone> KeyValueStoreLike for PreviewDBWrapper<T> {
-    type Error = T::Error;
-    type Batch = T::Batch;
-
-    fn write(&mut self, _batch: Self::Batch) -> Result<(), Self::Error> {
-        // Write operations are captured in the overlay HashMap instead
-        // We'll need to extract k/v pairs from the batch and store them
-        Ok(())
-    }
-
-    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        // Check overlay first
-        if let Some(value) = self.overlay.get(key.as_ref()) {
-            return Ok(Some(value.clone()));
-        }
-        // Fall back to underlying db
-        self.underlying_db.get(key)
-    }
-
-    fn delete<K: AsRef<[u8]>>(&mut self, _key: K) -> Result<(), Self::Error> {
-        // For preview we don't need to implement delete
-        Ok(())
-    }
-
-    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>,
-    {
-        self.overlay.insert(
-            key.as_ref().to_vec(),
-            value.as_ref().to_vec(),
-        );
-        Ok(())
-    }
-
-    fn keys(&self) -> Result<Box<dyn Iterator<Item = Vec<u8>>>, Self::Error> {
-        // For preview, we don't need to implement keys
-        Ok(Box::new(std::iter::empty()))
-    }
-}
-
-pub struct MetashrewRuntimeContext<T: KeyValueStoreLike + Clone> {
-    pub db: T,
-    pub height: u32,
-    pub block: SerBlock,
-    pub state: u32,
-}
-
-impl<T: KeyValueStoreLike + Clone> Clone for MetashrewRuntimeContext<T> {
-    fn clone(&self) -> Self {
-        return Self {
-            db: self.db.clone(),
-            height: self.height,
-            block: self.block.clone(),
-            state: self.state,
-        };
-    }
-}
-
-impl<T: KeyValueStoreLike + Clone> MetashrewRuntimeContext<T> {
-    fn new(db: T, height: u32, block: SerBlock) -> Self {
-        return Self {
-            db: db,
-            height: height,
-            block: block,
-            state: 0,
-        };
-    }
-}
-
-pub struct MetashrewRuntime<T: KeyValueStoreLike + Clone + 'static> {
-    pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-    pub engine: wasmtime::Engine,
-    pub async_engine: wasmtime::Engine,
-    pub wasmstore: wasmtime::Store<State>,
-    pub async_module: wasmtime::Module,
-    pub module: wasmtime::Module,
-    pub linker: wasmtime::Linker<State>,
-    pub instance: wasmtime::Instance,
 }
 
 impl State {
@@ -160,6 +38,46 @@ impl State {
             had_failure: false,
         }
     }
+}
+
+pub struct MetashrewRuntimeContext {
+    pub db: RocksDBRuntimeAdapter,
+    pub height: u32,
+    pub block: SerBlock,
+    pub state: u32,
+}
+
+impl Clone for MetashrewRuntimeContext {
+    fn clone(&self) -> Self {
+        return Self {
+            db: self.db.clone(),
+            height: self.height,
+            block: self.block.clone(),
+            state: self.state,
+        };
+    }
+}
+
+impl MetashrewRuntimeContext {
+    fn new(db: RocksDBRuntimeAdapter, height: u32, block: SerBlock) -> Self {
+        return Self {
+            db,
+            height,
+            block,
+            state: 0,
+        };
+    }
+}
+
+pub struct MetashrewRuntime {
+    pub context: Arc<Mutex<MetashrewRuntimeContext>>,
+    pub engine: wasmtime::Engine,
+    pub async_engine: wasmtime::Engine,
+    pub wasmstore: wasmtime::Store<State>,
+    pub async_module: wasmtime::Module,
+    pub module: wasmtime::Module,
+    pub linker: wasmtime::Linker<State>,
+    pub instance: wasmtime::Instance,
 }
 
 pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Result<Vec<u8>> {
@@ -227,121 +145,8 @@ pub fn to_usize_or_trap<'a, T: TryInto<usize>>(_caller: &mut Caller<'_, State>, 
     };
 }
 
-impl<T: KeyValueStoreLike> MetashrewRuntime<T>
-where
-    T: Sync + Send,
-    T: Clone + 'static,
-{
-    /// Handle chain reorganization by rolling back BST updates to the specified height
-    pub fn handle_reorg(&mut self) -> Result<()> {
-        // Get the current context height and database tip height
-        let (context_height, db_tip_height) = {
-            let guard = self.context.lock().map_err(lock_err)?;
-            let mut db_clone = guard.db.clone();
-            let db_tip = match db_clone.get(TIP_HEIGHT_KEY.as_bytes()) {
-                Ok(Some(bytes)) => {
-                    if bytes.len() >= 4 {
-                        u32::from_le_bytes(bytes[..4].try_into().unwrap())
-                    } else {
-                        0
-                    }
-                },
-                _ => 0,
-            };
-            (guard.height, db_tip)
-        };
-        
-        // If context height is ahead of or equal to db tip, no reorg needed
-        if context_height >= db_tip_height {
-            return Ok(());
-        }
-        
-        // We need to rollback from db_tip_height to context_height
-        debug!("Handling reorg: rolling back from height {} to {}", db_tip_height, context_height);
-        
-        // Perform rollback using helper function
-        Self::rollback_to_height(self.context.clone(), context_height)?;
-        
-        debug!("Reorg completed: rolled back to height {}", context_height);
-        
-        Ok(())
-    }
-    
-    /// Get the value of a key at a specific block height
-    pub fn db_value_at_block<U: KeyValueStoreLike + Clone>(
-        context: Arc<Mutex<MetashrewRuntimeContext<U>>>,
-        key: &Vec<u8>,
-        height: u32
-    ) -> Result<Vec<u8>> {
-        // Get the database from the context
-        let mut db = {
-            let guard = context.lock().map_err(lock_err)?;
-            guard.db.clone()
-        };
-        
-        // Try to get the value from the database
-        match db.get(key) {
-            Ok(Some(value)) => {
-                // If the value exists, return it
-                // In a real implementation, we would need to check if the value was set at or before the specified height
-                // and return the appropriate version of the value
-                Ok(value)
-            },
-            Ok(None) => {
-                // If the key doesn't exist, return an empty vector
-                Ok(Vec::new())
-            },
-            Err(e) => {
-                // If there was an error, return it
-                Err(anyhow!("Failed to get value from database: {:?}", e))
-            }
-        }
-    }
-    
-    /// Create an empty update list for a specific block height
-    pub fn db_create_empty_update_list<U: BatchLike>(batch: &mut U, height: u32) -> Result<()> {
-        // Create a key for the update list
-        let update_list_key = format!("updates:{}", height).into_bytes();
-        
-        // Create an empty update list
-        batch.put(update_list_key, Vec::new());
-        
-        Ok(())
-    }
-    
-    /// Append an annotated value to the database
-    pub fn db_append_annotated<U: KeyValueStoreLike + Clone>(
-        context: Arc<Mutex<MetashrewRuntimeContext<U>>>,
-        batch: &mut U::Batch,
-        key: &Vec<u8>,
-        value: &Vec<u8>,
-        height: u32
-    ) -> Result<()> {
-        // Annotate the value with the block height
-        let annotated_value = db_annotate_value(value, height)?;
-        
-        // Add the key-value pair to the batch
-        batch.put(key, annotated_value);
-        
-        Ok(())
-    }
-    
-    /// Append a key to an update list
-    pub fn db_append<U: KeyValueStoreLike + Clone>(
-        context: Arc<Mutex<MetashrewRuntimeContext<U>>>,
-        batch: &mut U::Batch,
-        update_key: &Vec<u8>,
-        key: &Vec<u8>
-    ) -> Result<()> {
-        // Create a key for the update list
-        let update_list_key = format!("updates:{}", update_key.len()).into_bytes();
-        
-        // Add the key to the update list
-        batch.put(update_list_key, key.clone());
-        
-        Ok(())
-    }
-    pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
+impl MetashrewRuntime {
+    pub fn load(indexer: PathBuf, store: RocksDBRuntimeAdapter) -> Result<Self> {
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -365,10 +170,10 @@ where
         let async_module = wasmtime::Module::from_file(&async_engine, indexer.into_os_string()).context("Failed to load WASM module")?;
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
-            MetashrewRuntimeContext<T>,
+        let context = Arc::<Mutex<MetashrewRuntimeContext>>::new(Mutex::<
+            MetashrewRuntimeContext,
         >::new(
-            MetashrewRuntimeContext::<T>::new(store, 0, vec![]),
+            MetashrewRuntimeContext::new(store, 0, vec![]),
         ));
         {
             wasmstore.limiter(|state| &mut state.limits)
@@ -404,10 +209,7 @@ where
         // Create preview context with wrapped DB
         let preview_db = {
             let guard = self.context.lock().map_err(lock_err)?;
-            PreviewDBWrapper {
-                underlying_db: guard.db.clone(),
-                overlay: std::collections::HashMap::new(),
-            }
+            guard.db.clone()
         };
 
         // Create a new runtime with preview db
@@ -475,7 +277,7 @@ where
         
         let context = {
             let guard = self.context.lock().map_err(lock_err)?;
-            Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(guard.clone()))
+            Arc::<Mutex<MetashrewRuntimeContext>>::new(Mutex::new(guard.clone()))
         };
         
         {
@@ -523,6 +325,7 @@ where
             result,
         ))
     }
+
     pub fn refresh_memory(&mut self) -> Result<()> {
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
         wasmstore.limiter(|state| &mut state.limits);
@@ -533,6 +336,7 @@ where
         self.wasmstore = wasmstore;
         Ok(())
     }
+
     pub fn run(&mut self) -> Result<(), anyhow::Error> {
         self.context.lock().map_err(lock_err)?.state = 0;
         let start = self
@@ -554,9 +358,153 @@ where
         }
     }
 
+    /// Handle chain reorganization by rolling back BST updates to the specified height
+    pub fn handle_reorg(&mut self) -> Result<()> {
+        // Get the current context height and database tip height
+        let (context_height, db_tip_height) = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            let db_tip = match guard.db.db.get(crate::to_labeled_key(&metashrew_runtime::TIP_HEIGHT_KEY.as_bytes().to_vec()))? {
+                Some(bytes) => {
+                    if bytes.len() >= 4 {
+                        u32::from_le_bytes(bytes[..4].try_into().unwrap())
+                    } else {
+                        0
+                    }
+                },
+                None => 0,
+            };
+            (guard.height, db_tip)
+        };
+        
+        // If context height is ahead of or equal to db tip, no reorg needed
+        if context_height >= db_tip_height {
+            return Ok(());
+        }
+        
+        // We need to rollback from db_tip_height to context_height
+        log::info!("Handling reorg: rolling back from height {} to {}", db_tip_height, context_height);
+        
+        // Get the database from the context
+        let db = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        // Create an OptimizedBST to handle the rollback efficiently
+        let optimized_bst = OptimizedBST::new(db.db.clone());
+        
+        // Rollback all BST entries to the target height using optimized BST
+        optimized_bst.rollback_to_height(context_height)?;
+        
+        // Also rollback using the legacy SMT helper for state root calculation
+        let smt_helper = SMTHelper::new(db.db.clone());
+        smt_helper.calculate_and_store_state_root(context_height)?;
+        
+        log::info!("Reorg completed: rolled back to height {}", context_height);
+        
+        Ok(())
+    }
+    
+    /// Get the value of a key at a specific block height using optimized BST
+    pub fn db_value_at_block(
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        key: &Vec<u8>,
+        height: u32
+    ) -> Result<Vec<u8>> {
+        // Get the database from the context
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        // Create an OptimizedBST to work with the data
+        let optimized_bst = OptimizedBST::new(db.db.clone());
+        
+        // Get the current height to determine if this is a current state query
+        let current_height = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.height
+        };
+        
+        // Use optimized access pattern based on query type
+        let result = if height >= current_height {
+            // Current state query - use O(1) lookup
+            optimized_bst.get_current(key)?
+        } else {
+            // Historical query - uses O(1) check first, then binary search only if key exists
+            optimized_bst.get_at_height(key, height)?
+        };
+        
+        match result {
+            Some(value) => {
+                // Remove height annotation if present (last 4 bytes)
+                if value.len() >= 4 {
+                    Ok(value[..value.len()-4].to_vec())
+                } else {
+                    Ok(value)
+                }
+            },
+            None => Ok(Vec::new())
+        }
+    }
+    
+    /// Create an empty update list for a specific block height
+    pub fn db_create_empty_update_list(batch: &mut RocksDBBatch, height: u32) -> Result<()> {
+        // Create a key for the update list
+        let update_list_key = format!("updates:{}", height).into_bytes();
+        
+        // Create an empty update list
+        batch.put(update_list_key, Vec::new());
+        
+        Ok(())
+    }
+    
+    /// Append an annotated value to the database using optimized BST
+    pub fn db_append_annotated(
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        batch: &mut RocksDBBatch,
+        key: &Vec<u8>,
+        value: &Vec<u8>,
+        height: u32
+    ) -> Result<()> {
+        // Get the database from the context
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        // Create an OptimizedBST to work with the data
+        let optimized_bst = OptimizedBST::new(db.db.clone());
+        
+        // Use the OptimizedBST to store the value (without height annotation for current state)
+        // The OptimizedBST handles both current state and historical storage internally
+        optimized_bst.put(key, value, height)?;
+        
+        // Also add to the regular batch for backward compatibility with height annotation
+        let annotated_value = db_annotate_value(value, height)?;
+        batch.put(key, annotated_value);
+        
+        Ok(())
+    }
+    
+    /// Append a key to an update list
+    pub fn db_append(
+        _context: Arc<Mutex<MetashrewRuntimeContext>>,
+        batch: &mut RocksDBBatch,
+        update_key: &Vec<u8>,
+        key: &Vec<u8>
+    ) -> Result<()> {
+        // Create a key for the update list
+        let update_list_key = format!("updates:{}", hex::encode(update_key)).into_bytes();
+        
+        // Add the key to the update list
+        batch.put(update_list_key, key.clone());
+        
+        Ok(())
+    }
 
     pub fn setup_linker(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref_len = context.clone();
@@ -664,8 +612,9 @@ where
 
         Ok(())
     }
+
     pub fn setup_linker_view(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_get = context.clone();
@@ -772,26 +721,27 @@ where
 
         Ok(())
     }
-    fn new_with_db<U: KeyValueStoreLike + Clone + Sync + Send + 'static>(
-        db: U,
+
+    fn new_with_db(
+        db: RocksDBRuntimeAdapter,
         height: u32,
         engine: wasmtime::Engine,
         module: wasmtime::Module,
-    ) -> Result<MetashrewRuntime<U>> {
+    ) -> Result<MetashrewRuntime> {
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<U>>>::new(Mutex::<
-            MetashrewRuntimeContext<U>,
+        let context = Arc::<Mutex<MetashrewRuntimeContext>>::new(Mutex::<
+            MetashrewRuntimeContext,
         >::new(
-            MetashrewRuntimeContext::<U>::new(db, height, vec![]),
+            MetashrewRuntimeContext::new(db, height, vec![]),
         ));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
         {
-            MetashrewRuntime::<U>::setup_linker(context.clone(), &mut linker)
+            MetashrewRuntime::setup_linker(context.clone(), &mut linker)
                 .context("Failed to setup basic linker")?;
-            MetashrewRuntime::<U>::setup_linker_preview(context.clone(), &mut linker)
+            MetashrewRuntime::setup_linker_preview(context.clone(), &mut linker)
                 .context("Failed to setup preview linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
@@ -810,7 +760,7 @@ where
     }
 
     fn setup_linker_preview(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref = context.clone();
@@ -853,7 +803,7 @@ where
                         }
                     };
 
-                    // For preview, we'll store directly in the HashMap overlay
+                    // For preview, we'll store directly in the database
                     let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
                         Ok(d) => d,
                         Err(_) => {
@@ -865,7 +815,7 @@ where
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
                             ctx.state = 1;
-                            // Write directly to the overlay HashMap
+                            // Write directly to the database
                             for (k, v) in decoded.list.iter().tuples() {
                                 let k_owned = <Vec<u8> as Clone>::clone(k);
                                 let v_owned = <Vec<u8> as Clone>::clone(v);
@@ -878,8 +828,11 @@ where
                                     }
                                 };
 
-                                // Store in overlay
-                                if let Err(_) = ctx.db.put(k_owned, annotated) {
+                                // Create an SMTHelper to work with the BST
+                                let smt_helper = SMTHelper::new(ctx.db.db.clone());
+                                
+                                // Store in BST
+                                if let Err(_) = smt_helper.bst_put(&k_owned, &annotated, height) {
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
@@ -989,7 +942,7 @@ where
     }
 
     pub fn setup_linker_indexer(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref = context.clone();
@@ -1032,7 +985,7 @@ where
                         }
                     };
 
-                    let mut batch = T::Batch::default();
+                    let mut batch = RocksDBBatch::default();
                     if let Err(_) = Self::db_create_empty_update_list(&mut batch, height as u32) {
                         caller.data_mut().had_failure = true;
                         return;
@@ -1091,7 +1044,7 @@ where
                         }
                     }
 
-                    debug!(
+                    log::debug!(
                         "saving {:?} k/v pairs for block {:?}",
                         decoded.list.len() / 2,
                         height
@@ -1101,6 +1054,15 @@ where
                         Ok(mut ctx) => {
                             ctx.state = 1;
                             if let Err(_) = ctx.db.write(batch) {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                            
+                            // Create an SMTHelper to work with the BST
+                            let smt_helper = SMTHelper::new(ctx.db.db.clone());
+                            
+                            // Calculate and store the state root for this height
+                            if let Err(_) = smt_helper.calculate_and_store_state_root(height) {
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
@@ -1212,67 +1174,107 @@ where
     
     /// Get all keys that were touched at a specific block height
     pub fn get_keys_touched_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         height: u32
     ) -> Result<Vec<Vec<u8>>> {
-        // This is a placeholder implementation for the generic runtime
-        // The actual BST functionality is implemented in rockshrew-runtime
-        debug!("get_keys_touched_at_height called for height {}", height);
-        Ok(Vec::new())
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        // Use optimized BST for efficient key lookup at height
+        let optimized_bst = OptimizedBST::new(db.db.clone());
+        optimized_bst.get_keys_at_height(height)
     }
     
     /// Iterate backwards through all values of a key from most recent update
     pub fn iterate_key_backwards(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         key: &Vec<u8>,
         from_height: u32
     ) -> Result<Vec<(u32, Vec<u8>)>> {
-        // This is a placeholder implementation for the generic runtime
-        // The actual BST functionality is implemented in rockshrew-runtime
-        debug!("iterate_key_backwards called for key {:?} from height {}", key, from_height);
-        Ok(Vec::new())
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        // Use optimized BST for efficient backwards iteration
+        let optimized_bst = OptimizedBST::new(db.db.clone());
+        let results = optimized_bst.iterate_backwards(key, from_height)?;
+        
+        // Remove height annotations from values if present
+        let mut clean_results = Vec::new();
+        for (height, value) in results {
+            let clean_value = if value.len() >= 4 {
+                value[..value.len()-4].to_vec()
+            } else {
+                value
+            };
+            clean_results.push((height, clean_value));
+        }
+        
+        Ok(clean_results)
     }
     
     /// Get the current state root (merkle root of entire state)
     pub fn get_current_state_root(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>
+        context: Arc<Mutex<MetashrewRuntimeContext>>
     ) -> Result<[u8; 32]> {
-        // This is a placeholder implementation for the generic runtime
-        // The actual SMT functionality is implemented in rockshrew-runtime
-        debug!("get_current_state_root called");
-        Ok([0u8; 32])
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        let smt_helper = SMTHelper::new(db.db.clone());
+        smt_helper.get_current_state_root()
     }
     
     /// Get the state root at a specific height
     pub fn get_state_root_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         height: u32
     ) -> Result<[u8; 32]> {
-        // This is a placeholder implementation for the generic runtime
-        // The actual SMT functionality is implemented in rockshrew-runtime
-        debug!("get_state_root_at_height called for height {}", height);
-        Ok([0u8; 32])
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        let smt_helper = SMTHelper::new(db.db.clone());
+        smt_helper.get_smt_root_at_height(height)
     }
     
     /// Perform a complete rollback to a specific height
     pub fn rollback_to_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         target_height: u32
     ) -> Result<()> {
-        // This is a placeholder implementation for the generic runtime
-        // The actual BST functionality is implemented in rockshrew-runtime
-        debug!("rollback_to_height called for target height {}", target_height);
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        // Use optimized BST for efficient rollback
+        let optimized_bst = OptimizedBST::new(db.db.clone());
+        optimized_bst.rollback_to_height(target_height)?;
+        
+        // Also update legacy SMT for state root calculation
+        let smt_helper = SMTHelper::new(db.db.clone());
+        smt_helper.calculate_and_store_state_root(target_height)?;
+        
         Ok(())
     }
     
     /// Get all heights at which a key was updated
     pub fn get_key_update_heights(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<Mutex<MetashrewRuntimeContext>>,
         key: &Vec<u8>
     ) -> Result<Vec<u32>> {
-        // This is a placeholder implementation for the generic runtime
-        // The actual BST functionality is implemented in rockshrew-runtime
-        debug!("get_key_update_heights called for key {:?}", key);
-        Ok(Vec::new())
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        let smt_helper = SMTHelper::new(db.db.clone());
+        smt_helper.bst_get_heights_for_key(key)
     }
 }

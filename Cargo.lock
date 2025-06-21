@@ -4058,13 +4058,17 @@ dependencies = [
  "anyhow",
  "env_logger 0.11.8",
  "hex",
+ "itertools 0.12.1",
  "log",
  "metashrew-runtime",
+ "protobuf 3.7.2",
  "rocksdb",
  "serde",
  "serde_json",
  "sha2",
  "snap",
+ "tempfile",
+ "wasmtime 18.0.4",
  "zstd 0.13.3",
 ]
 

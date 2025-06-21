@@ -2727,26 +2727,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "memshrew"
-version = "9.0.0"
-dependencies = [
- "actix-cors",
- "actix-web",
- "anyhow",
- "bitcoin 0.32.6",
- "clap",
- "env_logger 0.11.8",
- "futures",
- "hex",
- "itertools 0.14.0",
- "log",
- "reqwest 0.12.20",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "memshrew-p2p"
 version = "9.0.0"
 dependencies = [
@@ -2773,7 +2753,7 @@ version = "9.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "rockshrew-runtime",
+ "metashrew-runtime",
 ]
 
 [[package]]
@@ -2800,9 +2780,33 @@ name = "metashrew-minimal"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bitcoin 0.32.6",
  "hex",
  "metashrew-core",
  "metashrew-support",
+]
+
+[[package]]
+name = "metashrew-runtime"
+version = "9.0.0"
+dependencies = [
+ "anyhow",
+ "env_logger 0.11.8",
+ "hex",
+ "itertools 0.12.1",
+ "log",
+ "protobuf 3.7.2",
+ "protobuf-codegen 3.7.2",
+ "protoc-bin-vendored",
+ "protoc-rust",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "sha2",
+ "snap",
+ "tempfile",
+ "wasmtime 18.0.4",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -2818,23 +2822,6 @@ dependencies = [
  "protobuf-codegen 3.7.2",
  "protoc-bin-vendored",
  "protoc-rust",
-]
-
-[[package]]
-name = "metashrew-test-harness"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "env_logger 0.11.8",
- "hex",
- "log",
- "memshrew-store",
- "metashrew-minimal",
- "rockshrew-runtime",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
 ]
 
 [[package]]
@@ -3794,10 +3781,10 @@ dependencies = [
  "hex",
  "itertools 0.11.0",
  "log",
+ "metashrew-runtime",
  "rand 0.8.5",
  "reqwest 0.11.27",
  "rocksdb",
- "rockshrew-runtime",
  "serde",
  "serde_json",
  "tokio",
@@ -3818,13 +3805,12 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "log",
- "memshrew-store",
+ "metashrew-runtime",
  "num_cpus",
  "once_cell",
  "rand 0.8.5",
  "reqwest 0.12.20",
  "rocksdb",
- "rockshrew-runtime",
  "russh",
  "russh-keys",
  "serde",
@@ -3832,29 +3818,6 @@ dependencies = [
  "sha2",
  "tokio",
  "url",
- "zstd 0.13.3",
-]
-
-[[package]]
-name = "rockshrew-runtime"
-version = "9.0.0"
-dependencies = [
- "anyhow",
- "env_logger 0.11.8",
- "hex",
- "itertools 0.12.1",
- "log",
- "protobuf 3.7.2",
- "protobuf-codegen 3.7.2",
- "protoc-bin-vendored",
- "protoc-rust",
- "rocksdb",
- "serde",
- "serde_json",
- "sha2",
- "snap",
- "tempfile",
- "wasmtime 18.0.4",
  "zstd 0.13.3",
 ]
 

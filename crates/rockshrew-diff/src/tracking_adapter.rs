@@ -1,5 +1,4 @@
-use metashrew_runtime::{KeyValueStoreLike, BatchLike};
-use rockshrew_runtime::RocksDBRuntimeAdapter;
+use metashrew_runtime::{KeyValueStoreLike, BatchLike, RocksDBRuntimeAdapter};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

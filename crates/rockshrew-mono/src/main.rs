@@ -7,13 +7,13 @@ use env_logger;
 use hex;
 // Removed unused import
 use log::{debug, info, error, warn};
-use rockshrew_runtime::KeyValueStoreLike;
+use metashrew_runtime::KeyValueStoreLike;
 // Use our new MetashrewRuntime implementation from rockshrew-runtime
-use rockshrew_runtime::{MetashrewRuntime, OptimizedBST};
+use metashrew_runtime::{MetashrewRuntime, OptimizedBST};
 use num_cpus;
 use rand::Rng;
 use rocksdb::Options;
-use rockshrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
+use metashrew_runtime::{query_height, set_label, RocksDBRuntimeAdapter};
 
 // Import our SMT helper module
 mod smt_helper;

@@ -1,37 +1,35 @@
-#![cfg_attr(not(feature = "std"), no_std)]
-extern crate alloc;
+use std::io::{Cursor};
+use metashrew_support;
+use bitcoin;
+use metashrew_core::{index_pointer::{IndexPointer}, export_bytes, flush, get, input};
+use metashrew_support::index_pointer::KeyValuePointer;
+use std::sync::{Arc};
 
-use alloc::format;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use metashrew_core::{export_bytes, flush, get, input, set};
-
-fn index() {
-    let input_data = input();
-    if input_data.len() < 4 {
-        return;
-    }
-    let height = u32::from_le_bytes(input_data[0..4].try_into().unwrap());
-    let block_bytes = &input_data[4..];
-    let key = format!("/blocks/{}", height).into_bytes();
-    set(Arc::new(key), Arc::new(block_bytes.to_vec()));
+#[unsafe(no_mangle)]
+pub fn _start() {
+    let mut input_data = Cursor::new(input());
+    let height = metashrew_support::utils::consume_sized_int::<u32>(&mut input_data).unwrap();
+    let block_bytes = metashrew_support::utils::consume_to_end(&mut input_data).unwrap();
+    IndexPointer::from_keyword(format!("/blocks/{}", height).as_str()).set(Arc::new(block_bytes.clone()));
+    let block = metashrew_support::utils::consensus_decode::<bitcoin::Block>(&mut Cursor::new(block_bytes)).unwrap();
+    let mut tracker = IndexPointer::from_keyword("/blocktracker");
+    let mut new_tracker = tracker.get().as_ref().clone();
+    new_tracker.extend((&[ block.header.block_hash()[0] ]).to_vec());
+    tracker.set(Arc::new(new_tracker));
     flush();
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() {
-    index();
-}
-
-#[unsafe(no_mangle)]
-pub extern "C" fn view_block_by_height() -> i32 {
-    let height_bytes = input();
-    if height_bytes.len() != 4 {
-        return export_bytes(Vec::new());
-    }
-    let height = u32::from_be_bytes(height_bytes.try_into().unwrap());
+pub extern "C" fn getblock() -> i32 {
+    let mut height_bytes = Cursor::new(input());
+    let height = metashrew_support::utils::consume_sized_int::<u32>(&mut height_bytes).unwrap();
     let key = format!("/blocks/{}", height).into_bytes();
     let block_bytes_arc = get(Arc::new(key));
     let block_bytes: &Vec<u8> = &*block_bytes_arc;
     export_bytes(block_bytes.clone())
+}
+
+#[unsafe(no_mangle)]
+pub fn blocktracker() -> i32 {
+    export_bytes(IndexPointer::from_keyword("/blocktracker").get().as_ref().clone())
 }

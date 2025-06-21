@@ -266,7 +266,7 @@ impl SMTHelper {
     
     /// Calculate and store a new state root for the given height
     pub fn calculate_and_store_state_root(&self, height: u32) -> Result<[u8; 32]> {
-        use rockshrew_runtime::OptimizedBST;
+        use metashrew_runtime::OptimizedBST;
         
         info!("Starting state root calculation for height {}", height);
         
@@ -415,7 +415,7 @@ impl SMTHelper {
     
     /// Get all heights at which a key was updated (for backward compatibility)
     pub fn bst_get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
-        use rockshrew_runtime::OptimizedBST;
+        use metashrew_runtime::OptimizedBST;
         
         // Use OptimizedBST to get heights for this key
         let optimized_bst = OptimizedBST::new(self.db.clone());

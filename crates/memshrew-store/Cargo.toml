@@ -1,9 +1,0 @@
-[package]
-name = "memshrew-store"
-version = "9.0.0"
-edition = "2024"
-
-[dependencies]
-rockshrew-runtime = { path = "../rockshrew-runtime" }
-async-trait = "0.1.81"
-anyhow = "1.0.86"

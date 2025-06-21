@@ -2851,11 +2851,14 @@ name = "metashrew-tests"
 version = "9.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bitcoin 0.32.6",
  "futures",
+ "hex",
  "memshrew-runtime",
  "metashrew-runtime",
  "metashrew-support",
+ "rockshrew-sync",
  "tokio",
  "tokio-test",
 ]
@@ -3834,6 +3837,7 @@ dependencies = [
  "actix-cors",
  "actix-web",
  "anyhow",
+ "async-trait",
  "bytes",
  "clap",
  "dirs",
@@ -3849,6 +3853,7 @@ dependencies = [
  "reqwest 0.12.20",
  "rocksdb",
  "rockshrew-runtime",
+ "rockshrew-sync",
  "russh",
  "russh-keys",
  "serde",
@@ -3869,6 +3874,24 @@ dependencies = [
  "metashrew-runtime",
  "rocksdb",
  "tempfile",
+]
+
+[[package]]
+name = "rockshrew-sync"
+version = "9.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hex",
+ "log",
+ "memshrew-runtime",
+ "metashrew-runtime",
+ "num_cpus",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-test",
 ]
 
 [[package]]

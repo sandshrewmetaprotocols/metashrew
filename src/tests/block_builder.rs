@@ -7,6 +7,7 @@ use bitcoin::blockdata::block::Header as BlockHeader;
 use bitcoin::hashes::Hash;
 use metashrew_support::utils;
 use std::collections::VecDeque;
+use hex;
 
 /// A builder for creating test Bitcoin blocks
 pub struct BlockBuilder {
@@ -217,6 +218,16 @@ impl ChainBuilder {
     pub fn get_block(&self, height: u32) -> Option<&Block> {
         self.blocks.get(height as usize)
     }
+}
+
+/// Simple function to create a test block with given parameters
+pub fn create_test_block(height: u32, prev_hash: BlockHash, extra_data: &[u8]) -> Block {
+    let extra_hex = hex::encode(extra_data);
+    BlockBuilder::new()
+        .height(height)
+        .prev_hash(prev_hash)
+        .add_coinbase(5000000000, Some(&extra_hex))
+        .build()
 }
 
 #[cfg(test)]

@@ -454,4 +454,20 @@ impl SMTHelper {
         debug!("Deleted state root for height {}", height);
         Ok(())
     }
+    
+    /// Store a state root for a specific height
+    pub fn store_smt_root_at_height(&self, height: u32, root: &[u8]) -> Result<()> {
+        if root.len() != 32 {
+            return Err(anyhow!("State root must be exactly 32 bytes, got {}", root.len()));
+        }
+        
+        let root_key = format!("{}::{}", SMT_ROOT_PREFIX, height).into_bytes();
+        debug!("Storing state root for height {}: {}", height, hex::encode(root));
+        
+        self.db.put(&root_key, root)
+            .map_err(|e| anyhow!("Failed to store SMT root for height {}: {}", height, e))?;
+        
+        debug!("Successfully stored state root for height {}", height);
+        Ok(())
+    }
 }

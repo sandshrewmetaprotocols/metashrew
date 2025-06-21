@@ -15,6 +15,7 @@ pub mod integration_tests;
 pub mod block_builder;
 pub mod runtime_tests;
 pub mod mock_bitcoind_test;
+pub mod comprehensive_e2e_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

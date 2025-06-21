@@ -1,7 +1,8 @@
 //! Mock bitcoind backend test that simulates the complete rockshrew-mono pipeline
-//! 
+//!
 //! This test creates a mock Bitcoin node that produces realistic blocks and tests
-//! the complete indexing workflow with metashrew-minimal.
+//! the complete indexing workflow with metashrew-minimal using the new generic
+//! rockshrew-sync framework.
 
 use super::{TestConfig, block_builder::*};
 use anyhow::Result;
@@ -9,8 +10,18 @@ use memshrew_runtime::{MemStoreRuntime, MemStoreAdapter, KeyValueStoreLike};
 use metashrew_support::utils;
 use metashrew_support::byte_view::ByteView;
 use bitcoin::{Block, BlockHash};
+use bitcoin::hashes::Hash;
+use bitcoin::hex;
 use std::collections::VecDeque;
 use tokio::time::{sleep, Duration};
+
+// Import the new generic sync framework
+use rockshrew_sync::{
+    MetashrewSync, SyncConfig, SyncEngine, JsonRpcProvider,
+    MockBitcoinNode, MockStorage, MetashrewRuntimeAdapter,
+    BitcoinNodeAdapter, StorageAdapter, RuntimeAdapter,
+    ViewCall, PreviewCall, SyncResult,
+};
 
 /// Mock Bitcoin node that produces realistic blocks
 pub struct MockBitcoind {
@@ -231,6 +242,106 @@ impl MockIndexer {
         
         Ok(())
     }
+    
+}
+
+/// Test the new generic sync framework with real MetashrewRuntime
+#[tokio::test]
+async fn test_generic_sync_framework() -> Result<()> {
+    // Create mock node and storage, but real runtime
+    let node = MockBitcoinNode::new();
+    let storage = MockStorage::new();
+    
+    // Create real MetashrewRuntime with in-memory storage
+    let config = TestConfig::new();
+    let metashrew_runtime = config.create_runtime()?;
+    let runtime = MetashrewRuntimeAdapter::new(metashrew_runtime);
+    
+    // Create realistic Bitcoin blocks using our block builder
+    let chain = ChainBuilder::new().blocks();
+    let mut blocks: Vec<_> = chain.into_iter().collect();
+    
+    // Generate additional blocks if needed
+    while blocks.len() < 10 {
+        let prev_block = blocks.last().unwrap();
+        let next_height = blocks.len() as u32;
+        let next_block = BlockBuilder::new()
+            .height(next_height)
+            .prev_hash(prev_block.block_hash())
+            .add_coinbase(5000000000, None)
+            .build();
+        blocks.push(next_block);
+    }
+    
+    // Add realistic blocks to the mock node
+    for (i, block) in blocks.iter().take(10).enumerate() {
+        let height = i as u32;
+        let hash = block.block_hash().to_byte_array().to_vec();
+        let data = utils::consensus_encode(block)?;
+        node.add_block(height, hash, data);
+    }
+    
+    // Create sync configuration
+    let config = SyncConfig {
+        start_block: 0,
+        exit_at: Some(5), // Process only first 5 blocks for testing
+        pipeline_size: Some(2),
+        max_reorg_depth: 10,
+        reorg_check_threshold: 3,
+    };
+    
+    // Create the generic sync engine
+    let mut sync_engine = MetashrewSync::new(node, storage, runtime, config);
+    
+    // Test individual block processing
+    sync_engine.process_single_block(0).await?;
+    sync_engine.process_single_block(1).await?;
+    
+    // Test status
+    let status = sync_engine.get_status().await?;
+    assert_eq!(status.current_height, 2);
+    assert_eq!(status.tip_height, 9);
+    assert_eq!(status.blocks_behind, 7);
+    
+    // Test JSON-RPC interface
+    let height_result = sync_engine.metashrew_height().await?;
+    assert_eq!(height_result, 1); // Last processed block
+    
+    // Test view function - use real 'blocktracker' function
+    let view_result = sync_engine.metashrew_view(
+        "blocktracker".to_string(),
+        "".to_string(), // blocktracker doesn't need input
+        "1".to_string(),
+    ).await?;
+    assert!(view_result.starts_with("0x"));
+    
+    // Test getblock view function with height input
+    let height_input = format!("{:02x}{:02x}{:02x}{:02x}", 1, 0, 0, 0); // Height 1 as little-endian hex
+    let getblock_result = sync_engine.metashrew_view(
+        "getblock".to_string(),
+        height_input,
+        "1".to_string(),
+    ).await?;
+    assert!(getblock_result.starts_with("0x"));
+    
+    // Test preview function - use real 'blocktracker' function
+    let preview_result = sync_engine.metashrew_preview(
+        "cafebabe".to_string(), // dummy block data
+        "blocktracker".to_string(),
+        "".to_string(), // blocktracker doesn't need input
+        "1".to_string(),
+    ).await?;
+    assert!(preview_result.starts_with("0x"));
+    
+    // Test state root (should be empty for mock)
+    let state_root_result = sync_engine.metashrew_stateroot("1".to_string()).await;
+    assert!(state_root_result.is_err()); // Mock storage doesn't have state roots by default
+    
+    // Test snapshot info
+    let snapshot_info = sync_engine.metashrew_snapshot().await?;
+    assert!(snapshot_info.is_object());
+    
+    Ok(())
 }
 
 /// Test complete indexing pipeline with mock Bitcoin node - comprehensive E2E test

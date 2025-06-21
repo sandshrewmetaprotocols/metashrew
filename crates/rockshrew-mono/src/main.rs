@@ -5,13 +5,9 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use env_logger;
 use hex;
-// Removed unused import
-use log::{debug, info, error, warn};
-use metashrew_runtime::KeyValueStoreLike;
-// Use our new MetashrewRuntime implementation from rockshrew-runtime
-use metashrew_runtime::{MetashrewRuntime, OptimizedBST};
+use log::{debug, info, error};
+use metashrew_runtime::{MetashrewRuntime};
 use num_cpus;
-use rand::Rng;
 use rocksdb::Options;
 use metashrew_runtime::set_label;
 use rockshrew_runtime::RocksDBRuntimeAdapter;
@@ -19,45 +15,33 @@ use rockshrew_runtime::RocksDBRuntimeAdapter;
 // Import our SMT helper module
 mod smt_helper;
 use smt_helper::SMTHelper;
+
+// Import our adapters module
+mod adapters;
+use adapters::{BitcoinRpcAdapter, RocksDBStorageAdapter, MetashrewRuntimeAdapter};
+
 use serde::{Deserialize, Serialize};
-use serde_json::{self, Number, Value};
+use serde_json::{self, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio;
-use tokio::sync::{RwLock, mpsc};
-use tokio::time::sleep;
+use tokio::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // Import our SSH tunneling module
 mod ssh_tunnel;
-use ssh_tunnel::{SshTunnel, SshTunnelConfig, TunneledResponse, make_request_with_tunnel, parse_daemon_rpc_url};
+use ssh_tunnel::{SshTunnelConfig, parse_daemon_rpc_url};
 
 // Import our snapshot module
 mod snapshot;
 use snapshot::{SnapshotConfig, SnapshotManager};
 
-// Extension trait for RwLock to add async_read method
-trait RwLockExt<T> {
-    async fn async_read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> where T: 'a;
-}
-
-impl<T> RwLockExt<T> for tokio::sync::RwLock<T> {
-    async fn async_read<'a>(&'a self) -> tokio::sync::RwLockReadGuard<'a, T> where T: 'a {
-        // Properly use async/await pattern instead of blocking
-        self.read().await
-    }
-}
+// Import the generic sync framework
+use rockshrew_sync::{MetashrewSync, SyncConfig, JsonRpcProvider, StorageAdapter};
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
 static CURRENT_HEIGHT: AtomicU32 = AtomicU32::new(0);
-
-// Block processing result for the pipeline
-#[derive(Debug)]
-enum BlockResult {
-    Success(u32),  // Block height that was successfully processed
-    Error(u32, anyhow::Error),  // Block height and error
-}
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -90,20 +74,24 @@ struct Args {
     snapshot_interval: u32,
     #[arg(long, help = "URL to a remote snapshot repository to sync from")]
     repo: Option<String>,
+    #[arg(long, help = "Maximum reorg depth to handle", default_value_t = 100)]
+    max_reorg_depth: u32,
+    #[arg(long, help = "Reorg check threshold - only check for reorgs when within this many blocks of tip", default_value_t = 6)]
+    reorg_check_threshold: u32,
 }
 
 #[derive(Clone)]
 struct AppState {
-    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
+    sync_engine: Arc<RwLock<MetashrewSync<BitcoinRpcAdapter, RocksDBStorageAdapter, MetashrewRuntimeAdapter>>>,
 }
 
 // JSON-RPC request structure
 #[derive(Serialize, Deserialize)]
-struct JsonRpcRequest {
-    id: u32,
-    jsonrpc: String,
-    method: String,
-    params: Vec<Value>,
+pub struct JsonRpcRequest {
+    pub id: u32,
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: Vec<Value>,
 }
 
 #[derive(Serialize)]
@@ -130,20 +118,20 @@ struct JsonRpcErrorObject {
 // JSON-RPC response structure for internal use
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct JsonRpcResponse {
-    id: u32,
-    result: Option<Value>,
-    error: Option<JsonRpcErrorInternal>,
-    jsonrpc: String,
+pub struct JsonRpcResponse {
+    pub id: u32,
+    pub result: Option<Value>,
+    pub error: Option<JsonRpcErrorInternal>,
+    pub jsonrpc: String,
 }
 
 // JSON-RPC error structure for internal use
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct JsonRpcErrorInternal {
-    code: i32,
-    message: String,
-    data: Option<Value>,
+pub struct JsonRpcErrorInternal {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -178,1098 +166,19 @@ impl error::ResponseError for IndexerError {
 // Block count response structure
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct BlockCountResponse {
-    id: u32,
-    result: Option<u32>,
-    error: Option<Value>,
+pub struct BlockCountResponse {
+    pub id: u32,
+    pub result: Option<u32>,
+    pub error: Option<Value>,
 }
 
 // Block hash response structure
 #[derive(Deserialize)]
 #[allow(dead_code)]
-struct BlockHashResponse {
-    id: u32,
-    result: Option<String>,
-    error: Option<Value>,
-}
-
-pub struct MetashrewRocksDBSync {
-    runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
-    args: Args,
-    start_block: u32,
-    rpc_url: String,
-    auth: Option<String>,
-    bypass_ssl: bool,
-    tunnel_config: Option<SshTunnelConfig>,
-    active_tunnel: Arc<tokio::sync::Mutex<Option<SshTunnel>>>,
-    fetcher_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
-    processor_thread_id_tx: Option<tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>>,
-    fetcher_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
-    processor_thread_id: std::sync::Mutex<Option<std::thread::ThreadId>>,
-    snapshot_manager: Option<Arc<tokio::sync::Mutex<SnapshotManager>>>,
-}
-
-impl MetashrewRocksDBSync {
-    async fn post(&self, body: String) -> Result<TunneledResponse> {
-        // Implement retry logic for network requests
-        let max_retries = 5;
-        let mut retry_delay = Duration::from_millis(500);
-        let max_delay = Duration::from_secs(16);
-        
-        for attempt in 0..max_retries {
-            // Get the existing tunnel if available
-            let existing_tunnel = if self.tunnel_config.is_some() {
-                let active_tunnel = self.active_tunnel.lock().await;
-                active_tunnel.clone()
-            } else {
-                None
-            };
-            
-            // Make the request with tunnel if needed
-            match make_request_with_tunnel(
-                &self.rpc_url,
-                body.clone(),
-                self.auth.clone(),
-                self.tunnel_config.clone(),
-                self.bypass_ssl,
-                existing_tunnel
-            ).await {
-                Ok(tunneled_response) => {
-                    // If this is a tunneled response with a tunnel, store it for reuse
-                    if let Some(tunnel) = tunneled_response._tunnel.clone() {
-                        if self.tunnel_config.is_some() {
-                            debug!("Storing SSH tunnel for reuse on port {}", tunnel.local_port);
-                            let mut active_tunnel = self.active_tunnel.lock().await;
-                            *active_tunnel = Some(tunnel);
-                        }
-                    }
-                    return Ok(tunneled_response);
-                },
-                Err(e) => {
-                    error!("Request failed (attempt {}): {}", attempt + 1, e);
-                    
-                    // If the error might be related to the tunnel, clear the active tunnel
-                    // so we'll create a new one on the next attempt
-                    if self.tunnel_config.is_some() {
-                        let mut active_tunnel = self.active_tunnel.lock().await;
-                        if active_tunnel.is_some() {
-                            debug!("Clearing active tunnel due to error");
-                            *active_tunnel = None;
-                        }
-                    }
-                    
-                    // Calculate exponential backoff with jitter
-                    let jitter = rand::thread_rng().gen_range(0..=100) as u64;
-                    retry_delay = std::cmp::min(
-                        max_delay,
-                        retry_delay * 2 + Duration::from_millis(jitter)
-                    );
-                    
-                    debug!("Request failed (attempt {}): {}, retrying in {:?}",
-                           attempt + 1, e, retry_delay);
-                    tokio::time::sleep(retry_delay).await;
-                }
-            }
-        }
-        
-        Err(anyhow!("Max retries exceeded"))
-    }
-
-    async fn fetch_blockcount(&self) -> Result<u32> {
-        let tunneled_response = self
-            .post(serde_json::to_string(&JsonRpcRequest {
-                id: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_secs()
-                    .try_into()?,
-                jsonrpc: String::from("2.0"),
-                method: String::from("getblockcount"),
-                params: vec![],
-            })?)
-            .await?;
-
-        let result: BlockCountResponse = tunneled_response.json().await?;
-        let count = result.result
-            .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))?;
-        Ok(count)
-    }
-
-    pub async fn poll_connection<'a>(&'a self) -> Result<Arc<rocksdb::DB>> {
-        let runtime_guard = self.runtime.read().await;
-        let context = runtime_guard.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
-        Ok(context.db.db.clone())
-    }
-
-    pub async fn query_height(&self) -> Result<u32> {
-        let runtime_guard = self.runtime.read().await;
-        let db_clone = {
-            let context = runtime_guard.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
-            context.db.db.clone()
-        }; // Guard is dropped here
-        rockshrew_runtime::query_height(db_clone, self.start_block).await
-    }
-
-    // Process a single block
-    async fn process_block(&self, height: u32, block_data: Vec<u8>) -> Result<()> {
-        info!("PROCESS_BLOCK: Starting to process block {} ({} bytes)", height, block_data.len());
-        // Get a lock on the runtime with better error handling
-        let mut runtime = match self.runtime.write().await {
-            runtime => runtime,
-        };
-        
-        // Create a key-value tracker for the WASM module updates
-        let snapshot_manager_clone = self.snapshot_manager.clone();
-        
-        // Get the block data size for logging
-        let block_size = block_data.len();
-        
-        // Set block data with better error handling
-        {
-            let mut context = runtime.context.lock()
-                .map_err(|e| anyhow!("Failed to lock context: {}", e))?;
-            context.block = block_data;
-            context.height = height;
-            context.db.set_height(height);
-            
-            // Set up key-value tracking for the WASM module
-            if let Some(snapshot_manager) = &snapshot_manager_clone {
-                let sm_clone = snapshot_manager.clone();
-                context.db.set_kv_tracker(Some(Box::new(move |key: Vec<u8>, value: Vec<u8>| {
-                    let mut manager = match sm_clone.try_lock() {
-                        Ok(m) => m,
-                        Err(_) => return, // Skip if we can't get the lock
-                    };
-                    manager.track_key_change(key, value);
-                })));
-            }
-        } // Release context lock
-        
-        // Check if memory usage is approaching the limit and refresh if needed
-        if self.should_refresh_memory(&mut runtime, height) {
-            match runtime.refresh_memory() {
-                Ok(_) => info!("Successfully performed preemptive memory refresh at block {}", height),
-                Err(e) => {
-                    error!("Failed to perform preemptive memory refresh: {}", e);
-                    info!("Continuing execution despite memory refresh failure");
-                    // Continue with execution even if preemptive refresh fails
-                }
-            }
-        }
-        
-        // Check if this block has already been processed by checking if we have a state root for this height
-        let db = {
-            let context = runtime.context.lock()
-                .map_err(|e| anyhow!("Failed to lock context: {}", e))?;
-            context.db.db.clone()
-        };
-        
-        let smt_helper = SMTHelper::new(db.clone());
-        let already_processed = smt_helper.get_smt_root_at_height(height).is_ok();
-        
-        if already_processed {
-            info!("Block {} already processed (state root exists), skipping WASM execution", height);
-            return Ok(());
-        }
-        
-        // Execute the runtime with better error handling
-        debug!("About to call runtime.run() for block {}", height);
-        match runtime.run() {
-            Ok(_) => {
-                info!("RUNTIME_RUN: Successfully executed WASM for block {} (size: {} bytes)", height, block_size);
-                
-                // Calculate and store the state root using both optimized BST and SMT helper
-                let new_root = match smt_helper.calculate_and_store_state_root(height) {
-                    Ok(root) => {
-                        // Also ensure optimized BST is consistent
-                        let adapter = RocksDBRuntimeAdapter::from_db(db.clone());
-                        let optimized_bst = OptimizedBST::new(adapter);
-                        if let Ok(stats) = optimized_bst.get_statistics() {
-                            debug!("OptimizedBST stats at height {}: {}", height, stats);
-                        }
-                        root
-                    },
-                    Err(e) => {
-                        error!("Failed to calculate state root: {}", e);
-                        [0u8; 32] // Use empty root if calculation fails
-                    }
-                };
-                
-                // Handle snapshot creation if needed
-                if let Some(snapshot_manager) = &self.snapshot_manager {
-                    // Now we can safely await on the snapshot manager lock
-                    let mut manager = snapshot_manager.lock().await;
-                    if manager.should_create_snapshot(height) {
-                        // Track database changes since last snapshot
-                        let last_snapshot_height = manager.last_snapshot_height;
-                        if let Err(e) = manager.track_db_changes(&db, last_snapshot_height, height).await {
-                            error!("Failed to track database changes for snapshot: {}", e);
-                        }
-                        
-                        // Create the snapshot
-                        if let Err(e) = manager.create_snapshot(height, &new_root).await {
-                            error!("Failed to create snapshot at height {}: {}", height, e);
-                        }
-                    }
-                }
-                
-                Ok(())
-            },
-            Err(_e) => {
-                // Before retrying, check if the block was actually processed successfully
-                // (sometimes WASM fails but the data was still written)
-                if smt_helper.get_smt_root_at_height(height).is_ok() {
-                    info!("Block {} appears to have been processed despite WASM error, skipping retry", height);
-                    return Ok(());
-                }
-                
-                // Try to refresh memory with better error handling
-                match runtime.refresh_memory() {
-                    Ok(_) => {
-                        // Check again if block was processed before retrying
-                        if smt_helper.get_smt_root_at_height(height).is_ok() {
-                            info!("Block {} was processed during memory refresh, skipping retry", height);
-                            return Ok(());
-                        }
-                        
-                        // Try running again after memory refresh
-                        debug!("About to call runtime.run() RETRY for block {} after memory refresh", height);
-                        match runtime.run() {
-                            Ok(_) => {
-                                info!("RUNTIME_RUN_RETRY: Successfully executed WASM for block {} after memory refresh (size: {} bytes)", height, block_size);
-                                
-                                // Calculate state root after retry
-                                if let Err(e) = smt_helper.calculate_and_store_state_root(height) {
-                                    error!("Failed to calculate state root after retry: {}", e);
-                                }
-                                
-                                // Handle snapshot tracking after successful retry
-                                if let Some(snapshot_manager) = &self.snapshot_manager {
-                                    // Create SMT helper and get root
-                                    if let Ok(new_root) = smt_helper.get_smt_root_at_height(height) {
-                                        // Now we can safely await on the snapshot manager lock
-                                        let mut manager = snapshot_manager.lock().await;
-                                        if manager.should_create_snapshot(height) {
-                                            // Track database changes since last snapshot
-                                            let last_snapshot_height = manager.last_snapshot_height;
-                                            if let Err(e) = manager.track_db_changes(&db, last_snapshot_height, height).await {
-                                                error!("Failed to track database changes for snapshot: {}", e);
-                                            }
-                                            
-                                            // Create the snapshot
-                                            if let Err(e) = manager.create_snapshot(height, &new_root).await {
-                                                error!("Failed to create snapshot at height {}: {}", height, e);
-                                            }
-                                        }
-                                    }
-                                }
-                                
-                                Ok(())
-                            },
-                            Err(run_err) => {
-                                error!("Failed to process block {} after memory refresh: {}", height, run_err);
-                                Err(anyhow!(run_err))
-                            }
-                        }
-                    },
-                    Err(refresh_err) => {
-                        error!("Memory refresh failed: {}", refresh_err);
-                        Err(anyhow!(refresh_err))
-                    }
-                }
-            }
-        }
-    }
-
-    // Parallel processing with pipeline
-    async fn run_pipeline(&mut self) -> Result<()> {
-        let mut height: u32 = self.query_height().await?;
-        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-        
-        // Track the last known best height to detect reorgs
-        let mut last_best_height: u32 = height;
-        
-        // Determine optimal pipeline size based on CPU cores if not specified
-        let pipeline_size = match self.args.pipeline_size {
-            Some(size) => size,
-            None => {
-                let available_cpus = num_cpus::get();
-                // Use approximately 1/2 of available cores for pipeline size, with reasonable min/max
-                let auto_size = std::cmp::min(
-                    std::cmp::max(5, available_cpus / 2),
-                    16  // Cap at a reasonable maximum
-                );
-                info!("Auto-configuring pipeline size to {} based on {} available CPU cores", auto_size, available_cpus);
-                auto_size
-            }
-        };
-        
-        // Create channels for the pipeline
-        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(pipeline_size);
-        let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(pipeline_size);
-        
-        // Spawn block fetcher task on dedicated thread
-        let fetcher_handle = {
-            let args = self.args.clone();
-            let indexer = self.clone();
-            let result_sender_clone = result_sender.clone();
-            let block_sender_clone = block_sender.clone();
-            
-            // Spawn a task for the block fetcher
-            tokio::spawn(async move {
-                // Register this thread as the fetcher thread
-                indexer.register_current_thread_as_fetcher();
-                info!("Block fetcher process started on thread {:?}", std::thread::current().id());
-                info!("Starting to fetch blocks from height {}", height);
-                
-                let mut current_height = height;
-                
-                loop {
-                    // Check if we should exit
-                    if let Some(exit_at) = args.exit_at {
-                        if current_height >= exit_at {
-                            info!("Fetcher reached exit-at block {}, shutting down", exit_at);
-                            break;
-                        }
-                    }
-                    
-                    // Detect and handle any reorgs, get the next block to process
-                    let next_height = match indexer.detect_and_handle_reorg().await {
-                        Ok(h) => h,
-                        Err(e) => {
-                            error!("Failed to detect reorg: {}", e);
-                            // Send error result and continue
-                            if result_sender_clone.send(BlockResult::Error(current_height, e)).await.is_err() {
-                                break;
-                            }
-                            sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
-                    };
-                    
-                    // Check if we detected a reorg (next_height < current_height)
-                    if next_height < current_height {
-                        info!("Chain reorganization detected: rolling back from block {} to block {}", current_height, next_height);
-                        current_height = next_height;
-                    }
-                    
-                    // Get the remote tip to see if we have blocks to fetch
-                    let remote_tip = match indexer.fetch_blockcount().await {
-                        Ok(tip) => tip,
-                        Err(e) => {
-                            error!("Failed to fetch block count: {}", e);
-                            sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
-                    };
-                    
-                    // Check if the next block is available
-                    if next_height > remote_tip {
-                        debug!("Waiting for new block: next_height={}, remote_tip={}", next_height, remote_tip);
-                        sleep(Duration::from_secs(3)).await;
-                        continue;
-                    }
-                    
-                    // Fetch the block (reorg validation already passed)
-                    match indexer.pull_block(next_height).await {
-                        Ok(block_data) => {
-                            info!("FETCHER: Fetched block {} ({} bytes)", next_height, block_data.len());
-                            // Send block to processor
-                            info!("FETCHER: Sending block {} to processor", next_height);
-                            if block_sender_clone.send((next_height, block_data)).await.is_err() {
-                                break;
-                            }
-                            info!("FETCHER: Successfully sent block {} to processor", next_height);
-                        },
-                        Err(e) => {
-                            error!("Failed to fetch block {}: {}", next_height, e);
-                            // Send error result
-                            if result_sender_clone.send(BlockResult::Error(next_height, e)).await.is_err() {
-                                break;
-                            }
-                            sleep(Duration::from_secs(1)).await;
-                            continue;
-                        }
-                    }
-                    
-                    current_height = next_height + 1;
-                }
-                
-                debug!("Block fetcher task completed");
-            })
-        };
-        
-        // Spawn block processor task on dedicated thread
-        let processor_handle = {
-            let indexer = self.clone();
-            let result_sender_clone = result_sender.clone();
-            
-            // Spawn a task for the block processor
-            {
-                // Create a separate scope to avoid Send issues with MutexGuard
-                let indexer_clone = indexer.clone();
-                
-                tokio::spawn(async move {
-                    // Register this thread as the processor thread
-                    indexer_clone.register_current_thread_as_processor();
-                    info!("Block processor process started on thread {:?}", std::thread::current().id());
-                    info!("Ready to process incoming blocks");
-                    
-                    while let Some((block_height, block_data)) = block_receiver.recv().await {
-                        info!("PROCESSOR: Received block {} ({} bytes) from fetcher", block_height, block_data.len());
-                        
-                        let result = match indexer_clone.process_block(block_height, block_data).await {
-                            Ok(_) => BlockResult::Success(block_height),
-                            Err(e) => BlockResult::Error(block_height, e),
-                        };
-                        
-                        // Send result
-                        if result_sender_clone.send(result).await.is_err() {
-                            break;
-                        }
-                    }
-                    
-                    debug!("Block processor task completed");
-                })
-            }
-        };
-        
-        // Main loop to handle results
-        while let Some(result) = result_receiver.recv().await {
-            match result {
-                BlockResult::Success(processed_height) => {
-                    info!("Block {} successfully processed and indexed", processed_height);
-                    
-                    // Check if this was a reorg (processed_height < last_best_height)
-                    if processed_height < last_best_height {
-                        info!("Chain reorganization confirmed: processed block {} (previous chain tip was at block {})",
-                              processed_height, last_best_height);
-                        
-                        // Update height to reflect the reorg
-                        height = processed_height + 1;
-                        
-                        // Update CURRENT_HEIGHT to reflect the reorg
-                        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-                        info!("Updated CURRENT_HEIGHT to {} after reorg", height);
-                    } else {
-                        // Normal case - no reorg
-                        height = processed_height + 1;
-                        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-                    }
-                    
-                    // Update last_best_height
-                    last_best_height = processed_height;
-                },
-                BlockResult::Error(failed_height, error) => {
-                    error!("Failed to process block {}: {}", failed_height, error);
-                    info!("Waiting 5 seconds before retrying...");
-                    // We could implement more sophisticated error handling here
-                    // For now, just wait and continue
-                    sleep(Duration::from_secs(5)).await;
-                }
-            }
-            
-            // Check if we should exit
-            if let Some(exit_at) = self.args.exit_at {
-                if height > exit_at {
-                    info!("Reached configured exit height at block {}, shutting down gracefully", exit_at);
-                    break;
-                }
-            }
-        }
-        
-        // Clean up
-        drop(block_sender);
-        drop(result_sender);
-        
-        // Wait for tasks to complete
-        let (_fetcher_result, _processor_result) = tokio::join!(fetcher_handle, processor_handle);
-        
-        Ok(())
-    }
-
-    /// Optimized reorg detection that only validates when near chain tip
-    /// Returns the height from which we should start/resume indexing
-    async fn detect_and_handle_reorg(&self) -> Result<u32> {
-        // Get our current indexed height (the last block we successfully processed)
-        let last_indexed_height = self.query_height().await?;
-        
-        // If we haven't indexed any blocks yet, start from the configured start block
-        if last_indexed_height == 0 {
-            info!("No blocks indexed yet, starting from configured start block {}", self.start_block);
-            return Ok(self.start_block);
-        }
-        
-        // Get the current blockchain tip from the remote node
-        let remote_tip = self.fetch_blockcount().await?;
-        
-        // Only perform reorg detection when within 6 blocks of tip (optimization for initial sync)
-        let reorg_check_threshold = 6;
-        let distance_from_tip = remote_tip.saturating_sub(last_indexed_height);
-        
-        debug!("Reorg check: last_indexed_height={}, remote_tip={}, distance={}",
-               last_indexed_height, remote_tip, distance_from_tip);
-        
-        if distance_from_tip <= reorg_check_threshold {
-            // We're near the tip - perform full reorg validation
-            info!("Near chain tip ({} blocks behind), performing reorg validation", distance_from_tip);
-            return self.validate_current_state_and_check_reorg(last_indexed_height, remote_tip).await;
-        } else {
-            // We're far from tip (initial sync) - skip reorg check, just get next block
-            debug!("Initial sync mode: {} blocks behind tip, skipping reorg check", distance_from_tip);
-            if last_indexed_height < remote_tip {
-                return Ok(last_indexed_height + 1); // Next block to index
-            } else {
-                return Ok(last_indexed_height + 1); // Wait for new blocks
-            }
-        }
-    }
-    
-    /// Full reorg validation when near chain tip
-    async fn validate_current_state_and_check_reorg(&self, last_indexed_height: u32, remote_tip: u32) -> Result<u32> {
-        // Validate the last fully indexed block
-        // last_indexed_height represents the last block we successfully indexed
-        
-        if last_indexed_height > 0 {
-            let local_hash = self.get_blockhash(last_indexed_height).await;
-            if let Some(local_hash) = local_hash {
-                let remote_hash = match self.fetch_blockhash(last_indexed_height).await {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        warn!("Failed to fetch remote blockhash for height {}: {}", last_indexed_height, e);
-                        // If we can't fetch the remote hash, assume no reorg and continue
-                        let next_height = last_indexed_height + 1;
-                        if next_height <= remote_tip {
-                            return Ok(next_height);
-                        } else {
-                            return Ok(next_height);
-                        }
-                    }
-                };
-                
-                if local_hash != remote_hash {
-                    warn!("REORG DETECTED at height {}: local={}, remote={}",
-                          last_indexed_height, hex::encode(&local_hash), hex::encode(&remote_hash));
-                    
-                    // Find divergence point and rollback
-                    return self.find_divergence_and_rollback(last_indexed_height).await;
-                } else {
-                    debug!("Block hash validation passed for height {}", last_indexed_height);
-                }
-            } else {
-                debug!("No local blockhash found for height {} (this is normal during initial sync)", last_indexed_height);
-            }
-        }
-        
-        // No reorg detected, return next block to index
-        let next_height = last_indexed_height + 1;
-        if next_height <= remote_tip {
-            return Ok(next_height); // Next block to index
-        }
-        
-        // Caught up, wait for new blocks
-        Ok(next_height)
-    }
-    
-    /// Find divergence point and perform rollback
-    async fn find_divergence_and_rollback(&self, start_height: u32) -> Result<u32> {
-        let mut check_height = start_height;
-        
-        // Walk backwards to find common ancestor (limit to reasonable depth)
-        let max_reorg_depth = 100;
-        let min_check_height = start_height.saturating_sub(max_reorg_depth);
-        
-        info!("Searching for divergence point, checking backwards from height {}", start_height);
-        
-        while check_height > min_check_height {
-            if let Some(local_hash) = self.get_blockhash(check_height).await {
-                match self.fetch_blockhash(check_height).await {
-                    Ok(remote_hash) => {
-                        if local_hash == remote_hash {
-                            // Found common ancestor
-                            info!("Found common ancestor at height {}", check_height);
-                            
-                            // Rollback to this point
-                            info!("Rolling back database state from height {} to height {}", start_height, check_height);
-                            if let Err(e) = self.rollback_to_height(check_height).await {
-                                error!("Failed to rollback database state: {}", e);
-                                return Err(anyhow!("Failed to rollback database state: {}", e));
-                            }
-                            
-                            // Update the current height marker to reflect the rollback
-                            CURRENT_HEIGHT.store(check_height + 1, Ordering::SeqCst);
-                            info!("Successfully rolled back to height {}, will resume from height {}", check_height, check_height + 1);
-                            
-                            return Ok(check_height + 1); // Resume from next block
-                        } else {
-                            debug!("Hash mismatch at height {}: local={}, remote={}",
-                                   check_height, hex::encode(&local_hash), hex::encode(&remote_hash));
-                        }
-                    },
-                    Err(e) => {
-                        warn!("Failed to fetch remote blockhash for height {}: {}", check_height, e);
-                        // Continue checking previous blocks
-                    }
-                }
-            } else {
-                debug!("No local blockhash found for height {}", check_height);
-            }
-            
-            check_height -= 1;
-        }
-        
-        // If no common ancestor found within reasonable depth, this is a major issue
-        error!("No common ancestor found within {} blocks, this indicates a major chain split", max_reorg_depth);
-        Err(anyhow!("Unable to find common ancestor within reasonable depth of {} blocks", max_reorg_depth))
-    }
-    
-    /// Rollback the database state to a specific height
-    /// This removes all data that was indexed after the specified height
-    async fn rollback_to_height(&self, target_height: u32) -> Result<()> {
-        info!("Starting rollback to height {}", target_height);
-        
-        // Get database connection
-        let db = self.poll_connection().await?;
-        
-        // Get the current indexed height
-        let current_height = self.query_height().await?;
-        
-        if target_height >= current_height {
-            info!("Target height {} >= current height {}, no rollback needed", target_height, current_height);
-            return Ok(());
-        }
-        
-        info!("Rolling back from height {} to height {}", current_height, target_height);
-        
-        // Create an SMTHelper instance for state root management
-        let smt_helper = SMTHelper::new(db.clone());
-        
-        // Remove blockhashes for heights > target_height
-        for height in (target_height + 1)..=current_height {
-            let blockhash_key = format!("height-to-hash/{}", height).into_bytes();
-            if let Err(e) = db.delete(&blockhash_key) {
-                warn!("Failed to delete blockhash for height {}: {}", height, e);
-            } else {
-                debug!("Deleted blockhash for height {}", height);
-            }
-        }
-        
-        // Remove state roots for heights > target_height
-        for height in (target_height + 1)..=current_height {
-            if let Err(e) = smt_helper.delete_state_root_at_height(height) {
-                warn!("Failed to delete state root for height {}: {}", height, e);
-            } else {
-                debug!("Deleted state root for height {}", height);
-            }
-        }
-        
-        // Update the height marker in the database to reflect the rollback
-        // This is critical - we need to update the stored height so query_height() returns the correct value
-        let runtime = self.runtime.write().await;
-        let mut context = runtime.context.lock()
-            .map_err(|e| anyhow!("Failed to lock context during rollback: {}", e))?;
-        
-        // Set the height in the database adapter
-        context.db.set_height(target_height);
-        
-        info!("Successfully completed rollback to height {}", target_height);
-        Ok(())
-    }
-    
-    // Removed unused best_height function as it's been replaced by detect_and_handle_reorg
-
-    #[allow(dead_code)]
-    async fn get_once(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
-        let runtime = self.runtime.async_read().await;
-        let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
-        context.db.get(key).map_err(|_| anyhow!("GET error against RocksDB"))
-    }
-
-    #[allow(dead_code)]
-    async fn get(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {
-        let mut count = 0;
-        loop {
-            match self.get_once(key).await {
-                Ok(v) => {
-                    return Ok(v);
-                }
-                Err(e) => {
-                    if count > 100 {
-                        return Err(e.into());
-                    } else {
-                        count = count + 1;
-                        // Add a small delay to avoid tight loop
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                        debug!("err: retrying GET");
-                    }
-                }
-            }
-        }
-        // This line is unreachable, but we'll keep the function structure consistent
-        // with the rest of the codebase
-    }
-
-    async fn get_blockhash(&self, block_number: u32) -> Option<Vec<u8>> {
-        // Get database handle
-        let db = match self.poll_connection().await {
-            Ok(db) => db,
-            Err(_) => return None,
-        };
-        
-        // Use direct key-value lookup for blockhashes (simpler and more reliable)
-        let blockhash_key = format!("height-to-hash/{}", block_number).into_bytes();
-        debug!("Looking up blockhash for height {} with key: {}", block_number, hex::encode(&blockhash_key));
-        
-        match db.get(&blockhash_key) {
-            Ok(Some(value)) => {
-                debug!("Found blockhash for height {}: {}", block_number, hex::encode(&value));
-                Some(value)
-            },
-            Ok(None) => {
-                debug!("No blockhash found for height {}", block_number);
-                None
-            },
-            Err(e) => {
-                error!("Error looking up blockhash for height {}: {}", block_number, e);
-                None
-            }
-        }
-    }
-
-    async fn fetch_blockhash(&self, block_number: u32) -> Result<Vec<u8>> {
-        let tunneled_response = self
-            .post(serde_json::to_string(&JsonRpcRequest {
-                id: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_secs()
-                    .try_into()?,
-                jsonrpc: String::from("2.0"),
-                method: String::from("getblockhash"),
-                params: vec![Value::Number(Number::from(block_number))],
-            })?)
-            .await?;
-
-        let result: BlockHashResponse = tunneled_response.json().await?;
-        let blockhash = result.result
-            .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))?;
-        Ok(hex::decode(blockhash)?)
-    }
-
-    #[allow(dead_code)]
-    async fn put_once(&self, k: &Vec<u8>, v: &Vec<u8>) -> Result<()> {
-        let runtime = self.runtime.async_read().await;
-        let mut context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
-        context.db.put(k, v).map_err(|_| anyhow!("PUT error against RocksDB"))
-    }
-
-    #[allow(dead_code)]
-    async fn put(&self, key: &Vec<u8>, val: &Vec<u8>) -> Result<()> {
-        let mut count = 0;
-        loop {
-            match self.put_once(key, val).await {
-                Ok(v) => {
-                    return Ok(v);
-                }
-                Err(e) => {
-                    if count > 100 { // Changed from i32::MAX to a reasonable retry limit
-                        return Err(e.into());
-                    } else {
-                        // Add a small delay to avoid tight loop
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                        count = count + 1;
-                    }
-                    debug!("err: retrying PUT");
-                }
-            }
-        }
-    }
-
-    async fn pull_block(&self, block_number: u32) -> Result<Vec<u8>> {
-        loop {
-            let count = self.fetch_blockcount().await?;
-            if block_number > count {
-                sleep(Duration::from_millis(3000)).await;
-            } else {
-                break;
-            }
-        }
-        let blockhash = self.fetch_blockhash(block_number).await?;
-        
-        // Store blockhash using direct key-value storage (simpler and more reliable)
-        let db = self.poll_connection().await?;
-        let blockhash_key = format!("height-to-hash/{}", block_number).into_bytes();
-        debug!("Storing blockhash for height {} with key: {}", block_number, hex::encode(&blockhash_key));
-        db.put(&blockhash_key, &blockhash).map_err(|e| anyhow!("Failed to store blockhash: {}", e))?;
-        debug!("Successfully stored blockhash for height {}: {}", block_number, hex::encode(&blockhash));
-        
-        let tunneled_response = self
-            .post(serde_json::to_string(&JsonRpcRequest {
-                id: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)?
-                    .as_secs()
-                    .try_into()?,
-                jsonrpc: String::from("2.0"),
-                method: String::from("getblock"),
-                params: vec![
-                    Value::String(hex::encode(&blockhash)),
-                    Value::Number(Number::from(0)),
-                ],
-            })?)
-            .await?;
-
-        let result: BlockHashResponse = tunneled_response.json().await?;
-        let block_hex = result.result
-            .ok_or_else(|| anyhow!("missing result from JSON-RPC response"))?;
-        
-        Ok(hex::decode(block_hex)?)
-    }
-
-    #[allow(dead_code)]
-    async fn run(&mut self) -> Result<()> {
-        let mut height: u32 = self.query_height().await?;
-        CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-        
-        // Track the last known best height to detect reorgs
-        let mut last_best_height: u32 = height;
-        
-        loop {
-            // Check if we should exit before processing the next block
-            if let Some(exit_at) = self.args.exit_at {
-                if height >= exit_at {
-                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
-                    return Ok(());
-                }
-            }
-
-            // Detect and handle any reorgs, get the next block to process
-            let next_height = match self.detect_and_handle_reorg().await {
-                Ok(h) => h,
-                Err(e) => {
-                    error!("Failed to detect reorg: {}", e);
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-            
-            // Check if we detected a reorg (next_height < height)
-            if next_height < height {
-                info!("Chain reorganization detected: rolling back from block {} to block {}", height, next_height);
-                height = next_height;
-            }
-            
-            // Get the remote tip to see if we have blocks to fetch
-            let remote_tip = match self.fetch_blockcount().await {
-                Ok(tip) => tip,
-                Err(e) => {
-                    error!("Failed to fetch block count: {}", e);
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
-            
-            // If we're caught up, wait for new blocks
-            if next_height > remote_tip {
-                debug!("Caught up to remote tip at height {}, waiting for new blocks", remote_tip);
-                sleep(Duration::from_secs(3)).await;
-                continue;
-            }
-            
-            info!("Processing block {} (current indexer height: {})", next_height, height);
-            
-            match self.pull_block(next_height).await {
-                Ok(block_data) => {
-                    // Get a write lock on the runtime
-                    let mut runtime_guard = self.runtime.write().await;
-                    
-                    // Update the context
-                    {
-                        let mut context = runtime_guard.context.lock()
-                            .map_err(|_| anyhow!("Failed to lock context"))?;
-                        context.block = block_data;
-                        context.height = next_height;
-                        context.db.set_height(next_height);
-                    }
-                    
-                    // Run the runtime
-                    if let Err(e) = runtime_guard.run() {
-                        debug!("Runtime error, refreshing memory: {}", e);
-                        runtime_guard.refresh_memory()?;
-                        if let Err(e) = runtime_guard.run() {
-                            error!("Runtime run failed after retry: {}", e);
-                            return Err(anyhow!("Runtime run failed after retry: {}", e));
-                        }
-                    }
-                    
-                    // Check if this was a reorg (next_height < last_best_height)
-                    if next_height < last_best_height {
-                        info!("Chain reorganization confirmed: processed block {} (previous chain tip was at block {})",
-                              next_height, last_best_height);
-                    }
-                    
-                    // Update height and CURRENT_HEIGHT
-                    height = next_height + 1;
-                    CURRENT_HEIGHT.store(height, Ordering::SeqCst);
-                    
-                    // Update last_best_height
-                    last_best_height = next_height;
-                },
-                Err(e) => {
-                    error!("Failed to pull block {}: {}", next_height, e);
-                    sleep(Duration::from_secs(5)).await;
-                }
-            }
-        }
-    }
-}
-
-// Allow cloning for use in async tasks
-impl Clone for MetashrewRocksDBSync {
-    fn clone(&self) -> Self {
-        Self {
-            runtime: self.runtime.clone(),
-            args: self.args.clone(),
-            start_block: self.start_block,
-            rpc_url: self.rpc_url.clone(),
-            auth: self.auth.clone(),
-            bypass_ssl: self.bypass_ssl,
-            tunnel_config: self.tunnel_config.clone(),
-            active_tunnel: self.active_tunnel.clone(),
-            fetcher_thread_id_tx: self.fetcher_thread_id_tx.clone(),
-            processor_thread_id_tx: self.processor_thread_id_tx.clone(),
-            fetcher_thread_id: std::sync::Mutex::new(None),
-            processor_thread_id: std::sync::Mutex::new(None),
-            snapshot_manager: self.snapshot_manager.clone(),
-        }
-    }
-}
-
-// Add methods for thread management and memory monitoring
-impl MetashrewRocksDBSync {
-    // Helper method to get detailed memory statistics as a string
-    #[allow(dead_code)]
-    fn get_memory_stats(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>) -> String {
-        if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
-            let memory_size = memory.data_size(&mut runtime.wasmstore);
-            let memory_size_gb = memory_size as f64 / 1_073_741_824.0;
-            let memory_size_mb = memory_size as f64 / 1_048_576.0;
-            
-            // Get additional memory information if available
-            let memory_pages = memory.size(&mut runtime.wasmstore);
-            
-            format!(
-                "Memory size: {} bytes ({:.2} GB, {:.2} MB), Pages: {}, Usage: {:.2}%",
-                memory_size,
-                memory_size_gb,
-                memory_size_mb,
-                memory_pages,
-                (memory_size as f64 / 4_294_967_296.0) * 100.0 // Percentage of 4GB limit
-            )
-        } else {
-            "Could not access memory instance".to_string()
-        }
-    }
-    
-    // Helper method to check if memory needs to be refreshed based on its size
-    fn should_refresh_memory(&self, runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>, height: u32) -> bool {
-        // Get the memory instance
-        if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
-            // Get the memory size in bytes
-            let memory_size = memory.data_size(&mut runtime.wasmstore);
-            
-            // 1.75GB in bytes = 1.75 * 1024 * 1024 * 1024
-            let threshold_gb = 1.75;
-            let threshold_bytes = (threshold_gb * 1024.0 * 1024.0 * 1024.0) as usize;
-            
-            // Check if memory size is approaching the limit
-            if memory_size >= threshold_bytes {
-                info!("Memory usage approaching threshold of {:.2}GB at block {}", threshold_gb, height);
-                info!("Performing preemptive memory refresh to prevent out-of-memory errors");
-                return true;
-            } else if height % 1000 == 0 {
-                // Log memory stats periodically for monitoring
-                if height % 1000 == 0 {
-                    let memory_size_mb = if let Some(memory) = runtime.instance.get_memory(&mut runtime.wasmstore, "memory") {
-                        let memory_size = memory.data_size(&mut runtime.wasmstore);
-                        memory_size as f64 / 1_048_576.0
-                    } else {
-                        0.0
-                    };
-                    info!("Memory usage at block {}: {:.2} MB", height, memory_size_mb);
-                }
-            }
-        } else {
-            debug!("Could not get memory instance for block {}", height);
-        }
-        
-        false
-    }
-
-    #[allow(dead_code)]
-    fn set_thread_id_senders(
-        &mut self,
-        fetcher_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>,
-        processor_tx: tokio::sync::mpsc::Sender<(String, std::thread::ThreadId)>
-    ) {
-        self.fetcher_thread_id_tx = Some(fetcher_tx);
-        self.processor_thread_id_tx = Some(processor_tx);
-    }
-    
-    fn register_current_thread_as_fetcher(&self) {
-        if let Some(tx) = &self.fetcher_thread_id_tx {
-            let thread_id = std::thread::current().id();
-            match self.fetcher_thread_id.lock() {
-                Ok(mut guard) => {
-                    *guard = Some(thread_id.clone());
-                    let _ = tx.try_send(("fetcher".to_string(), thread_id));
-                },
-                Err(e) => {
-                    error!("Failed to lock fetcher_thread_id: {}", e);
-                }
-            }
-        }
-    }
-    
-    fn register_current_thread_as_processor(&self) {
-        if let Some(tx) = &self.processor_thread_id_tx {
-            let thread_id = std::thread::current().id();
-            match self.processor_thread_id.lock() {
-                Ok(mut guard) => {
-                    *guard = Some(thread_id.clone());
-                    let _ = tx.try_send(("processor".to_string(), thread_id));
-                },
-                Err(e) => {
-                    error!("Failed to lock processor_thread_id: {}", e);
-                }
-            }
-        }
-    }
-    
-    #[allow(dead_code)]
-    fn is_fetcher_thread(&self) -> bool {
-        match self.fetcher_thread_id.lock() {
-            Ok(guard) => {
-                if let Some(fetcher_id) = *guard {
-                    std::thread::current().id() == fetcher_id
-                } else {
-                    false
-                }
-            },
-            Err(_) => false
-        }
-    }
-    
-    #[allow(dead_code)]
-    fn is_processor_thread(&self) -> bool {
-        match self.processor_thread_id.lock() {
-            Ok(guard) => {
-                if let Some(processor_id) = *guard {
-                    std::thread::current().id() == processor_id
-                } else {
-                    false
-                }
-            },
-            Err(_) => false
-        }
-    }
+pub struct BlockHashResponse {
+    pub id: u32,
+    pub result: Option<String>,
+    pub error: Option<Value>,
 }
 
 #[post("/")]
@@ -1338,32 +247,11 @@ async fn handle_jsonrpc(
             }
         };
 
-        // Acquire a read lock on the runtime - this allows multiple readers
-        let runtime = state.runtime.read().await;
-        
-        // Decode input data outside the lock if possible
-        let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
-            Ok(data) => data,
-            Err(e) => return Ok(HttpResponse::Ok().json(JsonRpcError {
-                id: body.id,
-                error: JsonRpcErrorObject {
-                    code: -32602,
-                    message: format!("Invalid hex input: {}", e),
-                    data: None,
-                },
-                jsonrpc: "2.0".to_string(),
-            })),
-        };
-
-        // Use await with the async view function
-        match runtime.view(
-            view_name,
-            &input_data,
-            height,
-        ).await {
+        // Use the generic sync framework's JSON-RPC interface
+        match state.sync_engine.read().await.metashrew_view(view_name, input_hex, height.to_string()).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
-                result: format!("0x{}", hex::encode(result)),
+                result,
                 jsonrpc: "2.0".to_string(),
             })),
             Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -1377,8 +265,6 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_preview" {
-        // Acquire a read lock on the runtime - this allows multiple readers
-        let runtime = state.runtime.read().await;
         // Ensure we have required params
         if body.params.len() < 4 {
             return Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -1454,44 +340,11 @@ async fn handle_jsonrpc(
             }
         };
 
-        // Decode input data outside the lock if possible
-        let block_data = match hex::decode(block_hex.trim_start_matches("0x")) {
-            Ok(data) => data,
-            Err(e) => {
-                return Ok(HttpResponse::Ok().json(JsonRpcError {
-                    id: body.id,
-                    error: JsonRpcErrorObject {
-                        code: -32602,
-                        message: format!("Invalid hex block data: {}", e),
-                        data: None,
-                    },
-                    jsonrpc: "2.0".to_string(),
-                }))
-            }
-        };
-        
-        let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
-            Ok(data) => data,
-            Err(e) => return Ok(HttpResponse::Ok().json(JsonRpcError {
-                id: body.id,
-                error: JsonRpcErrorObject {
-                    code: -32602,
-                    message: format!("Invalid hex input: {}", e),
-                    data: None,
-                },
-                jsonrpc: "2.0".to_string(),
-            })),
-        };
-        
-        match runtime.preview_async(
-            &block_data,
-            view_name,
-            &input_data,
-            height,
-        ).await {
+        // Use the generic sync framework's JSON-RPC interface
+        match state.sync_engine.read().await.metashrew_preview(block_hex, view_name, input_hex, height.to_string()).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
-                result: format!("0x{}", hex::encode(result)),
+                result,
                 jsonrpc: "2.0".to_string(),
             })),
             Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -1505,25 +358,24 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_height" {
-        // Get the current height
-        let current_height = CURRENT_HEIGHT.load(Ordering::SeqCst);
-        
-        // If the current height is greater than 0, subtract 1 to get the actual latest block
-        let latest_block = if current_height > 0 { current_height - 1 } else { 0 };
-        
-        // Log the height being returned for debugging
-        debug!("metashrew_height returning latest_block={} (from current_height={})",
-               latest_block, current_height);
-        
-        // Return the latest block height as a number
-        Ok(HttpResponse::Ok().json(serde_json::json!({
-            "id": body.id,
-            "result": latest_block,
-            "jsonrpc": "2.0"
-        })))
+        // Use the generic sync framework's JSON-RPC interface
+        match state.sync_engine.read().await.metashrew_height().await {
+            Ok(height) => Ok(HttpResponse::Ok().json(serde_json::json!({
+                "id": body.id,
+                "result": height,
+                "jsonrpc": "2.0"
+            }))),
+            Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32000,
+                    message: err.to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
+        }
     } else if body.method == "metashrew_getblockhash" {
-        // Acquire a read lock on the runtime
-        let runtime = state.runtime.read().await;
         if body.params.len() != 1 {
             return Ok(HttpResponse::Ok().json(JsonRpcError {
                 id: body.id,
@@ -1551,24 +403,14 @@ async fn handle_jsonrpc(
             }
         };
 
-        let key = (String::from(HEIGHT_TO_HASH) + &height.to_string()).into_bytes();
-        
-        // Fix lifetime issue by storing the context in a variable
-        let mut context = runtime.context.lock()
-            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
-        let result = context.db.get(&key).map_err(|_| {
-            <anyhow::Error as Into<IndexerError>>::into(anyhow!(
-                "DB connection error while fetching blockhash"
-            ))
-        })?;
-        
-        match result {
-            Some(hash) => Ok(HttpResponse::Ok().json(JsonRpcResult {
+        // Use the generic sync framework's storage adapter
+        match state.sync_engine.read().await.storage().read().await.get_block_hash(height).await {
+            Ok(Some(hash)) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(hash)),
                 jsonrpc: "2.0".to_string(),
             })),
-            None => Ok(HttpResponse::Ok().json(JsonRpcError {
+            Ok(None) => Ok(HttpResponse::Ok().json(JsonRpcError {
                 id: body.id,
                 error: JsonRpcErrorObject {
                     code: -32000,
@@ -1577,15 +419,24 @@ async fn handle_jsonrpc(
                 },
                 jsonrpc: "2.0".to_string(),
             })),
+            Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32000,
+                    message: format!("Storage error: {}", err),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
         }
     } else if body.method == "metashrew_stateroot" {
-        // Get the stateroot from the SMT adapter
         let height = match &body.params[0] {
             Value::String(s) if s == "latest" => {
-                // Get the current height
-                let current_height = CURRENT_HEIGHT.load(Ordering::SeqCst);
-                // If the current height is greater than 0, subtract 1 to get the actual latest block
-                if current_height > 0 { current_height - 1 } else { 0 }
+                // Get the current height from the sync engine
+                match state.sync_engine.read().await.metashrew_height().await {
+                    Ok(h) => h,
+                    Err(_) => 0,
+                }
             },
             Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
             _ => {
@@ -1600,25 +451,28 @@ async fn handle_jsonrpc(
                 }))
             }
         };
-        
+
         info!("metashrew_stateroot called with height: {}", height);
-        
-        // Get the stateroot using SMTHelper which handles both key formats
-        let runtime = state.runtime.read().await;
-        let context = runtime.context.lock()
-            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
-        
-        info!("Looking up state root for height {}", height);
-        
-        // Create an SMTHelper instance and use it to get the state root
-        let smt_helper = SMTHelper::new(context.db.db.clone());
-        
-        match smt_helper.get_smt_root_at_height(height) {
-            Ok(root) => {
+
+        // Use the generic sync framework's storage adapter
+        match state.sync_engine.read().await.storage().read().await.get_state_root(height).await {
+            Ok(Some(root)) => {
                 info!("Successfully retrieved state root for height {}: 0x{}", height, hex::encode(&root));
                 Ok(HttpResponse::Ok().json(JsonRpcResult {
                     id: body.id,
                     result: format!("0x{}", hex::encode(root)),
+                    jsonrpc: "2.0".to_string(),
+                }))
+            },
+            Ok(None) => {
+                error!("No state root found for height {}", height);
+                Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32000,
+                        message: format!("No state root found for height {}", height),
+                        data: None,
+                    },
                     jsonrpc: "2.0".to_string(),
                 }))
             },
@@ -1636,69 +490,23 @@ async fn handle_jsonrpc(
             },
         }
     } else if body.method == "metashrew_snapshot" {
-        // Get snapshot information from the database
-        let runtime = state.runtime.read().await;
-        let context = runtime.context.lock()
-            .map_err(|_| <anyhow::Error as Into<IndexerError>>::into(anyhow!("Failed to lock context")))?;
-        
-        // Get the current height
-        let current_height = CURRENT_HEIGHT.load(Ordering::SeqCst);
-        
-        // Create an SMTHelper instance
-        let smt_helper = SMTHelper::new(context.db.db.clone());
-        
-        // Try to find the latest snapshot height by checking for state roots
-        // We'll check the last few heights to find the most recent snapshot
-        let mut latest_snapshot_height = 0;
-        let mut latest_root: Option<String> = None;
-        
-        // Check the last 1000 blocks for a state root
-        let start_height = if current_height > 1000 { current_height - 1000 } else { 0 };
-        for height in (start_height..=current_height).rev() {
-            if let Ok(root) = smt_helper.get_smt_root_at_height(height) {
-                latest_snapshot_height = height;
-                latest_root = Some(hex::encode(root));
-                break;
-            }
+        // Use the generic sync framework to get snapshot information
+        match state.sync_engine.read().await.metashrew_snapshot().await {
+            Ok(snapshot_info) => Ok(HttpResponse::Ok().json(JsonRpcResult {
+                id: body.id,
+                result: snapshot_info.to_string(),
+                jsonrpc: "2.0".to_string(),
+            })),
+            Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32000,
+                    message: err.to_string(),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            })),
         }
-        
-        // Try to determine if snapshots are enabled and the interval
-        // We'll look for a pattern in the state roots
-        let mut snapshot_interval = 1000; // Default interval
-        let mut snapshot_enabled = false;
-        
-        if latest_snapshot_height > 0 {
-            snapshot_enabled = true;
-            
-            // Try to find another snapshot to determine the interval
-            for height in (0..latest_snapshot_height).rev().step_by(100) {
-                if let Ok(_) = smt_helper.get_smt_root_at_height(height) {
-                    snapshot_interval = latest_snapshot_height - height;
-                    break;
-                }
-            }
-        }
-        
-        // Create snapshot info response
-        let snapshot_info = serde_json::json!({
-            "enabled": snapshot_enabled,
-            "current_height": current_height,
-            "last_snapshot_height": latest_snapshot_height,
-            "latest_root": latest_root,
-            "estimated_interval": snapshot_interval,
-            "next_snapshot_at": if snapshot_enabled && snapshot_interval > 0 {
-                let next = current_height + (snapshot_interval - (current_height % snapshot_interval));
-                serde_json::Value::Number(serde_json::Number::from(next))
-            } else {
-                serde_json::Value::Null
-            }
-        });
-        
-        Ok(HttpResponse::Ok().json(JsonRpcResult {
-            id: body.id,
-            result: snapshot_info.to_string(),
-            jsonrpc: "2.0".to_string(),
-        }))
     } else {
         Ok(HttpResponse::Ok().json(JsonRpcError {
             id: body.id,
@@ -1719,7 +527,7 @@ async fn main() -> Result<()> {
         .format_timestamp_secs()
         .init();
     
-    info!("Starting Metashrew Indexer (rockshrew-mono)");
+    info!("Starting Metashrew Indexer (rockshrew-mono) with generic sync framework");
     info!("System has {} CPU cores available", num_cpus::get());
     
     // Parse command line arguments
@@ -1745,7 +553,6 @@ async fn main() -> Result<()> {
     let available_cpus = num_cpus::get();
     
     // Calculate optimal background jobs - use approximately 1/4 of available cores
-    // with a minimum of 4 and a reasonable maximum to avoid excessive context switching
     let background_jobs: i32 = std::cmp::min(
         std::cmp::max(4, available_cpus / 4),
         16  // Cap at a reasonable maximum
@@ -1773,7 +580,6 @@ async fn main() -> Result<()> {
     opts.set_level_zero_slowdown_writes_trigger(20);
     opts.set_level_zero_stop_writes_trigger(30);
     opts.set_max_background_jobs(background_jobs);
-    // Removed deprecated call to set_max_background_compactions
     opts.set_disable_auto_compactions(false);
     
     let mut start_block = args.start_block.unwrap_or(0);
@@ -1828,36 +634,6 @@ async fn main() -> Result<()> {
         return Err(anyhow!("No indexer WASM file provided or found in repository"));
     };
     
-    // Initialize snapshot manager if snapshot directory is provided
-    let snapshot_manager = if let Some(ref snapshot_dir) = args.snapshot_directory {
-        info!("Snapshot functionality enabled with directory: {:?}", snapshot_dir);
-        info!("Snapshot interval set to {} blocks", args.snapshot_interval);
-        
-        let config = SnapshotConfig {
-            interval: args.snapshot_interval,
-            directory: snapshot_dir.clone(),
-            enabled: true,
-        };
-        
-        let mut manager = SnapshotManager::new(config);
-        
-        // Initialize snapshot directory structure and set last_snapshot_height
-        if let Err(e) = manager.initialize_with_db(&args.db_path).await {
-            error!("Failed to initialize snapshot directory: {}", e);
-            return Err(anyhow!("Failed to initialize snapshot directory: {}", e));
-        }
-        
-        // Set current WASM file
-        if let Err(e) = manager.set_current_wasm(indexer_path.clone()) {
-            error!("Failed to set current WASM file for snapshots: {}", e);
-            return Err(anyhow!("Failed to set current WASM file for snapshots: {}", e));
-        }
-        
-        Some(Arc::new(tokio::sync::Mutex::new(manager)))
-    } else {
-        None
-    };
-    
     // Create runtime with RocksDB adapter
     let runtime = Arc::new(RwLock::new(MetashrewRuntime::load(
         indexer_path.clone(),
@@ -1866,46 +642,58 @@ async fn main() -> Result<()> {
     
     info!("Successfully loaded WASM module from {}", indexer_path.display());
     
-    // Create app state for JSON-RPC server
-    let app_state = web::Data::new(AppState {
-        runtime: runtime.clone(),
-    });
-    
-    // Create a channel to communicate thread IDs
-    let (thread_id_tx, mut thread_id_rx) = tokio::sync::mpsc::channel::<(String, std::thread::ThreadId)>(2);
-    
-    // Spawn a task to monitor thread IDs
-    tokio::spawn(async move {
-        while let Some((role, thread_id)) = thread_id_rx.recv().await {
-            info!("Thread role registered: {} on thread {:?}", role, thread_id);
-        }
-    });
-    
-    // Create the sync object
-    let mut sync = MetashrewRocksDBSync {
-        runtime: runtime.clone(),
-        args: args.clone(),
-        start_block,
-        rpc_url,
-        auth: args_arc.auth.clone(),
-        bypass_ssl,
-        tunnel_config,
-        active_tunnel: Arc::new(tokio::sync::Mutex::new(None)),
-        fetcher_thread_id_tx: Some(thread_id_tx.clone()),
-        processor_thread_id_tx: Some(thread_id_tx.clone()),
-        fetcher_thread_id: std::sync::Mutex::new(None),
-        processor_thread_id: std::sync::Mutex::new(None),
-        snapshot_manager,
+    // Get database handle for adapters
+    let db = {
+        let runtime_guard = runtime.read().await;
+        let context = runtime_guard.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+        context.db.db.clone()
     };
     
-    // Start the indexer in a separate task
-    let indexer_handle = tokio::spawn(async move {
-        info!("Starting block indexing process from height {}", start_block);
-        
-        if let Err(e) = sync.run_pipeline().await {
-            error!("Indexer error: {}", e);
-        }
+    // Create adapters for the generic sync framework
+    let bitcoin_adapter = BitcoinRpcAdapter::new(
+        rpc_url,
+        args_arc.auth.clone(),
+        bypass_ssl,
+        tunnel_config,
+    );
+    
+    let storage_adapter = RocksDBStorageAdapter::new(db.clone());
+    let runtime_adapter = MetashrewRuntimeAdapter::new(runtime.clone(), db.clone());
+    
+    // Create sync configuration
+    let sync_config = SyncConfig {
+        start_block,
+        exit_at: args.exit_at,
+        pipeline_size: args.pipeline_size,
+        max_reorg_depth: args.max_reorg_depth,
+        reorg_check_threshold: args.reorg_check_threshold,
+    };
+    
+    // Create the generic sync engine
+    let sync_engine = Arc::new(RwLock::new(MetashrewSync::new(
+        bitcoin_adapter,
+        storage_adapter,
+        runtime_adapter,
+        sync_config,
+    )));
+    
+    // Create app state for JSON-RPC server
+    let app_state = web::Data::new(AppState {
+        sync_engine: sync_engine.clone(),
     });
+    
+    // Start the indexer in a separate task using the generic sync framework
+    let indexer_handle = {
+        let sync_engine_clone = sync_engine.clone();
+        tokio::spawn(async move {
+            info!("Starting block indexing process from height {} using generic sync framework", start_block);
+            
+            // Use the generic sync framework's run method
+            if let Err(e) = sync_engine_clone.write().await.run().await {
+                error!("Indexer error: {}", e);
+            }
+        })
+    };
     
     // Start the JSON-RPC server
     let server_handle = tokio::spawn({
@@ -1948,8 +736,9 @@ async fn main() -> Result<()> {
         .bind((args_arc.host.as_str(), args_arc.port))?
         .run()
     });
+    
     info!("JSON-RPC server running at http://{}:{}", args_arc.host, args_arc.port);
-    info!("Indexer is ready and processing blocks");
+    info!("Indexer is ready and processing blocks using generic sync framework");
     info!("Available RPC methods: metashrew_view, metashrew_preview, metashrew_height, metashrew_getblockhash, metashrew_stateroot, metashrew_snapshot");
     
     // Wait for either component to finish (or fail)
@@ -1967,41 +756,34 @@ async fn main() -> Result<()> {
     }
     
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use memshrew_runtime::MemStoreAdapter;
+    use std::path::PathBuf;
+    use anyhow::Result;
+
+    #[tokio::test]
+    async fn test_generic_architecture() -> Result<()> {
+        // Test that our generic architecture compiles and basic types work
+        let mem_store = MemStoreAdapter::new();
+        
+        // Test basic key-value operations
+        let mut adapter = MemStoreAdapter::new();
+        adapter.set_height(42);
+        assert_eq!(adapter.get_height(), 42);
+        
+        // Test basic key-value operations
+        let key = b"test_key".to_vec();
+        let value = b"test_value".to_vec();
+        adapter.put(&key, &value)?;
+        
+        let retrieved = adapter.get(&key)?;
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap(), value);
+        
+        Ok(())
     }
-    
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-        use memshrew_runtime::MemStoreAdapter;
-        use std::path::PathBuf;
-        use anyhow::Result;
-    
-        #[tokio::test]
-        async fn test_generic_architecture() -> Result<()> {
-            // Test that our generic architecture compiles and basic types work
-            let mem_store = MemStoreAdapter::new();
-            
-            // Test that we can create a context with the memory store
-            let context = MetashrewRuntimeContext::new(mem_store, 0, vec![]);
-            
-            // Test basic operations
-            assert_eq!(context.height, 0);
-            assert_eq!(context.block.len(), 0);
-            
-            // Test that the adapter implements the required traits
-            let mut adapter = MemStoreAdapter::new();
-            adapter.set_height(42);
-            assert_eq!(adapter.get_height(), 42);
-            
-            // Test basic key-value operations
-            let key = b"test_key".to_vec();
-            let value = b"test_value".to_vec();
-            adapter.put(&key, &value)?;
-            
-            let retrieved = adapter.get(&key)?;
-            assert!(retrieved.is_some());
-            assert_eq!(retrieved.unwrap(), value);
-            
-            Ok(())
-        }
-    }
+}

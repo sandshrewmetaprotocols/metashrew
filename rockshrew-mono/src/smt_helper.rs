@@ -123,6 +123,7 @@ impl SMTHelper {
     }
     
     /// Store a value in the BST with height indexing
+    #[allow(dead_code)]
     pub fn bst_put(&self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
         let mut batch = WriteBatch::default();
         
@@ -148,7 +149,7 @@ impl SMTHelper {
         
         // Immediately verify the write
         match self.db.get(&bst_key) {
-            Ok(Some(stored_value)) => {
+            Ok(Some(_stored_value)) => {
                 debug!("BST PUT verification: Successfully stored and retrieved value for key={}", hex::encode(key));
             },
             Ok(None) => {

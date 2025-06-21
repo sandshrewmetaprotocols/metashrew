@@ -542,7 +542,7 @@ impl MetashrewRocksDBSync {
                     }
                     
                     // Get the remote tip to see if we have blocks to fetch
-                    let remote_tip = match indexer.fetch_blockcount().await {
+                    let _remote_tip = match indexer.fetch_blockcount().await {
                         Ok(tip) => tip,
                         Err(e) => {
                             error!("Failed to fetch block count: {}", e);

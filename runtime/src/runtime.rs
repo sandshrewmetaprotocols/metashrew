@@ -655,39 +655,22 @@ where
         let context = self.context.clone();
         let height = { context.lock().map_err(lock_err)?.height };
         
-        // Use binary search to find the first height that doesn't have data
+        // Use logic similar to query_height to find the current indexed height
         // This handles cases where blocks might be skipped forward
-        let mut low = height;
-        let mut high = height + 1000; // Look ahead up to 1000 blocks
-        let mut latest = height;
-        
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            
-            // Check if this height has data
-            let key = u32_to_vec(mid)?;
-            let updated_key = db_make_updated_key(&key);
-            let length_key = db_make_length_key(&updated_key)?;
-            
-            let result = context
-                .lock()
-                .map_err(lock_err)?
-                .db
-                .get(&length_key)
-                .map_err(|e| anyhow!("Database error: {:?}", e))?;
-                
-            if result.is_some() {
-                // This height has data, look higher
-                low = mid + 1;
-                latest = mid;
-            } else {
-                // This height doesn't have data, look lower
-                high = mid - 1;
+        let height_key = "T".as_bytes().to_vec(); // TIP_HEIGHT_KEY
+        let latest = {
+            let mut guard = context.lock().map_err(lock_err)?;
+            match guard.db.get(&height_key) {
+                Ok(Some(bytes)) if !bytes.is_empty() => {
+                    let bytes_ref: &[u8] = &bytes;
+                    u32::from_le_bytes(bytes_ref.try_into().map_err(|_| anyhow!("Invalid height value"))?)
+                },
+                Ok(_) => height, // If no height is stored or empty, use current height
+                Err(e) => return Err(anyhow!("Database error: {:?}", e)),
             }
-        }
+        };
         
-        // latest is now the highest height that has data
-        // If it's the same as our current height, no reorg needed
+        // If latest == height, no reorg needed
         if latest == height {
             return Ok(());
         }

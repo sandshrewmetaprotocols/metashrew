@@ -1,0 +1,9 @@
+[package]
+name = "metashrew-smt-trait"
+version = "0.1.0"
+edition = "2021"
+description = "Trait definitions for Sparse Merkle Tree and Binary Search Tree operations in Metashrew"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"

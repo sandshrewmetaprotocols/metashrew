@@ -1,0 +1,15 @@
+[package]
+name = "metashrew-rocksdb"
+version = "0.1.0"
+edition = "2021"
+description = "RocksDB adapter for Metashrew with SMT/BST implementation"
+license = "MIT"
+
+[dependencies]
+metashrew-runtime = { path = "../../runtime" }
+metashrew-smt-trait = { path = "../metashrew-smt-trait" }
+rocksdb = "0.21.0"
+anyhow = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+log = "0.4"

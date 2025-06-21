@@ -6,12 +6,12 @@ members = [
   "metashrew-core",
   "metashrew-support",
   "memshrew-p2p",
-  "rockshrew",
-  "rockshrew-runtime",
-  "rockshrew-view",
-  "rockshrew-mono",
   "rockshrew-diff",
   "metashrew-minimal",
   "memshrew-store",
-  "metashrew-test-harness"
+  "metashrew-test-harness",
+  "crates/metashrew-smt-trait",
+  "crates/metashrew-rocksdb",
+  "crates/rockshrew",
+  "src"
 ]

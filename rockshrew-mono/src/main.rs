@@ -535,8 +535,8 @@ impl MetashrewRocksDBSync {
                         }
                     };
                     
-                    // Check if we detected a reorg (next_height < current_height)
-                    if next_height < current_height {
+                    // Check if we detected a reorg (next_height <= current_height)
+                    if next_height <= current_height {
                         info!("Chain reorganization detected: rolling back from block {} to block {}", current_height, next_height);
                         current_height = next_height;
                     }
@@ -551,12 +551,8 @@ impl MetashrewRocksDBSync {
                         }
                     };
                     
-                    // If we're caught up, wait for new blocks
-                    if next_height > remote_tip {
-                        debug!("Caught up to remote tip at height {}, waiting for new blocks", remote_tip);
-                        sleep(Duration::from_secs(3)).await;
-                        continue;
-                    }
+                    // Note: Removed redundant block that could cause an infinite loop
+                    // The same logic is handled later in the code around line 1040
                     
                     // Fetch the block
                     match indexer.pull_block(next_height).await {
@@ -680,10 +676,10 @@ impl MetashrewRocksDBSync {
         // Get our current indexed height (the last block we successfully processed)
         let current_indexed_height = self.query_height().await?;
         
-        // If we haven't indexed any blocks yet, start from the beginning
+        // If we haven't indexed any blocks yet, start from the configured start block
         if current_indexed_height == 0 {
-            info!("No blocks indexed yet, starting from genesis");
-            return Ok(0);
+            info!("No blocks indexed yet, starting from configured start block {}", self.start_block);
+            return Ok(self.start_block);
         }
         
         // Get the current blockchain tip from the remote node
@@ -827,25 +823,7 @@ impl MetashrewRocksDBSync {
         }
     }
     
-    #[allow(dead_code)]
-    /// Simplified best_height that just returns the next block to process
-    /// after handling any potential reorgs
-    async fn best_height(&self, _block_number: u32) -> Result<u32> {
-        // First, detect and handle any reorgs
-        let resume_height = self.detect_and_handle_reorg().await?;
-        
-        // Get the current remote tip
-        let remote_tip = self.fetch_blockcount().await?;
-        
-        // If we're caught up or ahead, wait for new blocks
-        if resume_height > remote_tip {
-            info!("Caught up to remote tip at height {}, waiting for new blocks", remote_tip);
-            return Ok(remote_tip);
-        }
-        
-        // Return the next block to process
-        Ok(resume_height)
-    }
+    // Removed unused best_height function as it's been replaced by detect_and_handle_reorg
 
     #[allow(dead_code)]
     async fn get_once(&self, key: &Vec<u8>) -> Result<Option<Vec<u8>>> {

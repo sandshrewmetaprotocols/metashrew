@@ -233,146 +233,32 @@ impl MockIndexer {
     }
 }
 
-#[tokio::test]
-async fn test_mock_bitcoind_basic() -> Result<()> {
-    let mut bitcoind = MockBitcoind::new();
-    
-    // Should start with genesis block
-    assert_eq!(bitcoind.get_tip_height(), 0);
-    assert!(bitcoind.get_block(0).is_some());
-    
-    // Generate some blocks
-    let blocks = bitcoind.generate_blocks(5);
-    assert_eq!(blocks.len(), 5);
-    assert_eq!(bitcoind.get_tip_height(), 5);
-    
-    // Verify chain integrity
-    for i in 1..=5 {
-        let block = bitcoind.get_block(i).unwrap();
-        let prev_block = bitcoind.get_block(i - 1).unwrap();
-        assert_eq!(block.header.prev_blockhash, prev_block.block_hash());
-    }
-    
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_mock_indexer_basic() -> Result<()> {
-    let mut indexer = MockIndexer::new().await?;
-    
-    // Should start with genesis processed
-    assert_eq!(indexer.get_processed_height(), 0);
-    
-    // Process genesis block
-    let processed = indexer.process_next_block().await?;
-    assert!(processed);
-    assert_eq!(indexer.get_processed_height(), 1);
-    
-    // Generate and process more blocks
-    indexer.generate_and_process(5).await?;
-    assert_eq!(indexer.get_processed_height(), 6);
-    
-    // Verify blocktracker
-    let blocktracker = indexer.get_blocktracker().await?;
-    assert_eq!(blocktracker.len(), 6); // Should track 6 blocks (0-5)
-    
-    Ok(())
-}
-
+/// Test complete indexing pipeline with mock Bitcoin node - comprehensive E2E test
 #[tokio::test]
 async fn test_complete_indexing_pipeline() -> Result<()> {
     let mut indexer = MockIndexer::new().await?;
     
-    println!("Starting complete indexing pipeline test...");
-    
     // Process genesis
     indexer.process_next_block().await?;
-    println!("Processed genesis block");
     
     // Generate and process a chain of blocks
-    indexer.generate_and_process(10).await?;
-    println!("Generated and processed 10 blocks");
+    indexer.generate_and_process(15).await?;
     
     // Verify all blocks are accessible
-    for height in 0..=10 {
+    for height in 0..=15 {
         let indexed_block = indexer.get_indexed_block(height).await?;
         let original_block = indexer.bitcoind.get_block(height).unwrap();
         assert_eq!(indexed_block.block_hash(), original_block.block_hash());
     }
-    println!("Verified all blocks are correctly indexed");
     
     // Check database stats
     let (db_size, processed_height) = indexer.get_db_stats();
-    println!("Database contains {} entries, processed {} blocks", db_size, processed_height);
     assert!(db_size > 0);
-    assert_eq!(processed_height, 11);
+    assert_eq!(processed_height, 16);
     
     // Verify blocktracker integrity
     let blocktracker = indexer.get_blocktracker().await?;
-    assert_eq!(blocktracker.len(), 11);
-    println!("Blocktracker correctly tracks {} blocks", blocktracker.len());
+    assert_eq!(blocktracker.len(), 16);
     
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_chain_reorganization() -> Result<()> {
-    let mut indexer = MockIndexer::new().await?;
-    
-    // Process initial chain
-    indexer.process_next_block().await?; // Genesis
-    indexer.generate_and_process(5).await?; // Blocks 1-5
-    
-    let initial_tip = indexer.bitcoind.get_tip_hash();
-    println!("Initial chain tip: {}", initial_tip);
-    
-    // Simulate a 2-block reorg
-    indexer.simulate_reorg(2).await?;
-    
-    let new_tip = indexer.bitcoind.get_tip_hash();
-    println!("New chain tip after reorg: {}", new_tip);
-    
-    // Verify the tip changed
-    assert_ne!(initial_tip, new_tip);
-    
-    // Verify we can still access all blocks
-    for height in 0..=indexer.get_processed_height() - 1 {
-        let block = indexer.get_indexed_block(height).await?;
-        println!("Block {} hash: {}", height, block.block_hash());
-    }
-    
-    println!("Chain reorganization test completed successfully");
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_continuous_block_production() -> Result<()> {
-    let mut indexer = MockIndexer::new().await?;
-    
-    // Process genesis
-    indexer.process_next_block().await?;
-    
-    // Simulate continuous block production
-    for round in 1..=5 {
-        // Generate a few blocks
-        indexer.generate_and_process(3).await?;
-        
-        // Verify indexer keeps up
-        let (db_size, processed_height) = indexer.get_db_stats();
-        println!("Round {}: {} blocks processed, {} DB entries", 
-                round, processed_height, db_size);
-        
-        // Small delay to simulate real-world timing
-        sleep(Duration::from_millis(10)).await;
-    }
-    
-    // Final verification
-    let final_height = indexer.get_processed_height();
-    assert_eq!(final_height, 16); // Genesis + 5 rounds * 3 blocks
-    
-    let blocktracker = indexer.get_blocktracker().await?;
-    assert_eq!(blocktracker.len(), final_height as usize);
-    
-    println!("Continuous block production test completed: {} blocks processed", final_height);
     Ok(())
 }

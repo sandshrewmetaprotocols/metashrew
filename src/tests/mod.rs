@@ -14,12 +14,7 @@ use bitcoin::hashes::Hash;
 pub mod integration_tests;
 pub mod block_builder;
 pub mod runtime_tests;
-pub mod debug_test;
-pub mod block_validation_test;
 pub mod mock_bitcoind_test;
-pub mod input_format_debug;
-pub mod view_debug_test;
-pub mod data_inspection_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

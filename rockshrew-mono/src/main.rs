@@ -718,8 +718,8 @@ impl MetashrewRocksDBSync {
                                     Ok(remote_hash) => {
                                         if local_hash == remote_hash {
                                             debug!("Found common ancestor at height {}", check_height);
-                                            // Return the common ancestor height
-                                            return Ok(check_height);
+                                            // Return the next block to process after the common ancestor
+                                            return Ok(check_height + 1);
                                         }
                                     },
                                     Err(e) => {
@@ -778,6 +778,7 @@ impl MetashrewRocksDBSync {
                     if local_hash == remote_blockhash {
                         debug!("Blockhash match at height {}", check_height);
                         // Found a matching block, this is our common ancestor
+                        // We'll continue processing from the next block after this common ancestor
                         break;
                     } else {
                         warn!("Blockhash mismatch at height {}: local={}, remote={}",
@@ -808,7 +809,8 @@ impl MetashrewRocksDBSync {
                     
                     // For now, we'll return the divergence point as the height to resume from
                     // The caller should implement the actual rollback
-                    Ok(diverge_height)
+                    // Return the next block to process after the divergence point
+                    Ok(diverge_height + 1)
                 },
                 None => {
                     // No divergence found, continue from remote tip + 1

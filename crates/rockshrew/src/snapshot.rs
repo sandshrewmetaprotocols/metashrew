@@ -319,7 +319,6 @@ impl SnapshotManager {
         
         info!("Tracked {} key-value changes for snapshot", self.key_changes.len());
         
-        info!("Tracked {} key-value changes for snapshot", self.key_changes.len());
         Ok(())
     }
 

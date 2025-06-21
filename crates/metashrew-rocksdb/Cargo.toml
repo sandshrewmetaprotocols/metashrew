@@ -7,7 +7,7 @@ license = "MIT"
 
 [dependencies]
 metashrew-runtime = { path = "../../runtime" }
-metashrew-smt-trait = { path = "../metashrew-smt-trait" }
+rockshrew-smt = { path = "../rockshrew-smt" }
 rocksdb = "0.21.0"
 anyhow = "1.0"
 sha2 = "0.10"

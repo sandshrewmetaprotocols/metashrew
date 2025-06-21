@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use metashrew_runtime::{BatchLike, KeyValueStoreLike};
-use metashrew_smt_trait::{BSTOperations, SMTOperations, StateManager};
+use rockshrew_smt::{BSTOperations, SMTOperations, StateManager};
 use rocksdb::{DB, Options, WriteBatch, WriteBatchIterator};
 use std::sync::{Arc, Mutex};
 use sha2::Digest;

@@ -13,5 +13,6 @@ members = [
   "crates/metashrew-smt-trait",
   "crates/metashrew-rocksdb",
   "crates/rockshrew",
+  "crates/rockshrew-smt",
   "src"
 ]

@@ -6,9 +6,22 @@ description = "Bitcoin indexer framework with WebAssembly virtual machine"
 license = "MIT"
 
 [dependencies]
-metashrew-smt-trait = { path = "../crates/metashrew-smt-trait" }
+rockshrew-smt = { path = "../crates/rockshrew-smt" }
 anyhow = "1.0"
+# Keep the old trait for backward compatibility
+metashrew-smt-trait = { path = "../crates/metashrew-smt-trait", optional = true }
 
 [dev-dependencies]
 memshrew-store = { path = "../memshrew-store" }
+metashrew-rocksdb = { path = "../crates/metashrew-rocksdb" }
+metashrew-runtime = { path = "../metashrew-runtime" }
 tokio = { version = "1.43", features = ["full", "test-util"] }
+tempfile = "3.10"
+rocksdb = "0.21"
+sha2 = "0.10"
+hex = "0.4"
+log = "0.4"
+
+[features]
+default = []
+legacy-traits = ["metashrew-smt-trait"]

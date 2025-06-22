@@ -1,5 +1,5 @@
 //! Snapshot-enabled synchronization engine
-//! 
+//!
 //! This module provides a sync engine that can operate in multiple modes:
 //! - Normal sync mode
 //! - Snapshot creation mode
@@ -16,8 +16,8 @@ use tokio::time::sleep;
 
 use crate::snapshot::*;
 use crate::{
-    BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, StorageAdapter, SyncConfig,
-    SyncEngine, SyncError, SyncResult, SyncStatus, ViewCall, PreviewCall,
+    BitcoinNodeAdapter, JsonRpcProvider, PreviewCall, RuntimeAdapter, StorageAdapter, SyncConfig,
+    SyncEngine, SyncError, SyncResult, SyncStatus, ViewCall,
 };
 
 /// Snapshot-enabled synchronization engine
@@ -32,12 +32,12 @@ where
     runtime: Arc<RwLock<R>>,
     config: SyncConfig,
     sync_mode: Arc<RwLock<SyncMode>>,
-    
+
     // Snapshot components
     snapshot_provider: Arc<RwLock<Option<Box<dyn SnapshotProvider>>>>,
     snapshot_consumer: Arc<RwLock<Option<Box<dyn SnapshotConsumer>>>>,
     snapshot_server: Arc<RwLock<Option<Box<dyn SnapshotServer>>>>,
-    
+
     // State tracking
     is_running: Arc<AtomicBool>,
     current_height: Arc<AtomicU32>,
@@ -46,7 +46,7 @@ where
     snapshots_applied: Arc<AtomicU32>,
     blocks_synced_normally: Arc<AtomicU32>,
     blocks_synced_from_snapshots: Arc<AtomicU32>,
-    
+
     // Timing
     last_block_time: Arc<RwLock<Option<SystemTime>>>,
     last_snapshot_check: Arc<RwLock<Option<SystemTime>>>,
@@ -59,24 +59,18 @@ where
     R: RuntimeAdapter + 'static,
 {
     /// Create a new snapshot-enabled sync engine
-    pub fn new(
-        node: N,
-        storage: S,
-        runtime: R,
-        config: SyncConfig,
-        sync_mode: SyncMode,
-    ) -> Self {
+    pub fn new(node: N, storage: S, runtime: R, config: SyncConfig, sync_mode: SyncMode) -> Self {
         Self {
             node: Arc::new(node),
             storage: Arc::new(RwLock::new(storage)),
             runtime: Arc::new(RwLock::new(runtime)),
             config,
             sync_mode: Arc::new(RwLock::new(sync_mode)),
-            
+
             snapshot_provider: Arc::new(RwLock::new(None)),
             snapshot_consumer: Arc::new(RwLock::new(None)),
             snapshot_server: Arc::new(RwLock::new(None)),
-            
+
             is_running: Arc::new(AtomicBool::new(false)),
             current_height: Arc::new(AtomicU32::new(0)),
             last_snapshot_height: Arc::new(AtomicU32::new(0)),
@@ -84,43 +78,43 @@ where
             snapshots_applied: Arc::new(AtomicU32::new(0)),
             blocks_synced_normally: Arc::new(AtomicU32::new(0)),
             blocks_synced_from_snapshots: Arc::new(AtomicU32::new(0)),
-            
+
             last_block_time: Arc::new(RwLock::new(None)),
             last_snapshot_check: Arc::new(RwLock::new(None)),
         }
     }
-    
+
     /// Set the snapshot provider
     pub async fn set_snapshot_provider(&self, provider: Box<dyn SnapshotProvider>) {
         let mut sp = self.snapshot_provider.write().await;
         *sp = Some(provider);
     }
-    
+
     /// Set the snapshot consumer
     pub async fn set_snapshot_consumer(&self, consumer: Box<dyn SnapshotConsumer>) {
         let mut sc = self.snapshot_consumer.write().await;
         *sc = Some(consumer);
     }
-    
+
     /// Set the snapshot server
     pub async fn set_snapshot_server(&self, server: Box<dyn SnapshotServer>) {
         let mut ss = self.snapshot_server.write().await;
         *ss = Some(server);
     }
-    
+
     /// Initialize the sync engine
     async fn initialize(&self) -> SyncResult<u32> {
         let storage = self.storage.read().await;
         let indexed_height = storage.get_indexed_height().await?;
-        
+
         let start_height = if indexed_height == 0 {
             self.config.start_block
         } else {
             indexed_height
         };
-        
+
         self.current_height.store(start_height, Ordering::SeqCst);
-        
+
         // Initialize snapshot components based on mode
         let mode = self.sync_mode.read().await;
         match &*mode {
@@ -132,11 +126,14 @@ where
             }
             _ => {}
         }
-        
-        info!("Initialized snapshot sync engine at height {} with mode: {:?}", start_height, *mode);
+
+        info!(
+            "Initialized snapshot sync engine at height {} with mode: {:?}",
+            start_height, *mode
+        );
         Ok(start_height)
     }
-    
+
     /// Check if we should try to use snapshots for fast sync
     async fn should_attempt_snapshot_sync(&self) -> SyncResult<bool> {
         let mode = self.sync_mode.read().await;
@@ -144,9 +141,11 @@ where
             SyncMode::Repo(_config) => {
                 let current_height = self.current_height.load(Ordering::SeqCst);
                 let tip_height = self.node.get_tip_height().await?;
-                
+
                 if let Some(consumer) = self.snapshot_consumer.read().await.as_ref() {
-                    consumer.should_use_snapshots(current_height, tip_height).await
+                    consumer
+                        .should_use_snapshots(current_height, tip_height)
+                        .await
                 } else {
                     Ok(false)
                 }
@@ -154,60 +153,76 @@ where
             _ => Ok(false),
         }
     }
-    
+
     /// Attempt to sync using snapshots
     async fn attempt_snapshot_sync(&self) -> SyncResult<bool> {
         let current_height = self.current_height.load(Ordering::SeqCst);
         let tip_height = self.node.get_tip_height().await?;
-        
+
         if let Some(consumer) = self.snapshot_consumer.write().await.as_mut() {
-            if let Some(best_snapshot) = consumer.get_best_snapshot(current_height, tip_height).await? {
-                info!("Applying snapshot at height {} (current: {}, tip: {})", 
-                      best_snapshot.height, current_height, tip_height);
-                
+            if let Some(best_snapshot) = consumer
+                .get_best_snapshot(current_height, tip_height)
+                .await?
+            {
+                info!(
+                    "Applying snapshot at height {} (current: {}, tip: {})",
+                    best_snapshot.height, current_height, tip_height
+                );
+
                 consumer.apply_snapshot(&best_snapshot).await?;
-                
+
                 // Update our state
-                self.current_height.store(best_snapshot.height, Ordering::SeqCst);
+                self.current_height
+                    .store(best_snapshot.height, Ordering::SeqCst);
                 self.snapshots_applied.fetch_add(1, Ordering::SeqCst);
                 self.blocks_synced_from_snapshots.fetch_add(
-                    best_snapshot.height.saturating_sub(current_height), 
-                    Ordering::SeqCst
+                    best_snapshot.height.saturating_sub(current_height),
+                    Ordering::SeqCst,
                 );
-                
+
                 // Update storage
                 {
                     let storage = self.storage.write().await;
                     storage.set_indexed_height(best_snapshot.height).await?;
-                    storage.store_block_hash(best_snapshot.height, &best_snapshot.block_hash).await?;
-                    storage.store_state_root(best_snapshot.height, &best_snapshot.state_root).await?;
+                    storage
+                        .store_block_hash(best_snapshot.height, &best_snapshot.block_hash)
+                        .await?;
+                    storage
+                        .store_state_root(best_snapshot.height, &best_snapshot.state_root)
+                        .await?;
                 }
-                
-                info!("Successfully applied snapshot, jumped from height {} to {}", 
-                      current_height, best_snapshot.height);
+
+                info!(
+                    "Successfully applied snapshot, jumped from height {} to {}",
+                    current_height, best_snapshot.height
+                );
                 return Ok(true);
             }
         }
-        
+
         Ok(false)
     }
-    
+
     /// Process a single block with snapshot considerations
-    async fn process_block_with_snapshots(&mut self, height: u32, block_data: Vec<u8>) -> SyncResult<()> {
+    async fn process_block_with_snapshots(
+        &mut self,
+        height: u32,
+        block_data: Vec<u8>,
+    ) -> SyncResult<()> {
         // Normal block processing
         {
             let mut runtime = self.runtime.write().await;
             runtime.process_block(height, &block_data).await?;
         }
-        
+
         // Get state root and block hash
         let state_root = {
             let runtime = self.runtime.read().await;
             runtime.get_state_root(height).await?
         };
-        
+
         let block_hash = self.node.get_block_hash(height).await?;
-        
+
         // Update storage
         {
             let storage = self.storage.write().await;
@@ -215,21 +230,21 @@ where
             storage.store_block_hash(height, &block_hash).await?;
             storage.store_state_root(height, &state_root).await?;
         }
-        
+
         // Update metrics
         self.current_height.store(height + 1, Ordering::SeqCst);
         self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
-        
+
         {
             let mut last_time = self.last_block_time.write().await;
             *last_time = Some(SystemTime::now());
         }
-        
+
         // Check if we should create a snapshot
         if let Err(e) = self.create_snapshot_if_needed(height).await {
             warn!("Failed to create snapshot at height {}: {}", height, e);
         }
-        
+
         // Register snapshot with server if running
         let mode = self.sync_mode.read().await;
         if matches!(*mode, SyncMode::SnapshotServer(_)) {
@@ -242,14 +257,14 @@ where
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Run the main sync loop with snapshot support
     async fn run_snapshot_sync_loop(&mut self) -> SyncResult<()> {
         let mut height = self.initialize().await?;
-        
+
         // Check if we should start with snapshot sync
         if self.should_attempt_snapshot_sync().await? {
             if self.attempt_snapshot_sync().await? {
@@ -257,7 +272,7 @@ where
                 info!("Fast-forwarded to height {} using snapshots", height);
             }
         }
-        
+
         // Main sync loop
         while self.is_running.load(Ordering::SeqCst) {
             // Check exit condition
@@ -267,7 +282,7 @@ where
                     break;
                 }
             }
-            
+
             // Get remote tip
             let remote_tip = match self.node.get_tip_height().await {
                 Ok(tip) => tip,
@@ -277,24 +292,30 @@ where
                     continue;
                 }
             };
-            
+
             // Check if we need to wait for new blocks
             if height > remote_tip {
-                debug!("Waiting for new blocks: current={}, tip={}", height, remote_tip);
-                
+                debug!(
+                    "Waiting for new blocks: current={}, tip={}",
+                    height, remote_tip
+                );
+
                 // In repo mode, periodically check for new snapshots
                 if matches!(*self.sync_mode.read().await, SyncMode::Repo(_)) {
                     let should_check = {
                         let last_check = self.last_snapshot_check.read().await;
                         match *last_check {
-                            Some(last) => SystemTime::now()
-                                .duration_since(last)
-                                .unwrap_or_default()
-                                .as_secs() > 300, // Check every 5 minutes
+                            Some(last) => {
+                                SystemTime::now()
+                                    .duration_since(last)
+                                    .unwrap_or_default()
+                                    .as_secs()
+                                    > 300
+                            } // Check every 5 minutes
                             None => true,
                         }
                     };
-                    
+
                     if should_check {
                         if self.should_attempt_snapshot_sync().await? {
                             if self.attempt_snapshot_sync().await? {
@@ -302,27 +323,27 @@ where
                                 continue;
                             }
                         }
-                        
+
                         let mut last_check = self.last_snapshot_check.write().await;
                         *last_check = Some(SystemTime::now());
                     }
                 }
-                
+
                 sleep(Duration::from_secs(3)).await;
                 continue;
             }
-            
+
             // Fetch and process block
             match self.node.get_block_data(height).await {
                 Ok(block_data) => {
                     info!("Processing block {} ({} bytes)", height, block_data.len());
-                    
+
                     if let Err(e) = self.process_block_with_snapshots(height, block_data).await {
                         error!("Failed to process block {}: {}", height, e);
                         sleep(Duration::from_secs(1)).await;
                         continue;
                     }
-                    
+
                     height += 1;
                 }
                 Err(e) => {
@@ -331,7 +352,7 @@ where
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -348,17 +369,22 @@ where
         // In practice, this would need to be redesigned or use a different approach
         unimplemented!("Use async version get_sync_mode_async")
     }
-    
+
     async fn set_sync_mode(&mut self, mode: SyncMode) -> SyncResult<()> {
         let mut sync_mode = self.sync_mode.write().await;
         *sync_mode = mode;
         Ok(())
     }
-    
-    async fn process_block_with_snapshots(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
-        self.process_block_with_snapshots(height, block_data.to_vec()).await
+
+    async fn process_block_with_snapshots(
+        &mut self,
+        height: u32,
+        block_data: &[u8],
+    ) -> SyncResult<()> {
+        self.process_block_with_snapshots(height, block_data.to_vec())
+            .await
     }
-    
+
     async fn check_and_apply_snapshots(&mut self) -> SyncResult<bool> {
         if self.should_attempt_snapshot_sync().await? {
             self.attempt_snapshot_sync().await
@@ -366,26 +392,28 @@ where
             Ok(false)
         }
     }
-    
+
     async fn create_snapshot_if_needed(&mut self, height: u32) -> SyncResult<bool> {
         if let Some(provider) = self.snapshot_provider.write().await.as_mut() {
             if provider.should_create_snapshot(height) {
                 info!("Creating snapshot at height {}", height);
-                
+
                 match provider.create_snapshot(height).await {
                     Ok(metadata) => {
                         self.last_snapshot_height.store(height, Ordering::SeqCst);
                         self.snapshots_created.fetch_add(1, Ordering::SeqCst);
-                        info!("Created snapshot at height {} (size: {} bytes)", 
-                              height, metadata.size_bytes);
-                        
+                        info!(
+                            "Created snapshot at height {} (size: {} bytes)",
+                            height, metadata.size_bytes
+                        );
+
                         // Cleanup old snapshots
                         if let Ok(deleted) = provider.cleanup_snapshots().await {
                             if deleted > 0 {
                                 debug!("Cleaned up {} old snapshots", deleted);
                             }
                         }
-                        
+
                         return Ok(true);
                     }
                     Err(e) => {
@@ -395,15 +423,15 @@ where
                 }
             }
         }
-        
+
         Ok(false)
     }
-    
+
     async fn get_snapshot_stats(&self) -> SyncResult<SnapshotSyncStats> {
         let current_height = self.current_height.load(Ordering::SeqCst);
         let tip_height = self.node.get_tip_height().await?;
         let sync_mode = format!("{:?}", *self.sync_mode.read().await);
-        
+
         Ok(SnapshotSyncStats {
             current_height,
             tip_height,
@@ -412,7 +440,11 @@ where
             snapshots_applied: self.snapshots_applied.load(Ordering::SeqCst),
             last_snapshot_height: {
                 let height = self.last_snapshot_height.load(Ordering::SeqCst);
-                if height > 0 { Some(height) } else { None }
+                if height > 0 {
+                    Some(height)
+                } else {
+                    None
+                }
             },
             blocks_synced_normally: self.blocks_synced_normally.load(Ordering::SeqCst),
             blocks_synced_from_snapshots: self.blocks_synced_from_snapshots.load(Ordering::SeqCst),
@@ -429,57 +461,59 @@ where
 {
     async fn start(&mut self) -> SyncResult<()> {
         if self.is_running.load(Ordering::SeqCst) {
-            return Err(SyncError::Config("Sync engine is already running".to_string()));
+            return Err(SyncError::Config(
+                "Sync engine is already running".to_string(),
+            ));
         }
-        
+
         info!("Starting snapshot-enabled Metashrew sync engine");
         self.is_running.store(true, Ordering::SeqCst);
-        
+
         // Check connectivity
         if !self.node.is_connected().await {
             return Err(SyncError::BitcoinNode("Node is not connected".to_string()));
         }
-        
+
         let storage = self.storage.read().await;
         if !storage.is_available().await {
             return Err(SyncError::Storage("Storage is not available".to_string()));
         }
         drop(storage);
-        
+
         let runtime = self.runtime.read().await;
         if !runtime.is_ready().await {
             return Err(SyncError::Runtime("Runtime is not ready".to_string()));
         }
         drop(runtime);
-        
+
         // Start the snapshot sync loop
         self.run_snapshot_sync_loop().await?;
-        
+
         Ok(())
     }
-    
+
     async fn stop(&mut self) -> SyncResult<()> {
         info!("Stopping snapshot-enabled Metashrew sync engine");
         self.is_running.store(false, Ordering::SeqCst);
-        
+
         // Stop snapshot server if running
         if let Some(server) = self.snapshot_server.write().await.as_mut() {
             server.stop().await?;
         }
-        
+
         Ok(())
     }
-    
+
     async fn get_status(&self) -> SyncResult<SyncStatus> {
         let current_height = self.current_height.load(Ordering::SeqCst);
         let tip_height = self.node.get_tip_height().await?;
         let blocks_behind = tip_height.saturating_sub(current_height);
         let last_block_time = *self.last_block_time.read().await;
-        
+
         // Calculate blocks per second
-        let blocks_processed = self.blocks_synced_normally.load(Ordering::SeqCst) +
-                              self.blocks_synced_from_snapshots.load(Ordering::SeqCst);
-        
+        let blocks_processed = self.blocks_synced_normally.load(Ordering::SeqCst)
+            + self.blocks_synced_from_snapshots.load(Ordering::SeqCst);
+
         let blocks_per_second = if let Some(last_time) = last_block_time {
             if let Ok(duration) = last_time.elapsed() {
                 blocks_processed as f64 / duration.as_secs_f64()
@@ -489,7 +523,7 @@ where
         } else {
             0.0
         };
-        
+
         Ok(SyncStatus {
             is_running: self.is_running.load(Ordering::SeqCst),
             current_height,
@@ -499,46 +533,49 @@ where
             blocks_per_second,
         })
     }
-    
+
     async fn process_single_block(&mut self, height: u32) -> SyncResult<()> {
         let block_data = self.node.get_block_data(height).await?;
         self.process_block_with_snapshots(height, block_data).await
     }
-    
+
     async fn handle_reorg(&mut self) -> SyncResult<u32> {
         // Enhanced reorg handling that considers snapshots
         let current_height = self.current_height.load(Ordering::SeqCst);
-        
+
         // Check the last few blocks for consistency
-        for check_height in (current_height.saturating_sub(self.config.reorg_check_threshold)..current_height).rev() {
+        for check_height in
+            (current_height.saturating_sub(self.config.reorg_check_threshold)..current_height).rev()
+        {
             let storage = self.storage.read().await;
             if let Ok(Some(local_hash)) = storage.get_block_hash(check_height).await {
                 drop(storage);
-                
+
                 if let Ok(remote_hash) = self.node.get_block_hash(check_height).await {
                     if local_hash != remote_hash {
                         warn!("Reorg detected at height {}", check_height);
-                        
+
                         // Rollback storage
                         let storage = self.storage.write().await;
                         storage.rollback_to_height(check_height).await?;
                         drop(storage);
-                        
+
                         // Update current height
-                        self.current_height.store(check_height + 1, Ordering::SeqCst);
-                        
+                        self.current_height
+                            .store(check_height + 1, Ordering::SeqCst);
+
                         // In repo mode, we might want to check for snapshots after reorg
                         if matches!(*self.sync_mode.read().await, SyncMode::Repo(_)) {
                             let mut last_check = self.last_snapshot_check.write().await;
                             *last_check = None; // Force immediate check
                         }
-                        
+
                         return Ok(check_height + 1);
                     }
                 }
             }
         }
-        
+
         Ok(current_height)
     }
 }
@@ -550,89 +587,109 @@ where
     S: StorageAdapter + 'static,
     R: RuntimeAdapter + 'static,
 {
-    async fn metashrew_view(&self, function_name: String, input_hex: String, height: String) -> SyncResult<String> {
+    async fn metashrew_view(
+        &self,
+        function_name: String,
+        input_hex: String,
+        height: String,
+    ) -> SyncResult<String> {
         let input_data = hex::decode(input_hex.trim_start_matches("0x"))
             .map_err(|e| SyncError::Serialization(format!("Invalid hex input: {}", e)))?;
-        
+
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height.parse::<u32>()
+            height
+                .parse::<u32>()
                 .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
         };
-        
+
         let call = ViewCall {
             function_name,
             input_data,
             height,
         };
-        
+
         let runtime = self.runtime.read().await;
         let result = runtime.execute_view(call).await?;
-        
+
         Ok(format!("0x{}", hex::encode(result.data)))
     }
-    
-    async fn metashrew_preview(&self, block_hex: String, function_name: String, input_hex: String, height: String) -> SyncResult<String> {
+
+    async fn metashrew_preview(
+        &self,
+        block_hex: String,
+        function_name: String,
+        input_hex: String,
+        height: String,
+    ) -> SyncResult<String> {
         let block_data = hex::decode(block_hex.trim_start_matches("0x"))
             .map_err(|e| SyncError::Serialization(format!("Invalid hex block data: {}", e)))?;
-        
+
         let input_data = hex::decode(input_hex.trim_start_matches("0x"))
             .map_err(|e| SyncError::Serialization(format!("Invalid hex input: {}", e)))?;
-        
+
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height.parse::<u32>()
+            height
+                .parse::<u32>()
                 .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
         };
-        
+
         let call = PreviewCall {
             block_data,
             function_name,
             input_data,
             height,
         };
-        
+
         let runtime = self.runtime.read().await;
         let result = runtime.execute_preview(call).await?;
-        
+
         Ok(format!("0x{}", hex::encode(result.data)))
     }
-    
+
     async fn metashrew_height(&self) -> SyncResult<u32> {
         let current_height = self.current_height.load(Ordering::SeqCst);
         Ok(current_height.saturating_sub(1))
     }
-    
+
     async fn metashrew_getblockhash(&self, height: u32) -> SyncResult<String> {
         let storage = self.storage.read().await;
         match storage.get_block_hash(height).await? {
             Some(hash) => Ok(format!("0x{}", hex::encode(hash))),
-            None => Err(SyncError::Storage(format!("Block hash not found for height {}", height))),
+            None => Err(SyncError::Storage(format!(
+                "Block hash not found for height {}",
+                height
+            ))),
         }
     }
-    
+
     async fn metashrew_stateroot(&self, height: String) -> SyncResult<String> {
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height.parse::<u32>()
+            height
+                .parse::<u32>()
                 .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
         };
-        
+
         let storage = self.storage.read().await;
         match storage.get_state_root(height).await? {
             Some(root) => Ok(format!("0x{}", hex::encode(root))),
-            None => Err(SyncError::Storage(format!("State root not found for height {}", height))),
+            None => Err(SyncError::Storage(format!(
+                "State root not found for height {}",
+                height
+            ))),
         }
     }
-    
+
     async fn metashrew_snapshot(&self) -> SyncResult<serde_json::Value> {
         let storage = self.storage.read().await;
         let stats = storage.get_stats().await?;
         let snapshot_stats = self.get_snapshot_stats().await?;
-        
+
         Ok(serde_json::json!({
             "enabled": true,
             "current_height": self.current_height.load(Ordering::SeqCst),

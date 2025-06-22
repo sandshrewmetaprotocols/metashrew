@@ -3,18 +3,18 @@
 use anyhow::Result;
 
 // Core modules
-pub mod traits;
 pub mod context;
-pub mod runtime;
-pub mod smt;
-pub mod proto;
 pub mod helpers;
 pub mod optimized_bst;
+pub mod proto;
+pub mod runtime;
+pub mod smt;
+pub mod traits;
 
 // Re-export core types and traits
-pub use traits::{BatchLike, KeyValueStoreLike, KVTrackerFn};
 pub use context::MetashrewRuntimeContext;
 pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
+pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
 
 // Re-export helper types
 pub use helpers::{BSTHelper, BSTStatistics};
@@ -64,7 +64,10 @@ where
     T::Error: std::error::Error + Send + Sync + 'static,
 {
     let height_key = TIP_HEIGHT_KEY.as_bytes().to_vec();
-    let bytes = match db.get(&to_labeled_key(&height_key)).map_err(|e| anyhow::anyhow!("Database error: {:?}", e))? {
+    let bytes = match db
+        .get(&to_labeled_key(&height_key))
+        .map_err(|e| anyhow::anyhow!("Database error: {:?}", e))?
+    {
         Some(v) => v,
         None => {
             return Ok(start_block);

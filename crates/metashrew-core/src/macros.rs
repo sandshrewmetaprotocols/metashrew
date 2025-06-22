@@ -38,20 +38,20 @@ macro_rules! declare_indexer {
         #[no_mangle]
         pub extern "C" fn _start() {
             let data = input();
-            
+
             // First 4 bytes are the height
             let height = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-            
+
             // Rest is the block data
             let block_data = &data[4..];
-            
+
             // Parse the block
             let block = <$block_type>::consensus_decode(&mut std::io::Cursor::new(block_data))
                 .expect("Failed to parse block data");
-            
+
             // Call the user-defined index_block function
             $indexer_name::index_block(height, block);
-            
+
             // Flush changes to the database
             flush();
         }
@@ -61,10 +61,10 @@ macro_rules! declare_indexer {
             #[no_mangle]
             pub extern "C" fn $view_fn_name() -> i32 {
                 use metashrew_core::stdio::stdout;
-                
+
                 // Get input data
                 let data = input();
-                
+
                 // Parse the request protobuf
                 let request = match protobuf::Message::parse_from_bytes::<$view_param_type>(&data) {
                     Ok(req) => req,
@@ -74,7 +74,7 @@ macro_rules! declare_indexer {
                         return -1;
                     }
                 };
-                
+
                 // Call the user-defined view function
                 match $indexer_name::$view_fn_name(request) {
                     Ok(result) => {
@@ -104,14 +104,14 @@ macro_rules! declare_indexer {
         #[no_mangle]
         pub extern "C" fn __meta() -> i32 {
             use metashrew_support::proto::metashrew::{IndexerMetadata, ViewFunction};
-            
+
             // Create a metadata structure
             let mut metadata = IndexerMetadata::new();
-            
+
             // Set compiler information
             metadata.compiler_version = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown").to_string();
             metadata.rustc_version = option_env!("RUSTC_VERSION").unwrap_or("unknown").to_string();
-            
+
             // Add view function information
             $(
                 let mut view_fn = ViewFunction::new();
@@ -120,7 +120,7 @@ macro_rules! declare_indexer {
                 view_fn.output_type = stringify!($view_return_type).to_string();
                 metadata.view_functions.push(view_fn);
             )*
-            
+
             // Serialize and export
             match metadata.write_to_bytes() {
                 Ok(bytes) => metashrew_core::export_bytes(bytes),

@@ -1,5 +1,5 @@
 //! This is an example of how to use the declare_indexer! macro.
-//! 
+//!
 //! This example is for demonstration purposes only and is not meant to be run.
 //! It shows the syntax and structure of using the macro to define an indexer.
 
@@ -22,7 +22,7 @@ declare_indexer! {
         fn index_block(height: u32, block: bitcoin::Block) {
             // Process the block and update the state
             println!("Processing block {}", height);
-            
+
             // In a real indexer, you would store data using metashrew_core::set
             // For example:
             // let key = format!("block:{}:tx_count", height).into_bytes();
@@ -34,13 +34,13 @@ declare_indexer! {
         fn get_balance(request: ExampleRequest) -> Result<ExampleResponse, String> {
             // Process the request and return a response
             println!("Processing request");
-            
+
             // In a real indexer, you would retrieve data using metashrew_core::get
             // For example:
             // let key = format!("address:{}", request.address).into_bytes();
             // let value = metashrew_core::get(Arc::new(key));
             // let balance = u64::from_le_bytes(value.as_slice().try_into().unwrap());
-            
+
             Ok(ExampleResponse {})
         }
     }

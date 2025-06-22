@@ -6,14 +6,14 @@ use bitcoin::consensus::encode::deserialize;
 use bitcoin::consensus::{Decodable, Encodable};
 use bitcoin::hashes::Hash;
 use bitcoin::io::Write;
+use bitcoin::p2p::message_blockdata::Inventory;
+use bitcoin::BlockHash;
 use bitcoin::{Amount, Transaction, Txid};
 use clap::Parser;
 use env_logger;
 use itertools::Itertools;
 use log::{debug, info};
 use rand;
-use bitcoin::p2p::message_blockdata::Inventory;
-use bitcoin::BlockHash;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -460,7 +460,9 @@ impl MempoolTracker {
 
                             let txid = Txid::from_byte_array(hash.into());
                             if !self.mempool_txs.read().await.contains_key(&txid) {
-	                        getdata_items.push(Inventory::Block(BlockHash::from_byte_array(hash.into())));
+                                getdata_items.push(Inventory::Block(BlockHash::from_byte_array(
+                                    hash.into(),
+                                )));
                                 new_txs.insert(txid);
                             }
                         }
@@ -721,29 +723,29 @@ impl MempoolTracker {
         Ok(())
     }
 
-	pub async fn start_background_tasks(self: Arc<Self>) {
-	    tokio::spawn(async move {
-	        loop {
-	            if let Err(e) = self.update_mempool().await {
-	                debug!("Error updating mempool: {}", e);
-	            }
-	
-	            // Check if templates need updating
-	            let last_update = *self.last_template_update.read().await;
-	            if SystemTime::now()
-	                .duration_since(last_update)
-	                .unwrap_or(Duration::from_secs(0))
-	                >= TEMPLATE_CACHE_DURATION
-	            {
-	                if let Err(e) = self.generate_block_templates().await {
-	                    debug!("Error generating block templates: {}", e);
-	                }
-	            }
-	
-	            sleep(UPDATE_INTERVAL).await;
-	        }
-	    });
-	}
+    pub async fn start_background_tasks(self: Arc<Self>) {
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = self.update_mempool().await {
+                    debug!("Error updating mempool: {}", e);
+                }
+
+                // Check if templates need updating
+                let last_update = *self.last_template_update.read().await;
+                if SystemTime::now()
+                    .duration_since(last_update)
+                    .unwrap_or(Duration::from_secs(0))
+                    >= TEMPLATE_CACHE_DURATION
+                {
+                    if let Err(e) = self.generate_block_templates().await {
+                        debug!("Error generating block templates: {}", e);
+                    }
+                }
+
+                sleep(UPDATE_INTERVAL).await;
+            }
+        });
+    }
 }
 
 #[post("/")]

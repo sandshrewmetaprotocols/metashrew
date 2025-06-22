@@ -1,8 +1,8 @@
 //! In-memory implementation of KeyValueStoreLike trait for fast testing
 
-use std::io::{Error, Result};
-use metashrew_runtime::{BatchLike, KeyValueStoreLike, TIP_HEIGHT_KEY, to_labeled_key};
+use metashrew_runtime::{to_labeled_key, BatchLike, KeyValueStoreLike, TIP_HEIGHT_KEY};
 use std::collections::HashMap;
+use std::io::{Error, Result};
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Default)]
@@ -15,35 +15,35 @@ impl MemStoreAdapter {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     pub fn with_data(data: HashMap<Vec<u8>, Vec<u8>>) -> Self {
         Self {
             db: Arc::new(Mutex::new(data)),
             height: 0,
         }
     }
-    
+
     /// Get a snapshot of all data (useful for testing)
     pub fn get_all_data(&self) -> HashMap<Vec<u8>, Vec<u8>> {
         self.db.lock().unwrap().clone()
     }
-    
+
     /// Clear all data (useful for testing)
     pub fn clear(&mut self) {
         self.db.lock().unwrap().clear();
         self.height = 0;
     }
-    
+
     /// Get the number of keys stored
     pub fn len(&self) -> usize {
         self.db.lock().unwrap().len()
     }
-    
+
     /// Check if the store is empty
     pub fn is_empty(&self) -> bool {
         self.db.lock().unwrap().is_empty()
     }
-    
+
     /// Create a deep copy with isolated data (useful for preview operations)
     pub fn deep_copy(&self) -> Self {
         let data = self.get_all_data();
@@ -68,12 +68,12 @@ impl MemStoreBatch {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Get the number of operations in this batch
     pub fn len(&self) -> usize {
         self.operations.len()
     }
-    
+
     /// Check if the batch is empty
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
@@ -82,15 +82,17 @@ impl MemStoreBatch {
 
 impl BatchLike for MemStoreBatch {
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.operations
-            .push(BatchOperation::Put(key.as_ref().to_vec(), value.as_ref().to_vec()));
+        self.operations.push(BatchOperation::Put(
+            key.as_ref().to_vec(),
+            value.as_ref().to_vec(),
+        ));
     }
-    
+
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
         self.operations
             .push(BatchOperation::Delete(key.as_ref().to_vec()));
     }
-    
+
     fn default() -> Self {
         Self {
             operations: Vec::new(),
@@ -104,12 +106,12 @@ impl KeyValueStoreLike for MemStoreAdapter {
 
     fn write(&mut self, batch: Self::Batch) -> Result<()> {
         let mut db = self.db.lock().unwrap();
-        
+
         // Add height update to the batch operations
         let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
         let height_bytes: Vec<u8> = (self.height + 1).to_le_bytes().to_vec();
         db.insert(to_labeled_key(&key_bytes), height_bytes);
-        
+
         // Apply all batch operations
         for operation in batch.operations {
             match operation {
@@ -128,7 +130,7 @@ impl KeyValueStoreLike for MemStoreAdapter {
         let db = self.db.lock().unwrap();
         Ok(db.get(&to_labeled_key(&key.as_ref().to_vec())).cloned())
     }
-    
+
     fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>> {
         let db = self.db.lock().unwrap();
         Ok(db.get(&to_labeled_key(&key.as_ref().to_vec())).cloned())
@@ -140,7 +142,10 @@ impl KeyValueStoreLike for MemStoreAdapter {
         V: AsRef<[u8]>,
     {
         let mut db = self.db.lock().unwrap();
-        db.insert(to_labeled_key(&key.as_ref().to_vec()), value.as_ref().to_vec());
+        db.insert(
+            to_labeled_key(&key.as_ref().to_vec()),
+            value.as_ref().to_vec(),
+        );
         Ok(())
     }
 
@@ -154,18 +159,18 @@ impl KeyValueStoreLike for MemStoreAdapter {
         let db = self.db.lock().unwrap();
         let prefix_bytes = to_labeled_key(&prefix.as_ref().to_vec());
         let mut results = Vec::new();
-        
+
         for (key, value) in db.iter() {
             if key.starts_with(&prefix_bytes) {
                 results.push((key.clone(), value.clone()));
             }
         }
-        
+
         // Sort results by key for consistent ordering
         results.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(results)
     }
-    
+
     fn create_batch(&self) -> Self::Batch {
         <MemStoreBatch as BatchLike>::default()
     }
@@ -175,24 +180,24 @@ impl KeyValueStoreLike for MemStoreAdapter {
         let keys = db.keys().cloned().collect::<Vec<Vec<u8>>>();
         Ok(Box::new(keys.into_iter()))
     }
-    
+
     fn is_open(&self) -> bool {
         true // In-memory store is always "open"
     }
-    
+
     fn set_height(&mut self, height: u32) {
         self.height = height;
     }
-    
+
     fn get_height(&self) -> u32 {
         self.height
     }
-    
+
     fn track_kv_update(&mut self, _key: Vec<u8>, _value: Vec<u8>) {
         // In-memory implementation doesn't need tracking by default
         // This can be extended if needed for testing purposes
     }
-    
+
     fn create_isolated_copy(&self) -> Self {
         self.deep_copy()
     }
@@ -222,36 +227,36 @@ mod tests {
     #[test]
     fn test_memstore_basic_operations() {
         let mut store = MemStoreAdapter::new();
-        
+
         // Test put and get
         store.put(b"key1", b"value1").unwrap();
         assert_eq!(store.get(b"key1").unwrap(), Some(b"value1".to_vec()));
-        
+
         // Test delete
         store.delete(b"key1").unwrap();
         assert_eq!(store.get(b"key1").unwrap(), None);
     }
-    
+
     #[test]
     fn test_memstore_batch_operations() {
         let mut store = MemStoreAdapter::new();
         let mut batch = MemStoreBatch::new();
-        
+
         batch.put(b"key1", b"value1");
         batch.put(b"key2", b"value2");
-        
+
         store.write(batch).unwrap();
-        
+
         assert_eq!(store.get(b"key1").unwrap(), Some(b"value1".to_vec()));
         assert_eq!(store.get(b"key2").unwrap(), Some(b"value2".to_vec()));
     }
-    
+
     #[test]
     fn test_memstore_height_tracking() {
         let mut store = MemStoreAdapter::new();
-        
+
         assert_eq!(store.get_height(), 0);
-        
+
         store.set_height(42);
         assert_eq!(store.get_height(), 42);
     }

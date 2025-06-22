@@ -1,5 +1,5 @@
 //! Snapshot and repository mode traits and implementations
-//! 
+//!
 //! This module provides the infrastructure for snapshot-based synchronization
 //! where one instance can create snapshots at regular intervals and another
 //! instance can sync from those snapshots (repo mode).
@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::{SyncResult, SyncError};
+use crate::{SyncError, SyncResult};
 
 /// Snapshot metadata containing information about a checkpoint
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +83,7 @@ impl Default for RepoConfig {
     fn default() -> Self {
         Self {
             repo_url: "http://localhost:8080/snapshots".to_string(),
-            check_interval: 300, // 5 minutes
+            check_interval: 300,     // 5 minutes
             max_snapshot_age: 86400, // 24 hours
             continue_sync: true,
             min_blocks_behind: 100,
@@ -96,19 +96,19 @@ impl Default for RepoConfig {
 pub trait SnapshotProvider: Send + Sync {
     /// Create a snapshot at the current height
     async fn create_snapshot(&mut self, height: u32) -> SyncResult<SnapshotMetadata>;
-    
+
     /// Get available snapshots
     async fn list_snapshots(&self) -> SyncResult<Vec<SnapshotMetadata>>;
-    
+
     /// Get a specific snapshot by height
     async fn get_snapshot(&self, height: u32) -> SyncResult<Option<SnapshotData>>;
-    
+
     /// Get the latest snapshot
     async fn get_latest_snapshot(&self) -> SyncResult<Option<SnapshotData>>;
-    
+
     /// Delete old snapshots beyond the configured limit
     async fn cleanup_snapshots(&mut self) -> SyncResult<usize>;
-    
+
     /// Check if a snapshot should be created at this height
     fn should_create_snapshot(&self, height: u32) -> bool;
 }
@@ -118,16 +118,20 @@ pub trait SnapshotProvider: Send + Sync {
 pub trait SnapshotConsumer: Send + Sync {
     /// Check for available snapshots from the repository
     async fn check_available_snapshots(&self) -> SyncResult<Vec<SnapshotMetadata>>;
-    
+
     /// Download and apply a snapshot
     async fn apply_snapshot(&mut self, metadata: &SnapshotMetadata) -> SyncResult<()>;
-    
+
     /// Get the best snapshot to use for catching up
-    async fn get_best_snapshot(&self, current_height: u32, tip_height: u32) -> SyncResult<Option<SnapshotMetadata>>;
-    
+    async fn get_best_snapshot(
+        &self,
+        current_height: u32,
+        tip_height: u32,
+    ) -> SyncResult<Option<SnapshotMetadata>>;
+
     /// Verify a snapshot's integrity
     async fn verify_snapshot(&self, data: &SnapshotData) -> SyncResult<bool>;
-    
+
     /// Check if we should use snapshots given current state
     async fn should_use_snapshots(&self, current_height: u32, tip_height: u32) -> SyncResult<bool>;
 }
@@ -137,22 +141,26 @@ pub trait SnapshotConsumer: Send + Sync {
 pub trait SnapshotServer: Send + Sync {
     /// Start the snapshot server
     async fn start(&mut self) -> SyncResult<()>;
-    
+
     /// Stop the snapshot server
     async fn stop(&mut self) -> SyncResult<()>;
-    
+
     /// Get server status
     async fn get_status(&self) -> SyncResult<SnapshotServerStatus>;
-    
+
     /// Register a new snapshot
-    async fn register_snapshot(&mut self, metadata: SnapshotMetadata, data: Vec<u8>) -> SyncResult<()>;
-    
+    async fn register_snapshot(
+        &mut self,
+        metadata: SnapshotMetadata,
+        data: Vec<u8>,
+    ) -> SyncResult<()>;
+
     /// Get snapshot metadata by height
     async fn get_snapshot_metadata(&self, height: u32) -> SyncResult<Option<SnapshotMetadata>>;
-    
+
     /// Get snapshot data by height
     async fn get_snapshot_data(&self, height: u32) -> SyncResult<Option<Vec<u8>>>;
-    
+
     /// List all available snapshots
     async fn list_available_snapshots(&self) -> SyncResult<Vec<SnapshotMetadata>>;
 }
@@ -172,13 +180,13 @@ pub struct SnapshotServerStatus {
 pub trait SnapshotClient: Send + Sync {
     /// Download snapshot metadata from URL
     async fn download_metadata(&self, url: &str) -> SyncResult<SnapshotMetadata>;
-    
+
     /// Download snapshot data from URL
     async fn download_data(&self, url: &str) -> SyncResult<Vec<u8>>;
-    
+
     /// List available snapshots from repository
     async fn list_remote_snapshots(&self, base_url: &str) -> SyncResult<Vec<SnapshotMetadata>>;
-    
+
     /// Check if repository is available
     async fn check_repository(&self, base_url: &str) -> SyncResult<bool>;
 }
@@ -201,19 +209,23 @@ pub enum SyncMode {
 pub trait SnapshotSyncEngine: Send + Sync {
     /// Get current sync mode
     fn get_sync_mode(&self) -> &SyncMode;
-    
+
     /// Switch sync mode
     async fn set_sync_mode(&mut self, mode: SyncMode) -> SyncResult<()>;
-    
+
     /// Process a block with snapshot considerations
-    async fn process_block_with_snapshots(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()>;
-    
+    async fn process_block_with_snapshots(
+        &mut self,
+        height: u32,
+        block_data: &[u8],
+    ) -> SyncResult<()>;
+
     /// Check and apply snapshots if in repo mode
     async fn check_and_apply_snapshots(&mut self) -> SyncResult<bool>;
-    
+
     /// Create snapshot if in snapshot mode
     async fn create_snapshot_if_needed(&mut self, height: u32) -> SyncResult<bool>;
-    
+
     /// Get sync statistics including snapshot info
     async fn get_snapshot_stats(&self) -> SyncResult<SnapshotSyncStats>;
 }
@@ -236,22 +248,22 @@ pub struct SnapshotSyncStats {
 pub enum SnapshotError {
     #[error("Snapshot not found at height {height}")]
     SnapshotNotFound { height: u32 },
-    
+
     #[error("Invalid snapshot data: {reason}")]
     InvalidSnapshot { reason: String },
-    
+
     #[error("Snapshot verification failed: {reason}")]
     VerificationFailed { reason: String },
-    
+
     #[error("Repository unavailable: {url}")]
     RepositoryUnavailable { url: String },
-    
+
     #[error("Compression error: {message}")]
     CompressionError { message: String },
-    
+
     #[error("Network error: {message}")]
     NetworkError { message: String },
-    
+
     #[error("Filesystem error: {message}")]
     FilesystemError { message: String },
 }

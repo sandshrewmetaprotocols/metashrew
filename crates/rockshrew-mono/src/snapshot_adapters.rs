@@ -1,21 +1,20 @@
 //! Production implementations of snapshot traits for rockshrew-mono
 
-use async_trait::async_trait;
 use anyhow::Result;
-use log::{info, error, debug};
+use async_trait::async_trait;
+use log::{debug, error, info};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use rockshrew_sync::{
-    SnapshotProvider, SnapshotConsumer, SnapshotServer, SnapshotClient,
-    SnapshotData, SnapshotMetadata as GenericMetadata, SnapshotServerStatus,
-    SyncError, SyncResult, StorageAdapter
+    SnapshotClient, SnapshotConsumer, SnapshotData, SnapshotMetadata as GenericMetadata,
+    SnapshotProvider, SnapshotServer, SnapshotServerStatus, StorageAdapter, SyncError, SyncResult,
 };
 
-use crate::snapshot::{SnapshotManager, SnapshotConfig, RepoIndex};
 use crate::adapters::RocksDBStorageAdapter;
+use crate::snapshot::{RepoIndex, SnapshotConfig, SnapshotManager};
 
 /// Production snapshot provider using the existing SnapshotManager
 pub struct RockshrewSnapshotProvider {
@@ -48,18 +47,21 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
     /// Create a snapshot at the current height
     async fn create_snapshot(&mut self, height: u32) -> SyncResult<GenericMetadata> {
         info!("Creating snapshot at height {}", height);
-        
+
         // Get state root from storage
         let state_root = {
             let storage = self.storage.read().await;
-            storage.get_state_root(height).await?
-                .ok_or_else(|| SyncError::Runtime(format!("No state root found for height {}", height)))?
+            storage.get_state_root(height).await?.ok_or_else(|| {
+                SyncError::Runtime(format!("No state root found for height {}", height))
+            })?
         };
 
         // Create snapshot using the existing manager
         {
             let mut manager = self.manager.write().await;
-            manager.create_snapshot(height, &state_root).await
+            manager
+                .create_snapshot(height, &state_root)
+                .await
                 .map_err(|e| SyncError::Runtime(format!("Failed to create snapshot: {}", e)))?;
         }
 
@@ -72,25 +74,26 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            size_bytes: 0, // TODO: Get actual size
-            checksum: "".to_string(), // TODO: Calculate checksum
+            size_bytes: 0,             // TODO: Get actual size
+            checksum: "".to_string(),  // TODO: Calculate checksum
             wasm_hash: "".to_string(), // TODO: Get WASM hash
         })
     }
-    
+
     /// Get available snapshots
     async fn list_snapshots(&self) -> SyncResult<Vec<GenericMetadata>> {
         let manager = self.manager.read().await;
-        
+
         // Read the index.json file
         let index_path = manager.config.directory.join("index.json");
         if !index_path.exists() {
             return Ok(Vec::new());
         }
 
-        let index_content = tokio::fs::read(&index_path).await
+        let index_content = tokio::fs::read(&index_path)
+            .await
             .map_err(|e| SyncError::Runtime(format!("Failed to read index: {}", e)))?;
-        
+
         let index: RepoIndex = serde_json::from_slice(&index_content)
             .map_err(|e| SyncError::Runtime(format!("Failed to parse index: {}", e)))?;
 
@@ -102,7 +105,7 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
                 state_root: hex::decode(&interval.state_root)
                     .map_err(|e| SyncError::Runtime(format!("Invalid state root hex: {}", e)))?,
                 timestamp: interval.created_at,
-                size_bytes: 0, // TODO: Get actual size
+                size_bytes: 0,            // TODO: Get actual size
                 checksum: "".to_string(), // TODO: Calculate checksum
                 wasm_hash: interval.wasm_hash,
             });
@@ -110,20 +113,21 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
 
         Ok(metadata_list)
     }
-    
+
     /// Get a specific snapshot by height
     async fn get_snapshot(&self, height: u32) -> SyncResult<Option<SnapshotData>> {
         let manager = self.manager.read().await;
-        
+
         // Find the interval containing this height
         let index_path = manager.config.directory.join("index.json");
         if !index_path.exists() {
             return Ok(None);
         }
 
-        let index_content = tokio::fs::read(&index_path).await
+        let index_content = tokio::fs::read(&index_path)
+            .await
             .map_err(|e| SyncError::Runtime(format!("Failed to read index: {}", e)))?;
-        
+
         let index: RepoIndex = serde_json::from_slice(&index_content)
             .map_err(|e| SyncError::Runtime(format!("Failed to parse index: {}", e)))?;
 
@@ -131,14 +135,16 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             if interval.end_height == height {
                 let diff_path = manager.config.directory.join(&interval.diff_file);
                 if diff_path.exists() {
-                    let state_data = tokio::fs::read(&diff_path).await
-                        .map_err(|e| SyncError::Runtime(format!("Failed to read snapshot: {}", e)))?;
+                    let state_data = tokio::fs::read(&diff_path).await.map_err(|e| {
+                        SyncError::Runtime(format!("Failed to read snapshot: {}", e))
+                    })?;
 
                     let metadata = GenericMetadata {
                         height: interval.end_height,
                         block_hash: vec![0u8; 32], // TODO: Get actual block hash
-                        state_root: hex::decode(&interval.state_root)
-                            .map_err(|e| SyncError::Runtime(format!("Invalid state root hex: {}", e)))?,
+                        state_root: hex::decode(&interval.state_root).map_err(|e| {
+                            SyncError::Runtime(format!("Invalid state root hex: {}", e))
+                        })?,
                         timestamp: interval.created_at,
                         size_bytes: state_data.len() as u64,
                         checksum: "".to_string(), // TODO: Calculate checksum
@@ -156,7 +162,7 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
 
         Ok(None)
     }
-    
+
     /// Get the latest snapshot
     async fn get_latest_snapshot(&self) -> SyncResult<Option<SnapshotData>> {
         let snapshots = self.list_snapshots().await?;
@@ -166,30 +172,35 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             Ok(None)
         }
     }
-    
+
     /// Delete old snapshots beyond the configured limit
     async fn cleanup_snapshots(&mut self) -> SyncResult<usize> {
         info!("Cleaning up old snapshots");
-        
+
         let manager = self.manager.read().await;
         let intervals_dir = manager.config.directory.join("intervals");
-        
+
         if !intervals_dir.exists() {
             return Ok(0);
         }
 
         // Read all interval directories
-        let mut entries = tokio::fs::read_dir(&intervals_dir).await
-            .map_err(|e| SyncError::Runtime(format!("Failed to read intervals directory: {}", e)))?;
+        let mut entries = tokio::fs::read_dir(&intervals_dir).await.map_err(|e| {
+            SyncError::Runtime(format!("Failed to read intervals directory: {}", e))
+        })?;
 
         let mut intervals = Vec::new();
-        while let Some(entry) = entries.next_entry().await
-            .map_err(|e| SyncError::Runtime(format!("Failed to read directory entry: {}", e)))? {
-            
-            if entry.file_type().await
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| SyncError::Runtime(format!("Failed to read directory entry: {}", e)))?
+        {
+            if entry
+                .file_type()
+                .await
                 .map_err(|e| SyncError::Runtime(format!("Failed to get file type: {}", e)))?
-                .is_dir() {
-                
+                .is_dir()
+            {
                 if let Some(name) = entry.file_name().to_str() {
                     if let Some((_start, end)) = parse_interval_name(name) {
                         intervals.push((end, entry.path()));
@@ -200,7 +211,7 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
 
         // Sort by end height (descending) and keep only the most recent 10
         intervals.sort_by(|a, b| b.0.cmp(&a.0));
-        
+
         let mut removed_count = 0;
         for (_, path) in intervals.into_iter().skip(10) {
             info!("Removing old snapshot directory: {:?}", path);
@@ -213,7 +224,7 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
 
         Ok(removed_count)
     }
-    
+
     /// Check if a snapshot should be created at this height
     fn should_create_snapshot(&self, height: u32) -> bool {
         // This is a synchronous method, so we can't access the async manager
@@ -246,46 +257,51 @@ impl SnapshotConsumer for RockshrewSnapshotConsumer {
         // For now, return empty list
         Ok(Vec::new())
     }
-    
+
     /// Download and apply a snapshot
     async fn apply_snapshot(&mut self, metadata: &GenericMetadata) -> SyncResult<()> {
         info!("Applying snapshot for height {}", metadata.height);
-        
+
         // For now, this is a placeholder implementation
         // In a real implementation, this would download and apply the snapshot data
-        
+
         Ok(())
     }
-    
+
     /// Get the best snapshot to use for catching up
-    async fn get_best_snapshot(&self, current_height: u32, tip_height: u32) -> SyncResult<Option<GenericMetadata>> {
+    async fn get_best_snapshot(
+        &self,
+        current_height: u32,
+        tip_height: u32,
+    ) -> SyncResult<Option<GenericMetadata>> {
         let available = self.check_available_snapshots().await?;
-        
+
         // Find the best snapshot between current_height and tip_height
-        let best = available.into_iter()
+        let best = available
+            .into_iter()
             .filter(|s| s.height > current_height && s.height <= tip_height)
             .max_by_key(|s| s.height);
-        
+
         Ok(best)
     }
-    
+
     /// Verify a snapshot's integrity
     async fn verify_snapshot(&self, data: &SnapshotData) -> SyncResult<bool> {
         info!("Verifying snapshot for height {}", data.metadata.height);
-        
+
         // Basic verification - check if we can decompress the data
         match zstd::decode_all(data.state_data.as_slice()) {
             Ok(_) => {
                 debug!("Snapshot decompression successful");
                 Ok(true)
-            },
+            }
             Err(e) => {
                 error!("Snapshot decompression failed: {}", e);
                 Ok(false)
             }
         }
     }
-    
+
     /// Check if we should use snapshots given current state
     async fn should_use_snapshots(&self, current_height: u32, tip_height: u32) -> SyncResult<bool> {
         // Use snapshots if we're more than 100 blocks behind
@@ -310,7 +326,7 @@ impl RockshrewSnapshotServer {
             total_size_bytes: 0,
             uptime_seconds: 0,
         };
-        
+
         Self {
             provider: Arc::new(RwLock::new(provider)),
             status: Arc::new(RwLock::new(status)),
@@ -328,7 +344,7 @@ impl SnapshotServer for RockshrewSnapshotServer {
         info!("Snapshot server started");
         Ok(())
     }
-    
+
     /// Stop the snapshot server
     async fn stop(&mut self) -> SyncResult<()> {
         let mut status = self.status.write().await;
@@ -336,39 +352,43 @@ impl SnapshotServer for RockshrewSnapshotServer {
         info!("Snapshot server stopped");
         Ok(())
     }
-    
+
     /// Get server status
     async fn get_status(&self) -> SyncResult<SnapshotServerStatus> {
         let status = self.status.read().await;
         Ok(status.clone())
     }
-    
+
     /// Register a new snapshot
-    async fn register_snapshot(&mut self, metadata: GenericMetadata, data: Vec<u8>) -> SyncResult<()> {
+    async fn register_snapshot(
+        &mut self,
+        metadata: GenericMetadata,
+        data: Vec<u8>,
+    ) -> SyncResult<()> {
         let mut snapshots = self.snapshots.write().await;
         snapshots.insert(metadata.height, data);
-        
+
         let mut status = self.status.write().await;
         status.total_snapshots = snapshots.len();
         status.latest_snapshot_height = Some(metadata.height);
-        
+
         info!("Registered snapshot for height {}", metadata.height);
         Ok(())
     }
-    
+
     /// Get snapshot metadata by height
     async fn get_snapshot_metadata(&self, height: u32) -> SyncResult<Option<GenericMetadata>> {
         let provider = self.provider.read().await;
         let snapshots = provider.list_snapshots().await?;
         Ok(snapshots.into_iter().find(|s| s.height == height))
     }
-    
+
     /// Get snapshot data by height
     async fn get_snapshot_data(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
         let snapshots = self.snapshots.read().await;
         Ok(snapshots.get(&height).cloned())
     }
-    
+
     /// List all available snapshots
     async fn list_available_snapshots(&self) -> SyncResult<Vec<GenericMetadata>> {
         let provider = self.provider.read().await;
@@ -397,53 +417,74 @@ impl RockshrewSnapshotClient {
 impl SnapshotClient for RockshrewSnapshotClient {
     /// Download snapshot metadata from URL
     async fn download_metadata(&self, url: &str) -> SyncResult<GenericMetadata> {
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .send()
             .await
             .map_err(|e| SyncError::Network(format!("Failed to download metadata: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(SyncError::Network(format!("HTTP error: {}", response.status())));
+            return Err(SyncError::Network(format!(
+                "HTTP error: {}",
+                response.status()
+            )));
         }
 
-        let metadata: GenericMetadata = response.json().await
+        let metadata: GenericMetadata = response
+            .json()
+            .await
             .map_err(|e| SyncError::Network(format!("Failed to parse metadata: {}", e)))?;
 
         Ok(metadata)
     }
-    
+
     /// Download snapshot data from URL
     async fn download_data(&self, url: &str) -> SyncResult<Vec<u8>> {
-        let response = self.client.get(url)
+        let response = self
+            .client
+            .get(url)
             .send()
             .await
             .map_err(|e| SyncError::Network(format!("Failed to download data: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(SyncError::Network(format!("HTTP error: {}", response.status())));
+            return Err(SyncError::Network(format!(
+                "HTTP error: {}",
+                response.status()
+            )));
         }
 
-        let data = response.bytes().await
+        let data = response
+            .bytes()
+            .await
             .map_err(|e| SyncError::Network(format!("Failed to read data: {}", e)))?
             .to_vec();
 
         Ok(data)
     }
-    
+
     /// List available snapshots from repository
     async fn list_remote_snapshots(&self, base_url: &str) -> SyncResult<Vec<GenericMetadata>> {
         let url = format!("{}/index.json", base_url.trim_end_matches('/'));
-        
-        let response = self.client.get(&url)
+
+        let response = self
+            .client
+            .get(&url)
             .send()
             .await
             .map_err(|e| SyncError::Network(format!("Failed to fetch index: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(SyncError::Network(format!("HTTP error: {}", response.status())));
+            return Err(SyncError::Network(format!(
+                "HTTP error: {}",
+                response.status()
+            )));
         }
 
-        let index_json = response.text().await
+        let index_json = response
+            .text()
+            .await
             .map_err(|e| SyncError::Network(format!("Failed to read response: {}", e)))?;
 
         let index: RepoIndex = serde_json::from_str(&index_json)
@@ -457,7 +498,7 @@ impl SnapshotClient for RockshrewSnapshotClient {
                 state_root: hex::decode(&interval.state_root)
                     .map_err(|e| SyncError::Runtime(format!("Invalid state root hex: {}", e)))?,
                 timestamp: interval.created_at,
-                size_bytes: 0, // We don't know the size without fetching
+                size_bytes: 0,            // We don't know the size without fetching
                 checksum: "".to_string(), // TODO: Calculate checksum
                 wasm_hash: interval.wasm_hash,
             });
@@ -465,11 +506,11 @@ impl SnapshotClient for RockshrewSnapshotClient {
 
         Ok(metadata_list)
     }
-    
+
     /// Check if repository is available
     async fn check_repository(&self, base_url: &str) -> SyncResult<bool> {
         let url = format!("{}/index.json", base_url.trim_end_matches('/'));
-        
+
         match self.client.head(&url).send().await {
             Ok(response) if response.status().is_success() => Ok(true),
             _ => Ok(false),

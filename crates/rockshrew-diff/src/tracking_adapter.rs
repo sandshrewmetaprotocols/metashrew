@@ -1,4 +1,4 @@
-use metashrew_runtime::{KeyValueStoreLike, BatchLike, RocksDBRuntimeAdapter};
+use metashrew_runtime::{BatchLike, KeyValueStoreLike, RocksDBRuntimeAdapter};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -45,7 +45,7 @@ impl BatchLike for TrackingBatch {
         let key_bytes = key.as_ref().to_vec();
         let value_bytes = value.as_ref().to_vec();
         self.updates.insert(key_bytes.clone(), value_bytes);
-        
+
         // Forward to the inner batch
         self.inner.put(key, value);
     }
@@ -80,7 +80,7 @@ impl KeyValueStoreLike for TrackingAdapter {
                     // Process the key and value according to Metashrew's format
                     let processed_key = process_metashrew_key(key);
                     let processed_value = process_metashrew_value(value);
-                    
+
                     // Only track if it's not a size key (ending with ffffffff)
                     if key.len() >= 4 && &key[key.len() - 4..] != &[0xff, 0xff, 0xff, 0xff] {
                         tracked_updates.insert(processed_key, processed_value);
@@ -88,7 +88,7 @@ impl KeyValueStoreLike for TrackingAdapter {
                 }
             }
         }
-        
+
         // Forward to the inner adapter
         self.inner.write(batch.inner)
     }
@@ -111,10 +111,9 @@ impl KeyValueStoreLike for TrackingAdapter {
         // Forward to the inner adapter - no tracking here as it's not used by __flush
         self.inner.put(key, value)
     }
-fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
+    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
         self.inner.keys()
     }
-
 }
 
 impl TrackingAdapter {

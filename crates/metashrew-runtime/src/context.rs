@@ -10,9 +10,9 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     pub state: u32,
 }
 
-impl<T: KeyValueStoreLike> Clone for MetashrewRuntimeContext<T> 
-where 
-    T: Clone 
+impl<T: KeyValueStoreLike> Clone for MetashrewRuntimeContext<T>
+where
+    T: Clone,
 {
     fn clone(&self) -> Self {
         Self {

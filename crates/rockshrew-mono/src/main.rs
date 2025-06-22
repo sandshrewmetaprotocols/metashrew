@@ -37,6 +37,13 @@ use ssh_tunnel::{SshTunnelConfig, parse_daemon_rpc_url};
 mod snapshot;
 use snapshot::{SnapshotConfig, SnapshotManager};
 
+// Import our snapshot adapters for generic framework integration
+mod snapshot_adapters;
+use snapshot_adapters::{
+    RockshrewSnapshotProvider, RockshrewSnapshotConsumer,
+    RockshrewSnapshotServer, RockshrewSnapshotClient
+};
+
 // Import the generic sync framework
 use rockshrew_sync::{MetashrewSync, SyncConfig, JsonRpcProvider, StorageAdapter, RuntimeAdapter};
 

@@ -38,10 +38,9 @@ mod snapshot;
 use snapshot::{SnapshotConfig, SnapshotManager};
 
 // Import the generic sync framework
-use rockshrew_sync::{MetashrewSync, SyncConfig, JsonRpcProvider, StorageAdapter};
+use rockshrew_sync::{MetashrewSync, SyncConfig, JsonRpcProvider, StorageAdapter, RuntimeAdapter};
 
 const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
-static CURRENT_HEIGHT: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -83,6 +82,11 @@ struct Args {
 #[derive(Clone)]
 struct AppState {
     sync_engine: Arc<RwLock<MetashrewSync<BitcoinRpcAdapter, RocksDBStorageAdapter, MetashrewRuntimeAdapter>>>,
+    // Direct access to current height to avoid lock contention
+    current_height: Arc<AtomicU32>,
+    // Direct access to storage and runtime to avoid sync engine lock contention
+    storage: Arc<RwLock<RocksDBStorageAdapter>>,
+    runtime: Arc<RwLock<MetashrewRuntimeAdapter>>,
 }
 
 // JSON-RPC request structure
@@ -232,7 +236,10 @@ async fn handle_jsonrpc(
         };
 
         let height = match &body.params[2] {
-            Value::String(s) if s == "latest" => CURRENT_HEIGHT.load(Ordering::SeqCst),
+            Value::String(s) if s == "latest" => {
+                let current_height = state.current_height.load(Ordering::SeqCst);
+                current_height.saturating_sub(1) // Same logic as sync engine
+            },
             Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
             _ => {
                 return Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -247,11 +254,32 @@ async fn handle_jsonrpc(
             }
         };
 
-        // Use the generic sync framework's JSON-RPC interface
-        match state.sync_engine.read().await.metashrew_view(view_name, input_hex, height.to_string()).await {
+        // Use direct runtime access to avoid lock contention
+        let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
+            Ok(data) => data,
+            Err(_) => {
+                return Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid hex input data".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
+        };
+        
+        let call = rockshrew_sync::ViewCall {
+            function_name: view_name,
+            input_data,
+            height,
+        };
+        
+        match state.runtime.read().await.execute_view(call).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
-                result,
+                result: format!("0x{}", hex::encode(result.data)),
                 jsonrpc: "2.0".to_string(),
             })),
             Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -325,7 +353,10 @@ async fn handle_jsonrpc(
         };
 
         let height = match &body.params[3] {
-            Value::String(s) if s == "latest" => CURRENT_HEIGHT.load(Ordering::SeqCst),
+            Value::String(s) if s == "latest" => {
+                let current_height = state.current_height.load(Ordering::SeqCst);
+                current_height.saturating_sub(1) // Same logic as sync engine
+            },
             Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
             _ => {
                 return Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -340,11 +371,48 @@ async fn handle_jsonrpc(
             }
         };
 
-        // Use the generic sync framework's JSON-RPC interface
-        match state.sync_engine.read().await.metashrew_preview(block_hex, view_name, input_hex, height.to_string()).await {
+        // Use direct runtime access to avoid lock contention
+        let block_data = match hex::decode(block_hex.trim_start_matches("0x")) {
+            Ok(data) => data,
+            Err(_) => {
+                return Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid hex block data".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
+        };
+        
+        let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
+            Ok(data) => data,
+            Err(_) => {
+                return Ok(HttpResponse::Ok().json(JsonRpcError {
+                    id: body.id,
+                    error: JsonRpcErrorObject {
+                        code: -32602,
+                        message: "Invalid hex input data".to_string(),
+                        data: None,
+                    },
+                    jsonrpc: "2.0".to_string(),
+                }))
+            }
+        };
+        
+        let call = rockshrew_sync::PreviewCall {
+            block_data,
+            function_name: view_name,
+            input_data,
+            height,
+        };
+        
+        match state.runtime.read().await.execute_preview(call).await {
             Ok(result) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
-                result,
+                result: format!("0x{}", hex::encode(result.data)),
                 jsonrpc: "2.0".to_string(),
             })),
             Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -358,23 +426,14 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_height" {
-        // Use the generic sync framework's JSON-RPC interface
-        match state.sync_engine.read().await.metashrew_height().await {
-            Ok(height) => Ok(HttpResponse::Ok().json(serde_json::json!({
-                "id": body.id,
-                "result": height,
-                "jsonrpc": "2.0"
-            }))),
-            Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
-                id: body.id,
-                error: JsonRpcErrorObject {
-                    code: -32000,
-                    message: err.to_string(),
-                    data: None,
-                },
-                jsonrpc: "2.0".to_string(),
-            })),
-        }
+        // Use direct atomic access to avoid lock contention
+        let current_height = state.current_height.load(Ordering::SeqCst);
+        let height = current_height.saturating_sub(1); // Same logic as sync engine
+        Ok(HttpResponse::Ok().json(serde_json::json!({
+            "id": body.id,
+            "result": height,
+            "jsonrpc": "2.0"
+        })))
     } else if body.method == "metashrew_getblockhash" {
         if body.params.len() != 1 {
             return Ok(HttpResponse::Ok().json(JsonRpcError {
@@ -403,8 +462,8 @@ async fn handle_jsonrpc(
             }
         };
 
-        // Use the generic sync framework's storage adapter
-        match state.sync_engine.read().await.storage().read().await.get_block_hash(height).await {
+        // Use direct storage access to avoid lock contention
+        match state.storage.read().await.get_block_hash(height).await {
             Ok(Some(hash)) => Ok(HttpResponse::Ok().json(JsonRpcResult {
                 id: body.id,
                 result: format!("0x{}", hex::encode(hash)),
@@ -430,32 +489,36 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_stateroot" {
-        let height = match &body.params[0] {
-            Value::String(s) if s == "latest" => {
-                // Get the current height from the sync engine
-                match state.sync_engine.read().await.metashrew_height().await {
-                    Ok(h) => h,
-                    Err(_) => 0,
+        let height = if body.params.is_empty() {
+            // Default to latest height if no params provided
+            let current_height = state.current_height.load(Ordering::SeqCst);
+            current_height.saturating_sub(1) // Same logic as sync engine
+        } else {
+            match &body.params[0] {
+                Value::String(s) if s == "latest" => {
+                    // Use direct atomic access to avoid lock contention
+                    let current_height = state.current_height.load(Ordering::SeqCst);
+                    current_height.saturating_sub(1) // Same logic as sync engine
+                },
+                Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
+                _ => {
+                    return Ok(HttpResponse::Ok().json(JsonRpcError {
+                        id: body.id,
+                        error: JsonRpcErrorObject {
+                            code: -32602,
+                            message: "Invalid params: height must be a number or 'latest'".to_string(),
+                            data: None,
+                        },
+                        jsonrpc: "2.0".to_string(),
+                    }))
                 }
-            },
-            Value::Number(n) => n.as_u64().unwrap_or(0) as u32,
-            _ => {
-                return Ok(HttpResponse::Ok().json(JsonRpcError {
-                    id: body.id,
-                    error: JsonRpcErrorObject {
-                        code: -32602,
-                        message: "Invalid params: height must be a number or 'latest'".to_string(),
-                        data: None,
-                    },
-                    jsonrpc: "2.0".to_string(),
-                }))
             }
         };
 
         info!("metashrew_stateroot called with height: {}", height);
 
-        // Use the generic sync framework's storage adapter
-        match state.sync_engine.read().await.storage().read().await.get_state_root(height).await {
+        // Use direct storage access to avoid lock contention
+        match state.storage.read().await.get_state_root(height).await {
             Ok(Some(root)) => {
                 info!("Successfully retrieved state root for height {}: 0x{}", height, hex::encode(&root));
                 Ok(HttpResponse::Ok().json(JsonRpcResult {
@@ -490,13 +553,22 @@ async fn handle_jsonrpc(
             },
         }
     } else if body.method == "metashrew_snapshot" {
-        // Use the generic sync framework to get snapshot information
-        match state.sync_engine.read().await.metashrew_snapshot().await {
-            Ok(snapshot_info) => Ok(HttpResponse::Ok().json(JsonRpcResult {
-                id: body.id,
-                result: snapshot_info.to_string(),
-                jsonrpc: "2.0".to_string(),
-            })),
+        // Use direct storage access to avoid lock contention
+        match state.storage.read().await.get_stats().await {
+            Ok(stats) => {
+                let snapshot_info = serde_json::json!({
+                    "enabled": true,
+                    "current_height": state.current_height.load(Ordering::SeqCst),
+                    "indexed_height": stats.indexed_height,
+                    "total_entries": stats.total_entries,
+                    "storage_size_bytes": stats.storage_size_bytes
+                });
+                Ok(HttpResponse::Ok().json(JsonRpcResult {
+                    id: body.id,
+                    result: snapshot_info.to_string(),
+                    jsonrpc: "2.0".to_string(),
+                }))
+            },
             Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
                 id: body.id,
                 error: JsonRpcErrorObject {
@@ -677,9 +749,29 @@ async fn main() -> Result<()> {
         sync_config,
     )));
     
+    // Get reference to current height for direct access
+    let current_height = {
+        let sync_guard = sync_engine.read().await;
+        sync_guard.current_height.clone()
+    };
+    
+    // Get direct references to storage and runtime to avoid lock contention
+    let storage_ref = {
+        let sync_guard = sync_engine.read().await;
+        sync_guard.storage().clone()
+    };
+    
+    let runtime_ref = {
+        let sync_guard = sync_engine.read().await;
+        sync_guard.runtime().clone()
+    };
+    
     // Create app state for JSON-RPC server
     let app_state = web::Data::new(AppState {
         sync_engine: sync_engine.clone(),
+        current_height,
+        storage: storage_ref,
+        runtime: runtime_ref,
     });
     
     // Start the indexer in a separate task using the generic sync framework

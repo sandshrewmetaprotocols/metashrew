@@ -145,8 +145,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Find the closest height less than or equal to the requested height
         let mut target_height = height;
         
-        while target_height > 0 {
-            let root_key = format!("{}:{}", SMT_ROOT_PREFIX, target_height).into_bytes();
+        loop {
+            let root_key = format!("{}{}", SMT_ROOT_PREFIX, target_height).into_bytes();
             if let Some(root_data) = self.storage.get_immutable(&root_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 if root_data.len() == 32 {
                     let mut root = [0u8; 32];
@@ -154,11 +154,16 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                     return Ok(root);
                 }
             }
+            
+            // If we've reached height 0 and found nothing, return error
+            if target_height == 0 {
+                break;
+            }
             target_height -= 1;
         }
         
-        // If no root found, return the default (empty) root
-        Ok(EMPTY_NODE_HASH)
+        // If no root found, return an error instead of empty hash
+        Err(anyhow!("No state root found for height {} or any previous height", height))
     }
 
     /// Get a node from the database
@@ -294,7 +299,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             updates.push((node_key, Self::serialize_node(&leaf_node)));
             
             // The new root is the leaf hash
-            let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+            let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
             updates.push((root_key, leaf_hash.to_vec()));
             
             return Ok(updates);
@@ -352,7 +357,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         
         // 5. Update the root
         let new_root = new_nodes.last().unwrap().1;
-        let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+        let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         updates.push((root_key, new_root.to_vec()));
         
         Ok(updates)
@@ -575,8 +580,13 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     
     /// Calculate and store the SMT state root for a specific height
     pub fn calculate_and_store_state_root(&mut self, height: u32) -> Result<[u8; 32]> {
-        let prev_height = if height > 0 { height - 1 } else { 0 };
-        let prev_root = self.get_smt_root_at_height(prev_height)?;
+        let prev_root = if height > 0 {
+            // For heights > 0, get the previous state root
+            self.get_smt_root_at_height(height - 1)?
+        } else {
+            // For height 0, start with empty root
+            EMPTY_NODE_HASH
+        };
         
         // Get all keys that were updated at this height
         let updated_keys = self.get_keys_at_height(height)?;
@@ -585,7 +595,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         
         if updated_keys.is_empty() {
             // No updates at this height, return previous root
-            let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+            let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
             self.storage.put(&root_key, &prev_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             println!("DEBUG: No updates at height {}, using previous root: {}", height, hex::encode(prev_root));
             return Ok(prev_root);
@@ -628,7 +638,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let new_root = self.compute_smt_root_from_state(&current_state)?;
         
         // Store the new root
-        let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
+        let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         self.storage.put(&root_key, &new_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         
         println!("DEBUG: Calculated state root for height {}: {}", height, hex::encode(new_root));
@@ -666,7 +676,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     /// Get the current state root (most recent)
     pub fn get_current_state_root(&self) -> Result<[u8; 32]> {
         // Find the highest height with a stored root
-        let prefix = format!("{}:", SMT_ROOT_PREFIX);
+        let prefix = SMT_ROOT_PREFIX.to_string();
         
         // Get all keys with this prefix and find the highest height
         let mut highest_height = None;

@@ -25,7 +25,7 @@ where
     runtime: Arc<RwLock<R>>,
     config: SyncConfig,
     is_running: Arc<AtomicBool>,
-    current_height: Arc<AtomicU32>,
+    pub current_height: Arc<AtomicU32>,
     last_block_time: Arc<RwLock<Option<SystemTime>>>,
     blocks_processed: Arc<AtomicU32>,
 }
@@ -279,6 +279,7 @@ where
         ProcessingClone {
             storage: self.storage.clone(),
             runtime: self.runtime.clone(),
+            current_height: self.current_height.clone(),
         }
     }
 }
@@ -291,6 +292,7 @@ where
 {
     storage: Arc<RwLock<S>>,
     runtime: Arc<RwLock<R>>,
+    current_height: Arc<AtomicU32>,
 }
 
 impl<S, R> ProcessingClone<S, R>
@@ -321,6 +323,9 @@ where
             storage.set_indexed_height(height).await?;
             storage.store_state_root(height, &state_root).await?;
         }
+        
+        // Update current height atomic (this was missing!)
+        self.current_height.store(height + 1, Ordering::SeqCst);
         
         Ok(())
     }

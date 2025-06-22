@@ -73,6 +73,11 @@ pub trait KeyValueStoreLike {
     fn get_height(&self) -> u32 {
         0 // Default implementation returns 0
     }
+    
+    /// Create an isolated copy for preview operations (default implementation just clones)
+    fn create_isolated_copy(&self) -> Self where Self: Clone {
+        self.clone()
+    }
 }
 
 /// Type definition for key-value tracker function

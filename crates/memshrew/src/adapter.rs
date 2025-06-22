@@ -43,6 +43,15 @@ impl MemStoreAdapter {
     pub fn is_empty(&self) -> bool {
         self.db.lock().unwrap().is_empty()
     }
+    
+    /// Create a deep copy with isolated data (useful for preview operations)
+    pub fn deep_copy(&self) -> Self {
+        let data = self.get_all_data();
+        Self {
+            db: Arc::new(Mutex::new(data)),
+            height: self.height,
+        }
+    }
 }
 
 pub struct MemStoreBatch {
@@ -182,6 +191,10 @@ impl KeyValueStoreLike for MemStoreAdapter {
     fn track_kv_update(&mut self, _key: Vec<u8>, _value: Vec<u8>) {
         // In-memory implementation doesn't need tracking by default
         // This can be extended if needed for testing purposes
+    }
+    
+    fn create_isolated_copy(&self) -> Self {
+        self.deep_copy()
     }
 }
 

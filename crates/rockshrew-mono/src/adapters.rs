@@ -255,7 +255,8 @@ impl StorageAdapter for RocksDBStorageAdapter {
     }
     
     async fn store_block_hash(&self, height: u32, hash: &[u8]) -> SyncResult<()> {
-        let blockhash_key = format!("height-to-hash/{}", height).into_bytes();
+        // Use the same key format as the constant in main.rs
+        let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
         debug!("Storing blockhash for height {} with key: {}", height, hex::encode(&blockhash_key));
         self.db.put(&blockhash_key, hash)
             .map_err(|e| SyncError::Storage(format!("Failed to store blockhash: {}", e)))?;
@@ -264,7 +265,8 @@ impl StorageAdapter for RocksDBStorageAdapter {
     }
     
     async fn get_block_hash(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        let blockhash_key = format!("height-to-hash/{}", height).into_bytes();
+        // Use the same key format as the constant in main.rs
+        let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
         debug!("Looking up blockhash for height {} with key: {}", height, hex::encode(&blockhash_key));
         
         match self.db.get(&blockhash_key) {
@@ -320,7 +322,7 @@ impl StorageAdapter for RocksDBStorageAdapter {
         
         // Remove blockhashes for heights > target_height
         for h in (height + 1)..=current_height {
-            let blockhash_key = format!("height-to-hash/{}", h).into_bytes();
+            let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", h).into_bytes();
             if let Err(e) = self.db.delete(&blockhash_key) {
                 warn!("Failed to delete blockhash for height {}: {}", h, e);
             } else {

@@ -20,6 +20,9 @@ pub mod bst_verification_test;
 pub mod reorg_focused_test;
 pub mod surface_api_test;
 pub mod state_root_debug_test;
+pub mod stateroot_jsonrpc_test;
+pub mod smt_key_debug_test;
+pub mod jsonrpc_height_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

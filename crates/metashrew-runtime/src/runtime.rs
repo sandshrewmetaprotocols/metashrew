@@ -184,14 +184,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         input: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
-        // Create preview context with wrapped DB
+        // Create preview context with isolated DB copy
         let preview_db = {
             let guard = self.context.lock().map_err(lock_err)?;
-            guard.db.clone()
+            guard.db.create_isolated_copy()
         };
 
-        // Create a new runtime with preview db
-        let mut runtime = Self::new_with_db(preview_db, height, self.async_engine.clone(), self.async_module.clone())?;
+        // Create a new runtime with preview db using the synchronous engine
+        let mut runtime = Self::new_with_db(preview_db, height, self.engine.clone(), self.module.clone())?;
         runtime.context.lock().map_err(lock_err)?.block = block.clone();
 
         // Execute block via _start to populate preview db
@@ -208,10 +208,39 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             Err(e) => return Err(e).context("Error executing _start in preview"),
         }
 
-        // Create new runtime just for the view using the same wrapped DB
+        // Create new runtime just for the view using the updated preview DB
         let mut view_runtime = {
             let context = runtime.context.lock().map_err(lock_err)?;
-            Self::new_with_db(context.db.clone(), height, self.async_engine.clone(), self.async_module.clone())?
+            // Create a view runtime with the updated database
+            let mut linker = Linker::<State>::new(&self.engine);
+            let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+            let view_context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+                MetashrewRuntimeContext<T>,
+            >::new(
+                MetashrewRuntimeContext::new(context.db.clone(), height, vec![]),
+            ));
+            
+            wasmstore.limiter(|state| &mut state.limits);
+            
+            Self::setup_linker(view_context.clone(), &mut linker)
+                .context("Failed to setup basic linker for preview view")?;
+            Self::setup_linker_view(view_context.clone(), &mut linker)
+                .context("Failed to setup view linker for preview")?;
+            linker.define_unknown_imports_as_traps(&self.module)?;
+            
+            let instance = linker.instantiate(&mut wasmstore, &self.module)
+                .context("Failed to instantiate WASM module for preview view")?;
+                
+            MetashrewRuntime {
+                wasmstore,
+                engine: self.engine.clone(),
+                async_engine: self.engine.clone(),
+                module: self.module.clone(),
+                async_module: self.module.clone(),
+                linker,
+                context: view_context,
+                instance,
+            }
         };
         
         // Set block to input for view
@@ -250,56 +279,42 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     }
     
     pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
-        let mut linker = Linker::<State>::new(&self.async_engine);
-        let mut wasmstore = Store::<State>::new(&self.async_engine, State::new());
-        
-        let context = {
+        let db = {
             let guard = self.context.lock().map_err(lock_err)?;
-            Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(guard.clone()))
+            guard.db.clone()
         };
         
-        {
-            let mut guard = context.lock().map_err(lock_err)?;
-            guard.height = height;
-            guard.block = input.clone();
-        }
+        // Create a new async runtime for the view
+        let mut view_runtime = Self::new_with_db_async(
+            db,
+            height,
+            self.async_engine.clone(),
+            self.async_module.clone()
+        ).await?;
+        
+        // Set the input as the block data
+        view_runtime.context.lock().map_err(lock_err)?.block = input.clone();
         
         // Set fuel for cooperative yielding
-        wasmstore.set_fuel(u64::MAX)?;
-        wasmstore.fuel_async_yield_interval(Some(10000))?;
+        view_runtime.wasmstore.set_fuel(u64::MAX)?;
+        view_runtime.wasmstore.fuel_async_yield_interval(Some(10000))?;
         
-        {
-            wasmstore.limiter(|state| &mut state.limits)
-        }
-        
-        {
-            Self::setup_linker(context.clone(), &mut linker)
-                .context("Failed to setup basic linker for view")?;
-            Self::setup_linker_view(context.clone(), &mut linker)
-                .context("Failed to setup view linker")?;
-            linker.define_unknown_imports_as_traps(&self.module)?;
-        }
-        
-        // Use async instantiation
-        let instance = linker.instantiate_async(&mut wasmstore, &self.async_module)
-            .await
-            .context("Failed to instantiate module for view")?;
-            
-        let func = instance
-            .get_typed_func::<(), i32>(&mut wasmstore, symbol.as_str())
+        // Execute view function
+        let func = view_runtime.instance
+            .get_typed_func::<(), i32>(&mut view_runtime.wasmstore, symbol.as_str())
             .with_context(|| format!("Failed to get view function '{}'", symbol))?;
             
         // Use async call
-        let result = func.call_async(&mut wasmstore, ())
+        let result = func.call_async(&mut view_runtime.wasmstore, ())
             .await
             .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
             
-        let memory = instance
-            .get_memory(&mut wasmstore, "memory")
+        let memory = view_runtime.instance
+            .get_memory(&mut view_runtime.wasmstore, "memory")
             .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
             
         Ok(read_arraybuffer_as_vec(
-            memory.data(&mut wasmstore),
+            memory.data(&mut view_runtime.wasmstore),
             result,
         ))
     }
@@ -701,6 +716,44 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker.define_unknown_imports_as_traps(&module)?;
         }
         let instance = linker.instantiate(&mut wasmstore, &module)
+            .context("Failed to instantiate WASM module")?;
+        Ok(MetashrewRuntime {
+            wasmstore,
+            engine: engine.clone(),
+            async_engine: engine,
+            module: module.clone(),
+            async_module: module.clone(),
+            linker,
+            context,
+            instance,
+        })
+    }
+
+    async fn new_with_db_async(
+        db: T,
+        height: u32,
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+    ) -> Result<MetashrewRuntime<T>> {
+        let mut linker = Linker::<State>::new(&engine);
+        let mut wasmstore = Store::<State>::new(&engine, State::new());
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+            MetashrewRuntimeContext<T>,
+        >::new(
+            MetashrewRuntimeContext::new(db, height, vec![]),
+        ));
+        {
+            wasmstore.limiter(|state| &mut state.limits)
+        }
+        {
+            Self::setup_linker(context.clone(), &mut linker)
+                .context("Failed to setup basic linker")?;
+            Self::setup_linker_view(context.clone(), &mut linker)
+                .context("Failed to setup view linker")?;
+            linker.define_unknown_imports_as_traps(&module)?;
+        }
+        let instance = linker.instantiate_async(&mut wasmstore, &module)
+            .await
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
             wasmstore,

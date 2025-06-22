@@ -3,7 +3,8 @@
 //! These tests verify end-to-end functionality including block processing,
 //! view function execution, and data consistency across multiple operations.
 
-use super::{TestConfig, block_builder::*};
+use super::TestConfig;
+use super::block_builder::ChainBuilder;
 use anyhow::Result;
 use memshrew_runtime::MemStoreAdapter;
 use metashrew_runtime::smt::SMTHelper;

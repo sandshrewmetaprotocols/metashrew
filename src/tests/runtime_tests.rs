@@ -3,7 +3,8 @@
 //! These tests verify the core functionality of the MetashrewRuntime using
 //! the memshrew in-memory adapter and metashrew-minimal WASM module.
 
-use super::{TestConfig, TestUtils, block_builder::*};
+use super::{TestConfig, TestUtils};
+use super::block_builder::ChainBuilder;
 use anyhow::Result;
 use memshrew_runtime::{MemStoreAdapter, MemStoreRuntime};
 use metashrew_runtime::smt::SMTHelper;

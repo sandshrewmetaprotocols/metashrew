@@ -1,8 +1,8 @@
 //! Debug test to investigate SMT key format and storage issues
 
-use super::{TestConfig, block_builder::*};
+use super::TestConfig;
 use anyhow::Result;
-use memshrew_runtime::{MemStoreAdapter, MemStoreRuntime, KeyValueStoreLike};
+use memshrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::smt::SMTHelper;
 use metashrew_support::utils;
 

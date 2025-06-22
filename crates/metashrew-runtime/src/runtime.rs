@@ -980,17 +980,17 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     let data = mem.data(&caller);
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                         Ok(v) => v,
-                        Err(e) => {
+                        Err(_e) => {
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
 
-                    let mut batch = T::Batch::default();
+                    let _batch = T::Batch::default();
 
                     let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
                         Ok(d) => d,
-                        Err(e) => {
+                        Err(_e) => {
                             caller.data_mut().had_failure = true;
                             return;
                         }
@@ -1031,7 +1031,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         // Store in BST structure instead of legacy approach
                         match smt_helper.bst_put(&k_owned, &v_owned, height) {
                             Ok(_) => {},
-                            Err(e) => {
+                            Err(_e) => {
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
@@ -1050,7 +1050,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             
                             // Calculate and store the state root for this height
                             match smt_helper.calculate_and_store_state_root(height) {
-                                Ok(state_root) => {},
+                                Ok(_state_root) => {},
                                 Err(e) => {
                                     println!("ERROR: WASM runtime failed to calculate state root for height {}: {:?}", height, e);
                                     caller.data_mut().had_failure = true;
@@ -1088,7 +1088,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-                    let height = match context_get.clone().lock() {
+                    let _height = match context_get.clone().lock() {
                         Ok(ctx) => ctx.height,
                         Err(_) => {
                             caller.data_mut().had_failure = true;
@@ -1190,8 +1190,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     
     /// Get all keys that were touched at a specific block height
     pub fn get_keys_touched_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        height: u32
+        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _height: u32
     ) -> Result<Vec<Vec<u8>>> {
         // For now, return an empty list
         // In a full implementation, we would scan the database for keys modified at this height
@@ -1200,9 +1200,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     
     /// Iterate backwards through all values of a key from most recent update
     pub fn iterate_key_backwards(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        key: &Vec<u8>,
-        from_height: u32
+        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _key: &Vec<u8>,
+        _from_height: u32
     ) -> Result<Vec<(u32, Vec<u8>)>> {
         // For now, return an empty list
         // In a full implementation, we would scan historical values for this key
@@ -1238,7 +1238,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     
     /// Perform a complete rollback to a specific height
     pub fn rollback_to_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         target_height: u32
     ) -> Result<()> {
         // For now, just log the rollback
@@ -1249,8 +1249,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     
     /// Get all heights at which a key was updated
     pub fn get_key_update_heights(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        key: &Vec<u8>
+        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _key: &Vec<u8>
     ) -> Result<Vec<u32>> {
         // For now, return an empty list
         // In a full implementation, we would scan for all heights where this key was modified

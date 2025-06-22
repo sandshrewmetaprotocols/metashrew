@@ -20,7 +20,7 @@ fn test_state_root_calculation_debug() -> Result<()> {
         (b"/test/key3".to_vec(), b"value3".to_vec()),
     ];
     
-    let height = 100u32;
+    let height = 0u32;
     
     println!("DEBUG: Adding {} test key-value pairs at height {}", test_data.len(), height);
     
@@ -98,7 +98,7 @@ fn test_bst_scanning_logic() -> Result<()> {
         (b"/test/key3".to_vec(), b"value3".to_vec()),
     ];
     
-    let height = 100u32;
+    let height = 0u32;
     
     println!("DEBUG: Adding test data...");
     

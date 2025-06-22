@@ -5,7 +5,6 @@
 use bitcoin::{Block, BlockHash, Transaction, TxIn, TxOut, OutPoint, Txid, ScriptBuf};
 use bitcoin::blockdata::block::Header as BlockHeader;
 use bitcoin::hashes::Hash;
-use metashrew_support::utils;
 use std::collections::VecDeque;
 use hex;
 

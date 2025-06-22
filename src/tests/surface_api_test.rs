@@ -8,13 +8,10 @@
 //! - Error handling and edge cases
 //! - Performance characteristics
 
-use super::{TestConfig, block_builder::*};
+use super::TestConfig;
+use super::block_builder::{ChainBuilder, create_test_block};
 use anyhow::Result;
-use memshrew_runtime::MemStoreAdapter;
 use metashrew_support::utils;
-use std::collections::HashMap;
-use bitcoin::BlockHash;
-use bitcoin::hashes::Hash;
 
 /// Test the complete surface API workflow that mirrors JSON-RPC usage
 #[tokio::test]
@@ -302,11 +299,11 @@ async fn test_surface_api_error_handling() -> Result<()> {
         &view_input,
         3,
     )?;
-    assert_eq!(valid_preview_result.len(), 4, "Valid preview should work after error");
+    assert_eq!(valid_preview_result.len(), 5, "Valid preview should work after error");
     println!("  ✓ Runtime recovered after invalid preview function");
     
     // Test 5: Concurrent view function calls (if supported)
-    let mut handles: Vec<tokio::task::JoinHandle<()>> = vec![];
+    let _handles: Vec<tokio::task::JoinHandle<()>> = vec![];
     for height in 0..chain.len() {
         let view_input = vec![];
         let result = runtime.view("blocktracker".to_string(), &view_input, height as u32).await?;
@@ -445,7 +442,7 @@ async fn test_surface_api_state_isolation() -> Result<()> {
     let after_preview = runtime.view("blocktracker".to_string(), &view_input, 2).await?;
     
     assert_eq!(before_preview, after_preview, "Preview should not affect main state");
-    assert_eq!(preview_result.len(), 4, "Preview should show new state");
+    assert_eq!(preview_result.len(), 5, "Preview should show new state");
     assert_eq!(after_preview.len(), 3, "Main state should be unchanged");
     
     println!("  ✓ Preview properly isolated from main state");

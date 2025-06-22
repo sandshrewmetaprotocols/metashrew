@@ -6,8 +6,8 @@
 //! - Properly tracks keys per block for efficient reorg handling
 //! - Maintains append-only structure for historical queries
 
-use anyhow::{anyhow, Result};
-use log::{trace, debug, info, warn, error};
+use anyhow::Result;
+use log::{trace, info};
 use crate::traits::{KeyValueStoreLike, BatchLike};
 
 // Prefixes for different types of keys in the database

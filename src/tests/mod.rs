@@ -11,17 +11,28 @@ use bitcoin::{Block, BlockHash, Transaction, TxIn, TxOut, OutPoint, Txid, Script
 use bitcoin::blockdata::block::Header as BlockHeader;
 use bitcoin::hashes::Hash;
 
+#[cfg(test)]
 pub mod integration_tests;
 pub mod block_builder;
+#[cfg(test)]
 pub mod runtime_tests;
+#[cfg(test)]
 pub mod comprehensive_e2e_test;
+#[cfg(test)]
 pub mod historical_view_test;
+#[cfg(test)]
 pub mod bst_verification_test;
+#[cfg(test)]
 pub mod reorg_focused_test;
+#[cfg(test)]
 pub mod surface_api_test;
+#[cfg(test)]
 pub mod state_root_debug_test;
+#[cfg(test)]
 pub mod stateroot_jsonrpc_test;
+#[cfg(test)]
 pub mod smt_key_debug_test;
+#[cfg(test)]
 pub mod jsonrpc_height_test;
 
 /// Test configuration and utilities

@@ -1,10 +1,7 @@
 //! Test to verify metashrew_height JSON-RPC endpoint works correctly
 
 use anyhow::Result;
-use metashrew_runtime::MetashrewRuntime;
-use memshrew_runtime::MemStoreAdapter;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[tokio::test]
 async fn test_metashrew_height_no_hanging() -> Result<()> {

@@ -3,9 +3,10 @@
 //! This test verifies that state roots are being calculated and stored correctly,
 //! and that they can be retrieved via the same mechanisms used by the JSON-RPC server.
 
-use super::{TestConfig, block_builder::*};
+use super::TestConfig;
+use super::block_builder::ChainBuilder;
 use anyhow::Result;
-use memshrew_runtime::{MemStoreAdapter, MemStoreRuntime, KeyValueStoreLike};
+use memshrew_runtime::KeyValueStoreLike;
 use metashrew_runtime::smt::SMTHelper;
 use metashrew_support::utils;
 

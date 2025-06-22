@@ -5,18 +5,21 @@
 
 use super::{TestConfig, TestUtils, block_builder::*};
 use anyhow::Result;
-use memshrew_runtime::{MemStoreRuntime, MemStoreAdapter, KeyValueStoreLike};
+use memshrew_runtime::{MemStoreAdapter, MemStoreRuntime};
+use metashrew_runtime::smt::SMTHelper;
 use metashrew_support::utils;
 
-// Helper functions for database access (bypassing problematic view functions)
-fn get_blocktracker(adapter: &MemStoreAdapter) -> Result<Vec<u8>> {
+// Helper functions for BST database access
+fn get_blocktracker_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8>> {
+    let smt_helper = SMTHelper::new(adapter.clone());
     let key = b"/blocktracker".to_vec();
-    Ok(adapter.get_immutable(&key)?.unwrap_or_default())
+    Ok(smt_helper.bst_get_at_height(&key, height)?.unwrap_or_default())
 }
 
-fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
+fn get_indexed_block_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
+    let smt_helper = SMTHelper::new(adapter.clone());
     let key = format!("/blocks/{}", height).into_bytes();
-    Ok(adapter.get_immutable(&key)?)
+    Ok(smt_helper.bst_get_at_height(&key, height)?)
 }
 
 #[tokio::test]
@@ -48,7 +51,7 @@ async fn test_basic_indexing_workflow() -> Result<()> {
     assert!(!adapter.is_empty());
     
     for height in 0..chain.len() {
-        let stored_block = get_indexed_block(adapter, height as u32)?;
+        let stored_block = get_indexed_block_bst(adapter, height as u32)?;
         assert!(stored_block.is_some(), "Block {} should be stored", height);
     }
     
@@ -77,11 +80,11 @@ async fn test_database_storage_and_retrieval() -> Result<()> {
     assert!(!adapter.is_empty());
     
     // Check block storage
-    let stored_block = get_indexed_block(adapter, 0)?;
+    let stored_block = get_indexed_block_bst(adapter, 0)?;
     assert!(stored_block.is_some(), "Block should be stored");
     
     // Check blocktracker storage
-    let blocktracker = get_blocktracker(adapter)?;
+    let blocktracker = get_blocktracker_bst(adapter, 0)?;
     assert!(!blocktracker.is_empty(), "Blocktracker should contain data");
     
     Ok(())
@@ -111,10 +114,10 @@ async fn test_blocktracker_accumulation() -> Result<()> {
         
         // Verify blocktracker grows with each block
         let adapter = &runtime.context.lock().unwrap().db;
-        let result = get_blocktracker(adapter)?;
+        let result = get_blocktracker_bst(adapter, height as u32)?;
         
-        // Blocktracker length = number of blocks + 4-byte height annotation
-        let expected_length = (height + 1) + 4;
+        // Blocktracker length = number of blocks processed
+        let expected_length = height + 1;
         assert_eq!(result.len(), expected_length,
                   "Blocktracker should grow with each block");
     }
@@ -147,22 +150,14 @@ async fn test_database_persistence() -> Result<()> {
     let new_adapter = MemStoreAdapter::with_data(initial_data);
     let _new_runtime = MemStoreRuntime::load(config.wasm_path.clone(), new_adapter)?;
     
-    // Verify the data is accessible in the new runtime using direct database access
-    let result = get_indexed_block(&_new_runtime.context.lock().unwrap().db, 0)?;
+    // Verify the data is accessible in the new runtime using BST access
+    let result = get_indexed_block_bst(&_new_runtime.context.lock().unwrap().db, 0)?;
     
     assert!(result.is_some(), "Block should be accessible in new runtime");
     
-    // metashrew-minimal stores blocks WITH height prefix (4 bytes) + block data
+    // BST stores the actual block data without height prefix
     let stored_data = result.unwrap();
-    assert_eq!(stored_data.len(), block_bytes.len() + 4, "Stored data should be 4 bytes longer (height prefix)");
-    
-    // Verify the height prefix (first 4 bytes should be height+1, so 1 for height 0)
-    let height_bytes = &stored_data[0..4];
-    assert_eq!(u32::from_le_bytes([height_bytes[0], height_bytes[1], height_bytes[2], height_bytes[3]]), 1);
-    
-    // The remaining data appears to be block-related but may not match exactly
-    let stored_block_data = &stored_data[4..];
-    assert_eq!(stored_block_data.len(), block_bytes.len(), "Block data portion should have same length");
+    assert_eq!(stored_data.len(), block_bytes.len(), "Stored data should match original block data");
     
     Ok(())
 }
@@ -206,11 +201,12 @@ async fn test_concurrent_view_calls() -> Result<()> {
     
     // Test concurrent database access instead of view calls
     let adapter = &runtime.context.lock().unwrap().db;
-    let expected_data = get_blocktracker(adapter)?;
+    let final_height = (chain.len() - 1) as u32;
+    let expected_data = get_blocktracker_bst(adapter, final_height)?;
     
     // Simulate multiple concurrent reads
     for _ in 0..5 {
-        let data = get_blocktracker(adapter)?;
+        let data = get_blocktracker_bst(adapter, final_height)?;
         assert_eq!(data.len(), expected_data.len(), "All database reads should return same data");
         assert_eq!(data, expected_data, "Data should be consistent");
     }

@@ -1,7 +1,7 @@
 //! Test to verify BST storage is working correctly
 
 use anyhow::Result;
-use memshrew_runtime::{MemStoreAdapter, MemStoreRuntime, KeyValueStoreLike};
+use memshrew_runtime::{MemStoreAdapter, MemStoreRuntime};
 use metashrew_support::utils;
 use std::path::PathBuf;
 use bitcoin::hashes::Hash;
@@ -58,13 +58,15 @@ async fn test_bst_storage_verification() -> Result<()> {
     let blocktracker_h0_again = runtime.view("blocktracker".to_string(), &view_input, 0).await?;
     assert_eq!(blocktracker_h0_again, blocktracker_h0, "Historical queries should be consistent");
     
-    // Check block data at height 0
-    let block_h0 = runtime.view("block".to_string(), &view_input, 0).await?;
+    // Check block data at height 0 using getblock view function
+    let height_0_input = vec![0, 0, 0, 0]; // Height 0 as little-endian bytes
+    let block_h0 = runtime.view("getblock".to_string(), &height_0_input, 0).await?;
     println!("Block at height 0: {} bytes", block_h0.len());
     assert!(block_h0.len() > 0, "Block data should exist at height 0");
     
-    // Check block data at height 1
-    let block_h1 = runtime.view("block".to_string(), &view_input, 1).await?;
+    // Check block data at height 1 using getblock view function
+    let height_1_input = vec![1, 0, 0, 0]; // Height 1 as little-endian bytes
+    let block_h1 = runtime.view("getblock".to_string(), &height_1_input, 1).await?;
     println!("Block at height 1: {} bytes", block_h1.len());
     assert!(block_h1.len() > 0, "Block data should exist at height 1");
     

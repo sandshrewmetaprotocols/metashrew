@@ -18,6 +18,10 @@ pub mod mock_bitcoind_test;
 pub mod comprehensive_e2e_test;
 pub mod bst_debug_test;
 pub mod view_function_debug;
+pub mod historical_view_test;
+pub mod bst_historical_debug;
+pub mod bst_storage_debug;
+pub mod bst_verification_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

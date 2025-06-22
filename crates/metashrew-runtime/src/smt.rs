@@ -435,6 +435,24 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(None)
     }
     
+    /// Get the current (most recent) value of a key across all heights
+    pub fn bst_get_current(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let heights = self.bst_get_heights_for_key(key)?;
+        
+        if heights.is_empty() {
+            return Ok(None);
+        }
+        
+        // Get the value at the highest height
+        let highest_height = *heights.last().unwrap();
+        let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), highest_height).into_bytes();
+        
+        match self.storage.get_immutable(&height_key).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(value) => Ok(Some(value)),
+            None => Ok(None),
+        }
+    }
+    
     /// Get all heights at which a key was updated
     pub fn bst_get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
         let mut heights = Vec::new();

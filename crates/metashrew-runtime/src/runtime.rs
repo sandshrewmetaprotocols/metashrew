@@ -5,34 +5,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 
-use crate::{RocksDBRuntimeAdapter, RocksDBBatch};
+use crate::traits::{BatchLike, KeyValueStoreLike};
+use crate::context::MetashrewRuntimeContext;
 use crate::smt::SMTHelper;
 use crate::optimized_bst::OptimizedBST;
-use crate::smt::SMTHelper;
-
-
-pub trait BatchLike {
-    fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V);
-    fn default() -> Self;
-}
-pub trait KeyValueStoreLike {
-    type Error: std::fmt::Debug;
-    type Batch: BatchLike;
-    fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error>;
-    fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
-    fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error>;
-    fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
-    where
-        K: AsRef<[u8]>,
-        V: AsRef<[u8]>;
-    
-    // Optional method to track key-value updates
-    // Default implementation does nothing
-    fn track_kv_update(&mut self, _key: Vec<u8>, _value: Vec<u8>) {
-        // Default implementation does nothing
-    }
-    fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error>;
-}
 
 
 pub const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
@@ -67,37 +43,9 @@ impl State {
     }
 }
 
-pub struct MetashrewRuntimeContext {
-    pub db: RocksDBRuntimeAdapter,
-    pub height: u32,
-    pub block: SerBlock,
-    pub state: u32,
-}
-
-impl Clone for MetashrewRuntimeContext {
-    fn clone(&self) -> Self {
-        return Self {
-            db: self.db.clone(),
-            height: self.height,
-            block: self.block.clone(),
-            state: self.state,
-        };
-    }
-}
-
-impl MetashrewRuntimeContext {
-    fn new(db: RocksDBRuntimeAdapter, height: u32, block: SerBlock) -> Self {
-        return Self {
-            db,
-            height,
-            block,
-            state: 0,
-        };
-    }
-}
-
-pub struct MetashrewRuntime {
-    pub context: Arc<Mutex<MetashrewRuntimeContext>>,
+/// Generic MetashrewRuntime that works with any storage backend
+pub struct MetashrewRuntime<T: KeyValueStoreLike> {
+    pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
     pub engine: wasmtime::Engine,
     pub async_engine: wasmtime::Engine,
     pub wasmstore: wasmtime::Store<State>,
@@ -182,8 +130,8 @@ pub fn to_usize_or_trap<'a, T: TryInto<usize>>(_caller: &mut Caller<'_, State>, 
     };
 }
 
-impl MetashrewRuntime {
-    pub fn load(indexer: PathBuf, store: RocksDBRuntimeAdapter) -> Result<Self> {
+impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
+    pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -207,8 +155,8 @@ impl MetashrewRuntime {
         let async_module = wasmtime::Module::from_file(&async_engine, indexer.into_os_string()).context("Failed to load WASM module")?;
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext>>::new(Mutex::<
-            MetashrewRuntimeContext,
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+            MetashrewRuntimeContext<T>,
         >::new(
             MetashrewRuntimeContext::new(store, 0, vec![]),
         ));
@@ -314,7 +262,7 @@ impl MetashrewRuntime {
         
         let context = {
             let guard = self.context.lock().map_err(lock_err)?;
-            Arc::<Mutex<MetashrewRuntimeContext>>::new(Mutex::new(guard.clone()))
+            Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(guard.clone()))
         };
         
         {
@@ -436,7 +384,7 @@ impl MetashrewRuntime {
     /// Get the value of a key at a specific block height using the legacy approach
     /// This function provides backward compatibility with the existing database structure
     pub fn db_value_at_block(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         height: u32
     ) -> Result<Vec<u8>> {
@@ -466,7 +414,7 @@ impl MetashrewRuntime {
     /// Get a value from the BST at a specific height using historical queries
     /// This is the proper way to query historical state for view functions
     pub fn bst_get_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         height: u32
     ) -> Result<Vec<u8>> {
@@ -477,7 +425,7 @@ impl MetashrewRuntime {
         };
         
         // Create SMTHelper to use BST functionality
-        let smt_helper = SMTHelper::new(db.clone());
+        let smt_helper = SMTHelper::new(db);
         
         // Use BST to get the value at the specific height
         match smt_helper.bst_get_at_height(key, height) {
@@ -488,7 +436,7 @@ impl MetashrewRuntime {
     }
     
     /// Create an empty update list for a specific block height
-    pub fn db_create_empty_update_list(batch: &mut RocksDBBatch, height: u32) -> Result<()> {
+    pub fn db_create_empty_update_list(batch: &mut T::Batch, height: u32) -> Result<()> {
         // Create a key for the update list
         let update_list_key = format!("updates:{}", height).into_bytes();
         
@@ -500,8 +448,8 @@ impl MetashrewRuntime {
     
     /// Append an annotated value to the database using the legacy approach
     pub fn db_append_annotated(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
-        batch: &mut RocksDBBatch,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        batch: &mut T::Batch,
         key: &Vec<u8>,
         value: &Vec<u8>,
         height: u32
@@ -515,8 +463,8 @@ impl MetashrewRuntime {
     
     /// Append a key to an update list
     pub fn db_append(
-        _context: Arc<Mutex<MetashrewRuntimeContext>>,
-        batch: &mut RocksDBBatch,
+        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        batch: &mut T::Batch,
         update_key: &Vec<u8>,
         key: &Vec<u8>
     ) -> Result<()> {
@@ -530,7 +478,7 @@ impl MetashrewRuntime {
     }
 
     pub fn setup_linker(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref_len = context.clone();
@@ -640,7 +588,7 @@ impl MetashrewRuntime {
     }
 
     pub fn setup_linker_view(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_get = context.clone();
@@ -650,7 +598,9 @@ impl MetashrewRuntime {
             .func_wrap(
                 "env",
                 "__flush",
-                move |_caller: Caller<'_, State>, _encoded: i32| {},
+                move |_caller: Caller<'_, State>, _encoded: i32| {
+                    println!("DEBUG: View __flush called with encoded: {}", _encoded);
+                },
             )
             .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
 
@@ -751,15 +701,15 @@ impl MetashrewRuntime {
     }
 
     fn new_with_db(
-        db: RocksDBRuntimeAdapter,
+        db: T,
         height: u32,
         engine: wasmtime::Engine,
         module: wasmtime::Module,
-    ) -> Result<MetashrewRuntime> {
+    ) -> Result<MetashrewRuntime<T>> {
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext>>::new(Mutex::<
-            MetashrewRuntimeContext,
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+            MetashrewRuntimeContext<T>,
         >::new(
             MetashrewRuntimeContext::new(db, height, vec![]),
         ));
@@ -767,9 +717,9 @@ impl MetashrewRuntime {
             wasmstore.limiter(|state| &mut state.limits)
         }
         {
-            MetashrewRuntime::setup_linker(context.clone(), &mut linker)
+            Self::setup_linker(context.clone(), &mut linker)
                 .context("Failed to setup basic linker")?;
-            MetashrewRuntime::setup_linker_preview(context.clone(), &mut linker)
+            Self::setup_linker_preview(context.clone(), &mut linker)
                 .context("Failed to setup preview linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
@@ -788,7 +738,7 @@ impl MetashrewRuntime {
     }
 
     fn setup_linker_preview(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref = context.clone();
@@ -800,6 +750,7 @@ impl MetashrewRuntime {
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
+                    println!("DEBUG: Preview __flush called with encoded: {}", encoded);
                     let height = match context_ref.clone().lock() {
                         Ok(ctx) => ctx.height,
                         Err(_) => {
@@ -857,7 +808,7 @@ impl MetashrewRuntime {
                                 };
 
                                 // Create an SMTHelper to work with the BST
-                                let smt_helper = SMTHelper::new(ctx.db.db.clone());
+                                let mut smt_helper = SMTHelper::new(ctx.db.clone());
                                 
                                 // Store in BST
                                 if let Err(_) = smt_helper.bst_put(&k_owned, &annotated, height) {
@@ -970,7 +921,7 @@ impl MetashrewRuntime {
     }
 
     pub fn setup_linker_indexer(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref = context.clone();
@@ -1007,21 +958,24 @@ impl MetashrewRuntime {
                     let data = mem.data(&caller);
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                         Ok(v) => v,
-                        Err(_) => {
+                        Err(e) => {
+                            println!("DEBUG: Failed to read arraybuffer: {:?}", e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
 
-                    let mut batch = RocksDBBatch::default();
-                    if let Err(_) = Self::db_create_empty_update_list(&mut batch, height as u32) {
-                        caller.data_mut().had_failure = true;
-                        return;
-                    }
+                    println!("DEBUG: Indexer __flush called with {} bytes at height {}", encoded_vec.len(), height);
+
+                    let mut batch = T::Batch::default();
 
                     let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
-                        Ok(d) => d,
-                        Err(_) => {
+                        Ok(d) => {
+                            println!("DEBUG: Successfully parsed KeyValueFlush with {} items", d.list.len());
+                            d
+                        },
+                        Err(e) => {
+                            println!("DEBUG: Failed to parse KeyValueFlush: {:?}", e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
@@ -1036,12 +990,14 @@ impl MetashrewRuntime {
                         }
                     };
 
-                    // Create an SMTHelper to work with the BST
-                    let smt_helper = SMTHelper::new(db.clone());
+                    // Create a mutable SMTHelper to work with the BST
+                    let mut smt_helper = SMTHelper::new(db);
 
                     for (k, v) in decoded.list.iter().tuples() {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
                         let v_owned = <Vec<u8> as Clone>::clone(v);
+
+                        println!("DEBUG: Processing key: {:?}, value: {} bytes", String::from_utf8_lossy(&k_owned), v_owned.len());
 
                         // Track key-value updates using the trait method
                         {
@@ -1060,9 +1016,15 @@ impl MetashrewRuntime {
                         }
 
                         // Store in BST structure instead of legacy approach
-                        if let Err(_) = smt_helper.bst_put(&k_owned, &v_owned, height) {
-                            caller.data_mut().had_failure = true;
-                            return;
+                        match smt_helper.bst_put(&k_owned, &v_owned, height) {
+                            Ok(_) => {
+                                println!("DEBUG: Successfully stored key in BST: {:?}", String::from_utf8_lossy(&k_owned));
+                            },
+                            Err(e) => {
+                                println!("DEBUG: Failed to store key in BST: {:?}, error: {:?}", String::from_utf8_lossy(&k_owned), e);
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
                         }
                     }
 
@@ -1122,10 +1084,28 @@ impl MetashrewRuntime {
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // Use BST for historical queries in indexer functions too
-                            match Self::bst_get_at_height(context_get.clone(), &key_vec, height) {
-                                Ok(lookup) => {
+                            // During indexing, get the current state (including values set in this block)
+                            // This allows the indexer to see values it just set in the same block
+                            let db = match context_get.clone().lock() {
+                                Ok(ctx) => ctx.db.clone(),
+                                Err(_) => {
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
+                            };
+                            
+                            let smt_helper = SMTHelper::new(db.clone());
+                            
+                            // Get the current value for this key (including current height)
+                            match smt_helper.bst_get_current(&key_vec) {
+                                Ok(Some(lookup)) => {
                                     if let Err(_) = mem.write(&mut caller, value as usize, lookup.as_slice()) {
+                                        caller.data_mut().had_failure = true;
+                                    }
+                                }
+                                Ok(None) => {
+                                    // Key not found, return empty
+                                    if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
                                         caller.data_mut().had_failure = true;
                                     }
                                 }
@@ -1167,16 +1147,21 @@ impl MetashrewRuntime {
 
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-                    let height = match context_get_len.clone().lock() {
-                        Ok(ctx) => ctx.height,
-                        Err(_) => return i32::MAX,
-                    };
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // Use BST for historical queries in indexer functions too
-                            match Self::bst_get_at_height(context_get_len.clone(), &key_vec, height) {
-                                Ok(value) => value.len() as i32,
+                            // During indexing, get the current state (including values set in this block)
+                            let db = match context_get_len.clone().lock() {
+                                Ok(ctx) => ctx.db.clone(),
+                                Err(_) => return i32::MAX,
+                            };
+                            
+                            let smt_helper = SMTHelper::new(db.clone());
+                            
+                            // Get the current value for this key (including current height)
+                            match smt_helper.bst_get_current(&key_vec) {
+                                Ok(Some(value)) => value.len() as i32,
+                                Ok(None) => 0,
                                 Err(_) => i32::MAX,
                             }
                         }
@@ -1191,7 +1176,7 @@ impl MetashrewRuntime {
     
     /// Get all keys that were touched at a specific block height
     pub fn get_keys_touched_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         height: u32
     ) -> Result<Vec<Vec<u8>>> {
         // For now, return an empty list
@@ -1201,7 +1186,7 @@ impl MetashrewRuntime {
     
     /// Iterate backwards through all values of a key from most recent update
     pub fn iterate_key_backwards(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         from_height: u32
     ) -> Result<Vec<(u32, Vec<u8>)>> {
@@ -1212,20 +1197,20 @@ impl MetashrewRuntime {
     
     /// Get the current state root (merkle root of entire state)
     pub fn get_current_state_root(
-        context: Arc<Mutex<MetashrewRuntimeContext>>
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>
     ) -> Result<[u8; 32]> {
         let db = {
             let guard = context.lock().map_err(lock_err)?;
             guard.db.clone()
         };
         
-        let smt_helper = SMTHelper::new(db.db.clone());
+        let smt_helper = SMTHelper::new(db);
         smt_helper.get_current_state_root()
     }
     
     /// Get the state root at a specific height
     pub fn get_state_root_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         height: u32
     ) -> Result<[u8; 32]> {
         let db = {
@@ -1233,13 +1218,13 @@ impl MetashrewRuntime {
             guard.db.clone()
         };
         
-        let smt_helper = SMTHelper::new(db.db.clone());
+        let smt_helper = SMTHelper::new(db);
         smt_helper.get_smt_root_at_height(height)
     }
     
     /// Perform a complete rollback to a specific height
     pub fn rollback_to_height(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         target_height: u32
     ) -> Result<()> {
         // For now, just log the rollback
@@ -1250,7 +1235,7 @@ impl MetashrewRuntime {
     
     /// Get all heights at which a key was updated
     pub fn get_key_update_heights(
-        context: Arc<Mutex<MetashrewRuntimeContext>>,
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>
     ) -> Result<Vec<u32>> {
         // For now, return an empty list

@@ -5,7 +5,7 @@ use anyhow::Result;
 // Core modules
 pub mod traits;
 pub mod context;
-pub mod generic_runtime;
+pub mod runtime;
 pub mod smt;
 pub mod proto;
 pub mod helpers;
@@ -14,7 +14,7 @@ pub mod optimized_bst;
 // Re-export core types and traits
 pub use traits::{BatchLike, KeyValueStoreLike, KVTrackerFn};
 pub use context::MetashrewRuntimeContext;
-pub use generic_runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
+pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
 
 // Re-export helper types
 pub use helpers::{BSTHelper, BSTStatistics};

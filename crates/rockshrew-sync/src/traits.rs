@@ -70,6 +70,10 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Process a block with the WASM indexer
     async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()>;
     
+    /// Process a block atomically, returning all database operations in a batch
+    /// This ensures atomicity by collecting all operations before committing
+    async fn process_block_atomic(&mut self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult>;
+    
     /// Execute a view function
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult>;
     
@@ -87,6 +91,19 @@ pub trait RuntimeAdapter: Send + Sync {
     
     /// Get runtime statistics
     async fn get_stats(&self) -> SyncResult<RuntimeStats>;
+}
+
+/// Result of atomic block processing containing all operations to be committed
+#[derive(Debug, Clone)]
+pub struct AtomicBlockResult {
+    /// The state root calculated after processing
+    pub state_root: Vec<u8>,
+    /// All database operations as a serialized batch
+    pub batch_data: Vec<u8>,
+    /// Block height that was processed
+    pub height: u32,
+    /// Block hash
+    pub block_hash: Vec<u8>,
 }
 
 /// Runtime statistics

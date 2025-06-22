@@ -14,7 +14,7 @@ use metashrew_runtime::{MetashrewRuntime, KeyValueStoreLike};
 use rockshrew_runtime::RocksDBRuntimeAdapter;
 use rockshrew_sync::{
     BitcoinNodeAdapter, BlockInfo, ChainTip, PreviewCall, RuntimeAdapter, RuntimeStats,
-    StorageAdapter, StorageStats, SyncError, SyncResult, ViewCall, ViewResult,
+    StorageAdapter, StorageStats, SyncError, SyncResult, ViewCall, ViewResult, AtomicBlockResult,
 };
 
 use crate::ssh_tunnel::{SshTunnel, SshTunnelConfig, TunneledResponse, make_request_with_tunnel};
@@ -488,6 +488,34 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                         Err(SyncError::Runtime(format!("Memory refresh failed: {}", refresh_err)))
                     }
                 }
+            }
+        }
+    }
+    
+    async fn process_block_atomic(&mut self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
+        info!("PROCESS_BLOCK_ATOMIC: Starting atomic processing for block {} ({} bytes)", height, block_data.len());
+        
+        // Get a lock on the runtime
+        let mut runtime = self.runtime.write().await;
+        
+        // Call the atomic processing method from metashrew-runtime
+        match runtime.process_block_atomic(height, block_data, block_hash).await {
+            Ok(metashrew_result) => {
+                info!("PROCESS_BLOCK_ATOMIC: Successfully processed block {} atomically", height);
+                
+                // Convert from metashrew_runtime::AtomicBlockResult to rockshrew_sync::AtomicBlockResult
+                let sync_result = AtomicBlockResult {
+                    state_root: metashrew_result.state_root,
+                    batch_data: metashrew_result.batch_data,
+                    height: metashrew_result.height,
+                    block_hash: metashrew_result.block_hash,
+                };
+                
+                Ok(sync_result)
+            },
+            Err(e) => {
+                warn!("PROCESS_BLOCK_ATOMIC: Atomic processing failed for block {}: {}", height, e);
+                Err(SyncError::Runtime(format!("Atomic block processing failed: {}", e)))
             }
         }
     }

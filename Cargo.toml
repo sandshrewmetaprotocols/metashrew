@@ -30,7 +30,13 @@ async-trait = "0.1"
 metashrew-runtime = { path = "crates/metashrew-runtime" }
 metashrew-support = { path = "crates/metashrew-support" }
 memshrew-runtime = { path = "crates/memshrew" }
+rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 rockshrew-sync = { path = "crates/rockshrew-sync", features = ["mock"] }
+
+# Database dependencies
+rocksdb = "0.21.0"
+tempfile = "3.8"
+sha2 = "0.10"
 
 # Bitcoin dependencies
 bitcoin = "0.32.6"

@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use metashrew_runtime::{MetashrewRuntime, KeyValueStoreLike};
 
 use crate::{
-    RuntimeAdapter, RuntimeStats, SyncError, SyncResult, ViewCall, ViewResult, PreviewCall,
+    RuntimeAdapter, RuntimeStats, SyncError, SyncResult, ViewCall, ViewResult, PreviewCall, AtomicBlockResult,
 };
 
 /// Real runtime adapter that wraps MetashrewRuntime
@@ -60,6 +60,45 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
         }
         
         Ok(())
+    }
+    
+    async fn process_block_atomic(&mut self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
+        let mut runtime = self.runtime.lock().await;
+        
+        // Set block data and height in the runtime context
+        {
+            let mut context = runtime.context.lock()
+                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+            context.block = block_data.to_vec();
+            context.height = height;
+            context.db.set_height(height);
+        }
+        
+        // Execute the runtime to collect all database operations
+        if let Err(e) = runtime.run() {
+            // Try to refresh memory and retry once
+            if let Ok(_) = runtime.refresh_memory() {
+                runtime.run()
+                    .map_err(|retry_e| SyncError::Runtime(format!("Runtime execution failed after retry: {}", retry_e)))?;
+            } else {
+                return Err(SyncError::Runtime(format!("Runtime execution failed: {}", e)));
+            }
+        }
+        
+        // Get the state root after processing
+        let state_root = runtime.calculate_state_root()
+            .map_err(|e| SyncError::Runtime(format!("Failed to calculate state root: {}", e)))?;
+        
+        // Get the accumulated database operations as a batch
+        let batch_data = runtime.get_accumulated_batch()
+            .map_err(|e| SyncError::Runtime(format!("Failed to get database batch: {}", e)))?;
+        
+        Ok(AtomicBlockResult {
+            state_root,
+            batch_data,
+            height,
+            block_hash: block_hash.to_vec(),
+        })
     }
     
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {

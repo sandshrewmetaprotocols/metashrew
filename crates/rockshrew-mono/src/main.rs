@@ -14,7 +14,6 @@ use rockshrew_runtime::RocksDBRuntimeAdapter;
 
 // Import our SMT helper module
 mod smt_helper;
-use smt_helper::SMTHelper;
 
 // Import our adapters module
 mod adapters;
@@ -24,14 +23,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio;
 use tokio::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 // Import our SSH tunneling module
 mod ssh_tunnel;
-use ssh_tunnel::{SshTunnelConfig, parse_daemon_rpc_url};
+use ssh_tunnel::parse_daemon_rpc_url;
 
 // Import our snapshot module
 mod snapshot;
@@ -39,15 +37,10 @@ use snapshot::{SnapshotConfig, SnapshotManager};
 
 // Import our snapshot adapters for generic framework integration
 mod snapshot_adapters;
-use snapshot_adapters::{
-    RockshrewSnapshotProvider, RockshrewSnapshotConsumer,
-    RockshrewSnapshotServer, RockshrewSnapshotClient
-};
 
 // Import the generic sync framework
-use rockshrew_sync::{MetashrewSync, SyncConfig, JsonRpcProvider, StorageAdapter, RuntimeAdapter};
+use rockshrew_sync::{MetashrewSync, SyncConfig, StorageAdapter, RuntimeAdapter};
 
-const HEIGHT_TO_HASH: &'static str = "/__INTERNAL/height-to-hash/";
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -88,7 +81,6 @@ struct Args {
 
 #[derive(Clone)]
 struct AppState {
-    sync_engine: Arc<RwLock<MetashrewSync<BitcoinRpcAdapter, RocksDBStorageAdapter, MetashrewRuntimeAdapter>>>,
     // Direct access to current height to avoid lock contention
     current_height: Arc<AtomicU32>,
     // Direct access to storage and runtime to avoid sync engine lock contention
@@ -775,7 +767,6 @@ async fn main() -> Result<()> {
     
     // Create app state for JSON-RPC server
     let app_state = web::Data::new(AppState {
-        sync_engine: sync_engine.clone(),
         current_height,
         storage: storage_ref,
         runtime: runtime_ref,

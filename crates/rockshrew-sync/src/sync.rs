@@ -81,52 +81,115 @@ where
             indexed_height
         };
         
+        // Handle start block state root initialization
+        if indexed_height == 0 && self.config.start_block > 0 {
+            // When starting at a non-zero block height, we need to initialize
+            // a state root for the previous height to avoid calculation failures
+            let prev_height = self.config.start_block.saturating_sub(1);
+            
+            // Check if we already have a state root for the previous height
+            if let Ok(None) = storage.get_state_root(prev_height).await {
+                drop(storage);
+                
+                // Initialize an empty state root for the previous height
+                // This prevents "No state root found for height X" errors
+                let empty_state_root = vec![0u8; 32]; // Empty/genesis state root
+                
+                let storage = self.storage.write().await;
+                storage.store_state_root(prev_height, &empty_state_root).await
+                    .map_err(|e| SyncError::Storage(format!("Failed to initialize state root for height {}: {}", prev_height, e)))?;
+                
+                info!("Initialized empty state root for height {} (start block initialization)", prev_height);
+                drop(storage);
+            } else {
+                drop(storage);
+            }
+        } else {
+            drop(storage);
+        }
+        
         self.current_height.store(start_height, Ordering::SeqCst);
         info!("Initialized sync engine at height {}", start_height);
         Ok(start_height)
     }
 
-    /// Process a single block
+    /// Process a single block atomically
     async fn process_block(&self, height: u32, block_data: Vec<u8>) -> SyncResult<()> {
-        info!("Processing block {} ({} bytes)", height, block_data.len());
+        info!("Processing block {} ({} bytes) atomically", height, block_data.len());
         
         // Get block hash before processing
         let block_hash = self.node.get_block_hash(height).await?;
         
-        // Process with runtime
-        {
+        // Try atomic processing first
+        let atomic_result = {
             let mut runtime = self.runtime.write().await;
-            runtime.process_block(height, &block_data).await
-                .map_err(|e| SyncError::BlockProcessing {
-                    height,
-                    message: e.to_string()
-                })?;
-        }
-        
-        // Get state root after processing
-        let state_root = {
-            let runtime = self.runtime.read().await;
-            runtime.get_state_root(height).await?
+            runtime.process_block_atomic(height, &block_data, &block_hash).await
         };
         
-        // Update storage with height, block hash, and state root
-        {
-            let storage = self.storage.write().await;
-            storage.set_indexed_height(height).await?;
-            storage.store_block_hash(height, &block_hash).await?;
-            storage.store_state_root(height, &state_root).await?;
+        match atomic_result {
+            Ok(result) => {
+                // Atomic processing succeeded - commit all operations at once
+                info!("Atomic block processing succeeded for height {}", height);
+                
+                // Update storage with all metadata atomically
+                {
+                    let storage = self.storage.write().await;
+                    storage.set_indexed_height(height).await?;
+                    storage.store_block_hash(height, &result.block_hash).await?;
+                    storage.store_state_root(height, &result.state_root).await?;
+                }
+                
+                // Update metrics
+                self.current_height.store(height + 1, Ordering::SeqCst);
+                self.blocks_processed.fetch_add(1, Ordering::SeqCst);
+                {
+                    let mut last_time = self.last_block_time.write().await;
+                    *last_time = Some(SystemTime::now());
+                }
+                
+                info!("Successfully processed block {} atomically with state root", height);
+                Ok(())
+            }
+            Err(_) => {
+                // Fallback to non-atomic processing
+                warn!("Atomic processing failed for height {}, falling back to non-atomic", height);
+                
+                // Process with runtime (non-atomic fallback)
+                {
+                    let mut runtime = self.runtime.write().await;
+                    runtime.process_block(height, &block_data).await
+                        .map_err(|e| SyncError::BlockProcessing {
+                            height,
+                            message: e.to_string()
+                        })?;
+                }
+                
+                // Get state root after processing
+                let state_root = {
+                    let runtime = self.runtime.read().await;
+                    runtime.get_state_root(height).await?
+                };
+                
+                // Update storage with height, block hash, and state root
+                {
+                    let storage = self.storage.write().await;
+                    storage.set_indexed_height(height).await?;
+                    storage.store_block_hash(height, &block_hash).await?;
+                    storage.store_state_root(height, &state_root).await?;
+                }
+                
+                // Update metrics
+                self.current_height.store(height + 1, Ordering::SeqCst);
+                self.blocks_processed.fetch_add(1, Ordering::SeqCst);
+                {
+                    let mut last_time = self.last_block_time.write().await;
+                    *last_time = Some(SystemTime::now());
+                }
+                
+                info!("Successfully processed block {} with fallback method", height);
+                Ok(())
+            }
         }
-        
-        // Update metrics
-        self.current_height.store(height + 1, Ordering::SeqCst);
-        self.blocks_processed.fetch_add(1, Ordering::SeqCst);
-        {
-            let mut last_time = self.last_block_time.write().await;
-            *last_time = Some(SystemTime::now());
-        }
-        
-        info!("Successfully processed block {} with state root and block hash", height);
-        Ok(())
     }
 
     /// Run the sync pipeline with parallel fetching and processing
@@ -310,34 +373,64 @@ where
         use bitcoin::hashes::{Hash, sha256d};
         let block_hash = sha256d::Hash::hash(&block_data).to_byte_array().to_vec();
         
-        // Process with runtime
-        {
+        // Try atomic processing first
+        let atomic_result = {
             let mut runtime = self.runtime.write().await;
-            runtime.process_block(height, &block_data).await
-                .map_err(|e| SyncError::BlockProcessing {
-                    height,
-                    message: e.to_string()
-                })?;
-        }
-        
-        // Get state root after processing
-        let state_root = {
-            let runtime = self.runtime.read().await;
-            runtime.get_state_root(height).await?
+            runtime.process_block_atomic(height, &block_data, &block_hash).await
         };
         
-        // Update storage with height, block hash, and state root
-        {
-            let storage = self.storage.write().await;
-            storage.set_indexed_height(height).await?;
-            storage.store_block_hash(height, &block_hash).await?;
-            storage.store_state_root(height, &state_root).await?;
+        match atomic_result {
+            Ok(result) => {
+                // Atomic processing succeeded
+                info!("Atomic block processing succeeded for height {} in pipeline", height);
+                
+                // Update storage with all metadata atomically
+                {
+                    let storage = self.storage.write().await;
+                    storage.set_indexed_height(height).await?;
+                    storage.store_block_hash(height, &result.block_hash).await?;
+                    storage.store_state_root(height, &result.state_root).await?;
+                }
+                
+                // Update current height atomic
+                self.current_height.store(height + 1, Ordering::SeqCst);
+                
+                Ok(())
+            }
+            Err(_) => {
+                // Fallback to non-atomic processing
+                warn!("Atomic processing failed for height {} in pipeline, falling back", height);
+                
+                // Process with runtime (non-atomic fallback)
+                {
+                    let mut runtime = self.runtime.write().await;
+                    runtime.process_block(height, &block_data).await
+                        .map_err(|e| SyncError::BlockProcessing {
+                            height,
+                            message: e.to_string()
+                        })?;
+                }
+                
+                // Get state root after processing
+                let state_root = {
+                    let runtime = self.runtime.read().await;
+                    runtime.get_state_root(height).await?
+                };
+                
+                // Update storage with height, block hash, and state root
+                {
+                    let storage = self.storage.write().await;
+                    storage.set_indexed_height(height).await?;
+                    storage.store_block_hash(height, &block_hash).await?;
+                    storage.store_state_root(height, &state_root).await?;
+                }
+                
+                // Update current height atomic
+                self.current_height.store(height + 1, Ordering::SeqCst);
+                
+                Ok(())
+            }
         }
-        
-        // Update current height atomic (this was missing!)
-        self.current_height.store(height + 1, Ordering::SeqCst);
-        
-        Ok(())
     }
 }
 

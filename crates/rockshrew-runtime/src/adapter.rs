@@ -68,6 +68,34 @@ impl RocksDBRuntimeAdapter {
             }
         }
     }
+
+    /// Create an atomic batch that includes all operations plus height update
+    /// This ensures atomicity for block processing
+    pub fn create_atomic_batch(&self, operations: RocksDBBatch) -> WriteBatch {
+        let mut atomic_batch = WriteBatch::default();
+        
+        // Add the height update
+        let height_key = TIP_HEIGHT_KEY.as_bytes().to_vec();
+        let height_bytes = (self.height + 1).to_le_bytes().to_vec();
+        atomic_batch.put(&to_labeled_key(&height_key), &height_bytes);
+        
+        // Track operations and add them to the atomic batch
+        let kv_tracker_clone = self.kv_tracker.clone();
+        let mut batch_tracker = BatchTracker {
+            inner_batch: &mut atomic_batch,
+            kv_tracker: kv_tracker_clone,
+        };
+        
+        // Use the batch tracker to capture key-value pairs for tracking
+        operations.0.iterate(&mut batch_tracker);
+        
+        atomic_batch
+    }
+
+    /// Write an atomic batch to the database
+    pub fn write_atomic_batch(&self, batch: WriteBatch) -> Result<(), rocksdb::Error> {
+        self.db.write(batch)
+    }
 }
 
 pub struct RocksDBBatch(pub WriteBatch);
@@ -123,23 +151,11 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     }
 
     fn write(&mut self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
-        let height_bytes: Vec<u8> = (self.height + 1).to_le_bytes().to_vec();
+        // Create atomic batch with height update
+        let atomic_batch = self.create_atomic_batch(batch);
         
-        let mut final_batch = WriteBatch::default();
-        final_batch.put(&to_labeled_key(&key_bytes), &height_bytes);
-        
-        // Create a batch tracker to capture key-value pairs for tracking
-        let kv_tracker_clone = self.kv_tracker.clone();
-        let mut batch_tracker = BatchTracker {
-            inner_batch: &mut final_batch,
-            kv_tracker: kv_tracker_clone,
-        };
-        
-        // Use the batch tracker to capture key-value pairs
-        batch.0.iterate(&mut batch_tracker);
-        
-        self.db.write(final_batch)
+        // Write atomically
+        self.write_atomic_batch(atomic_batch)
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {

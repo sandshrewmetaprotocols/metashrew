@@ -1,7 +1,7 @@
 //! Production implementations of snapshot traits for rockshrew-mono
 
 use async_trait::async_trait;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use log::{info, error, debug};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ use rockshrew_sync::{
     SyncError, SyncResult, StorageAdapter
 };
 
-use crate::snapshot::{SnapshotManager, SnapshotConfig, SnapshotMetadata, RepoIndex};
+use crate::snapshot::{SnapshotManager, SnapshotConfig, RepoIndex};
 use crate::adapters::RocksDBStorageAdapter;
 
 /// Production snapshot provider using the existing SnapshotManager
@@ -24,16 +24,19 @@ pub struct RockshrewSnapshotProvider {
 }
 
 impl RockshrewSnapshotProvider {
+    #[allow(dead_code)]
     pub fn new(config: SnapshotConfig, storage: Arc<RwLock<RocksDBStorageAdapter>>) -> Self {
         let manager = Arc::new(RwLock::new(SnapshotManager::new(config)));
         Self { manager, storage }
     }
 
+    #[allow(dead_code)]
     pub async fn initialize(&self, db_path: &Path) -> Result<()> {
         let mut manager = self.manager.write().await;
         manager.initialize_with_db(db_path).await
     }
 
+    #[allow(dead_code)]
     pub async fn set_current_wasm(&self, wasm_path: PathBuf) -> Result<()> {
         let mut manager = self.manager.write().await;
         manager.set_current_wasm(wasm_path)
@@ -188,7 +191,7 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
                 .is_dir() {
                 
                 if let Some(name) = entry.file_name().to_str() {
-                    if let Some((start, end)) = parse_interval_name(name) {
+                    if let Some((_start, end)) = parse_interval_name(name) {
                         intervals.push((end, entry.path()));
                     }
                 }
@@ -221,11 +224,14 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
 
 /// Production snapshot consumer using the existing SnapshotManager
 pub struct RockshrewSnapshotConsumer {
+    #[allow(dead_code)]
     manager: Arc<RwLock<SnapshotManager>>,
+    #[allow(dead_code)]
     storage: Arc<RwLock<RocksDBStorageAdapter>>,
 }
 
 impl RockshrewSnapshotConsumer {
+    #[allow(dead_code)]
     pub fn new(config: SnapshotConfig, storage: Arc<RwLock<RocksDBStorageAdapter>>) -> Self {
         let manager = Arc::new(RwLock::new(SnapshotManager::new(config)));
         Self { manager, storage }
@@ -295,6 +301,7 @@ pub struct RockshrewSnapshotServer {
 }
 
 impl RockshrewSnapshotServer {
+    #[allow(dead_code)]
     pub fn new(provider: RockshrewSnapshotProvider) -> Self {
         let status = SnapshotServerStatus {
             is_running: false,
@@ -371,11 +378,13 @@ impl SnapshotServer for RockshrewSnapshotServer {
 
 /// HTTP-based snapshot client implementation
 pub struct RockshrewSnapshotClient {
+    #[allow(dead_code)]
     base_url: String,
     client: reqwest::Client,
 }
 
 impl RockshrewSnapshotClient {
+    #[allow(dead_code)]
     pub fn new(base_url: String) -> Self {
         Self {
             base_url,

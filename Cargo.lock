@@ -2858,7 +2858,11 @@ dependencies = [
  "memshrew-runtime",
  "metashrew-runtime",
  "metashrew-support",
+ "rocksdb",
+ "rockshrew-runtime",
  "rockshrew-sync",
+ "sha2",
+ "tempfile",
  "tokio",
  "tokio-test",
 ]

@@ -29,6 +29,12 @@ pub mod surface_api_test;
 #[cfg(test)]
 pub mod state_root_debug_test;
 #[cfg(test)]
+pub mod state_root_production_test;
+#[cfg(test)]
+pub mod state_root_gap_test;
+#[cfg(test)]
+pub mod atomic_block_processing_test;
+#[cfg(test)]
 pub mod stateroot_jsonrpc_test;
 #[cfg(test)]
 pub mod smt_key_debug_test;
@@ -38,9 +44,12 @@ pub mod jsonrpc_height_test;
 pub mod jsonrpc_preview_test;
 #[cfg(test)]
 pub mod snapshot_repo_test;
+#[cfg(test)]
 pub mod simple_snapshot_test;
 #[cfg(test)]
 pub mod production_snapshot_test;
+#[cfg(test)]
+pub mod atomic_processing_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

@@ -11,6 +11,7 @@ use zstd;
 /// Represents a snapshot interval configuration
 #[derive(Debug, Clone)]
 pub struct SnapshotConfig {
+    #[allow(dead_code)]
     pub interval: u32,
     pub directory: PathBuf,
     pub enabled: bool,
@@ -65,6 +66,7 @@ impl SnapshotManager {
     }
 
     /// Initialize with database to set the last_snapshot_height correctly
+    #[allow(dead_code)]
     pub async fn initialize_with_db(&mut self, db_path: &std::path::Path) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
@@ -101,6 +103,7 @@ impl SnapshotManager {
     }
 
     /// Initialize the snapshot directory structure
+    #[allow(dead_code)]
     pub async fn initialize(&self) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
@@ -137,6 +140,7 @@ impl SnapshotManager {
     }
 
     /// Set the current WASM file being used
+    #[allow(dead_code)]
     pub fn set_current_wasm(&mut self, wasm_path: PathBuf) -> Result<()> {
         if !self.config.enabled {
             return Ok(());
@@ -167,6 +171,7 @@ impl SnapshotManager {
     }
 
     /// Track a key-value change for the current snapshot interval
+    #[allow(dead_code)]
     pub fn track_key_change(&mut self, key: Vec<u8>, value: Vec<u8>) {
         if self.config.enabled {
             self.key_changes.insert(key, value);
@@ -174,6 +179,7 @@ impl SnapshotManager {
     }
 
     /// Check if we should create a snapshot at the given height
+    #[allow(dead_code)]
     pub fn should_create_snapshot(&self, height: u32) -> bool {
         if !self.config.enabled || height == 0 {
             return false;
@@ -271,6 +277,7 @@ impl SnapshotManager {
     }
 
     /// Track database changes for a specific height range using BST approach
+    #[allow(dead_code)]
     pub async fn track_db_changes(&mut self, db: &rocksdb::DB, start_height: u32, end_height: u32) -> Result<()> {
         if !self.config.enabled {
             return Ok(());

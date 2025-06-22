@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use rockshrew_sync::{
-    MockSnapshotProvider, MockSnapshotServer, MockSnapshotClient, MockSnapshotConsumer, 
+    MockSnapshotProvider, MockSnapshotServer, MockSnapshotClient, MockSnapshotConsumer,
     MockFilesystem, SnapshotConfig, RepoConfig,
     SnapshotProvider, SnapshotConsumer, SnapshotServer, SnapshotClient,
 };

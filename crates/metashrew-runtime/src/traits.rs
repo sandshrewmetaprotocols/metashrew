@@ -82,3 +82,16 @@ pub trait KeyValueStoreLike {
 
 /// Type definition for key-value tracker function
 pub type KVTrackerFn = Box<dyn Fn(Vec<u8>, Vec<u8>) + Send + Sync>;
+
+/// Result of atomic block processing containing all operations and metadata
+#[derive(Debug, Clone)]
+pub struct AtomicBlockResult {
+    /// The calculated state root after block processing
+    pub state_root: Vec<u8>,
+    /// Serialized batch data containing all database operations
+    pub batch_data: Vec<u8>,
+    /// The block height that was processed
+    pub height: u32,
+    /// The block hash
+    pub block_hash: Vec<u8>,
+}

@@ -41,7 +41,7 @@ async fn test_stateroot_calculation_and_retrieval() -> Result<()> {
 
         // Verify state root was calculated and stored
         let adapter = &runtime.context.lock().unwrap().db;
-        let smt_helper = SMTHelper::new(adapter.clone());
+        let mut smt_helper = SMTHelper::new(adapter.clone());
 
         match smt_helper.get_smt_root_at_height(height) {
             Ok(state_root) => {
@@ -77,7 +77,7 @@ async fn test_stateroot_calculation_and_retrieval() -> Result<()> {
 
     for height in 0..chain.len() as u32 {
         // Simulate the same logic used in RocksDBStorageAdapter::get_state_root
-        let smt_helper = SMTHelper::new(adapter.clone());
+        let mut smt_helper = SMTHelper::new(adapter.clone());
 
         match smt_helper.get_smt_root_at_height(height) {
             Ok(root) => {
@@ -111,7 +111,7 @@ async fn test_stateroot_calculation_and_retrieval() -> Result<()> {
     let latest_height = (chain.len() as u32).saturating_sub(1);
     println!("Latest height calculated as: {}", latest_height);
 
-    let smt_helper = SMTHelper::new(adapter.clone());
+    let mut smt_helper = SMTHelper::new(adapter.clone());
     match smt_helper.get_smt_root_at_height(latest_height) {
         Ok(root) => {
             println!(
@@ -195,7 +195,7 @@ async fn test_stateroot_key_format_consistency() -> Result<()> {
     }
 
     // Verify SMTHelper can retrieve the state root
-    let smt_helper = SMTHelper::new(adapter.clone());
+    let mut smt_helper = SMTHelper::new(adapter.clone());
     match smt_helper.get_smt_root_at_height(height) {
         Ok(root) => {
             println!(
@@ -224,7 +224,7 @@ async fn test_empty_vs_missing_stateroot() -> Result<()> {
 
     // Test with a fresh database (no blocks processed)
     let adapter = &runtime.context.lock().unwrap().db;
-    let smt_helper = SMTHelper::new(adapter.clone());
+    let mut smt_helper = SMTHelper::new(adapter.clone());
 
     // Try to get state root for height 0 (should not exist)
     match smt_helper.get_smt_root_at_height(0) {

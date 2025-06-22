@@ -1035,6 +1035,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     // Create a mutable SMTHelper to work with the BST
                     let mut smt_helper = SMTHelper::new(db);
 
+                    // Collect all k/v pairs for batch processing
+                    let mut kv_pairs = Vec::new();
                     for (k, v) in decoded.list.iter().tuples() {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
                         let v_owned = <Vec<u8> as Clone>::clone(v);
@@ -1055,13 +1057,15 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             ctx_guard.db.track_kv_update(k_owned.clone(), v_owned.clone());
                         }
 
-                        // Store in BST structure instead of legacy approach
-                        match smt_helper.bst_put(&k_owned, &v_owned, height) {
-                            Ok(_) => {},
-                            Err(_e) => {
-                                caller.data_mut().had_failure = true;
-                                return;
-                            }
+                        kv_pairs.push((k_owned, v_owned));
+                    }
+
+                    // Batch process all k/v pairs for better performance
+                    match smt_helper.bst_put_batch(&kv_pairs, height) {
+                        Ok(_) => {},
+                        Err(_e) => {
+                            caller.data_mut().had_failure = true;
+                            return;
                         }
                     }
 
@@ -1261,7 +1265,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             guard.db.clone()
         };
 
-        let smt_helper = SMTHelper::new(db);
+        let mut smt_helper = SMTHelper::new(db);
         smt_helper.get_smt_root_at_height(height)
     }
 

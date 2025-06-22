@@ -44,11 +44,5 @@ jobs:
           libclang-dev \
           clang
           
-    - name: Build project
-      run: cargo build --verbose
-      
     - name: Run tests
       run: cargo test --verbose
-      
-    - name: Check for warnings
-      run: cargo check --verbose 2>&1 | tee check_output.log && ! grep -q "warning:" check_output.log

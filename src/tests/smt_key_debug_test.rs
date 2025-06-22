@@ -48,7 +48,7 @@ async fn test_smt_key_storage_and_retrieval() -> Result<()> {
     println!("=== TESTING SMT HELPER RETRIEVAL ===");
 
     // Test SMTHelper retrieval
-    let smt_helper = SMTHelper::new(adapter.clone());
+    let mut smt_helper = SMTHelper::new(adapter.clone());
 
     // Try to get state root using SMTHelper
     match smt_helper.get_smt_root_at_height(height) {

@@ -1,7 +1,7 @@
-use crate::traits::KeyValueStoreLike;
+use crate::traits::{BatchLike, KeyValueStoreLike};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 // Prefixes for different types of keys in the database
 pub const SMT_NODE_PREFIX: &str = "smt:node:";
@@ -31,11 +31,42 @@ pub enum SMTNode {
 /// Helper functions for SMT operations
 pub struct SMTHelper<T: KeyValueStoreLike> {
     pub storage: T,
+    // Cache for frequently accessed nodes and values
+    node_cache: HashMap<[u8; 32], Option<SMTNode>>,
+    value_cache: HashMap<Vec<u8>, Option<Vec<u8>>>,
+    state_root_cache: HashMap<u32, [u8; 32]>,
 }
 
 impl<T: KeyValueStoreLike> SMTHelper<T> {
     pub fn new(storage: T) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            node_cache: HashMap::new(),
+            value_cache: HashMap::new(),
+            state_root_cache: HashMap::new(),
+        }
+    }
+
+    /// Clear all caches (useful for memory management)
+    pub fn clear_caches(&mut self) {
+        self.node_cache.clear();
+        self.value_cache.clear();
+        self.state_root_cache.clear();
+    }
+
+    /// Clear caches if they exceed a certain size
+    pub fn manage_cache_size(&mut self) {
+        const MAX_CACHE_SIZE: usize = 10000;
+        
+        if self.node_cache.len() > MAX_CACHE_SIZE {
+            self.node_cache.clear();
+        }
+        if self.value_cache.len() > MAX_CACHE_SIZE {
+            self.value_cache.clear();
+        }
+        if self.state_root_cache.len() > MAX_CACHE_SIZE {
+            self.state_root_cache.clear();
+        }
     }
 
     /// Hash a key to get a fixed-length path
@@ -151,8 +182,50 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
     }
 
-    /// Get the SMT root for a specific height
-    pub fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
+    /// Get the SMT root for a specific height with caching
+    pub fn get_smt_root_at_height(&mut self, height: u32) -> Result<[u8; 32]> {
+        // Check cache first
+        if let Some(cached_root) = self.state_root_cache.get(&height) {
+            return Ok(*cached_root);
+        }
+
+        // Find the closest height less than or equal to the requested height
+        let mut target_height = height;
+
+        loop {
+            let root_key = format!("{}{}", SMT_ROOT_PREFIX, target_height).into_bytes();
+            if let Some(root_data) = self
+                .storage
+                .get_immutable(&root_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+            {
+                if root_data.len() == 32 {
+                    let mut root = [0u8; 32];
+                    root.copy_from_slice(&root_data);
+                    
+                    // Cache the result
+                    self.state_root_cache.insert(height, root);
+                    
+                    return Ok(root);
+                }
+            }
+
+            // If we've reached height 0 and found nothing, return error
+            if target_height == 0 {
+                break;
+            }
+            target_height -= 1;
+        }
+
+        // If no root found, return an error instead of empty hash
+        Err(anyhow!(
+            "No state root found for height {} or any previous height",
+            height
+        ))
+    }
+
+    /// Get the SMT root for a specific height without caching (for immutable operations)
+    pub fn get_smt_root_at_height_immutable(&self, height: u32) -> Result<[u8; 32]> {
         // Find the closest height less than or equal to the requested height
         let mut target_height = height;
 
@@ -184,8 +257,40 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         ))
     }
 
-    /// Get a node from the database
-    pub fn get_node(&self, node_hash: &[u8; 32]) -> Result<Option<SMTNode>> {
+    /// Get a node from the database with caching
+    pub fn get_node(&mut self, node_hash: &[u8; 32]) -> Result<Option<SMTNode>> {
+        if node_hash == &EMPTY_NODE_HASH {
+            return Ok(None);
+        }
+
+        // Check cache first
+        if let Some(cached_result) = self.node_cache.get(node_hash) {
+            return Ok(cached_result.clone());
+        }
+
+        let node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(node_hash)).into_bytes();
+        let result = match self
+            .storage
+            .get_immutable(&node_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            Some(node_data) => Some(Self::deserialize_node(&node_data)?),
+            None => None,
+        };
+
+        // Cache the result
+        self.node_cache.insert(*node_hash, result.clone());
+        
+        // Manage cache size periodically
+        if self.node_cache.len() % 1000 == 0 {
+            self.manage_cache_size();
+        }
+
+        Ok(result)
+    }
+
+    /// Get a node from the database without caching (for immutable operations)
+    pub fn get_node_immutable(&self, node_hash: &[u8; 32]) -> Result<Option<SMTNode>> {
         if node_hash == &EMPTY_NODE_HASH {
             return Ok(None);
         }
@@ -202,7 +307,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Get a leaf node from the SMT
-    pub fn get_smt_leaf(&self, root: [u8; 32], key_hash: [u8; 32]) -> Result<Option<SMTNode>> {
+    pub fn get_smt_leaf(&mut self, root: [u8; 32], key_hash: [u8; 32]) -> Result<Option<SMTNode>> {
         if root == EMPTY_NODE_HASH {
             return Ok(None);
         }
@@ -251,7 +356,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Collect all nodes along a path from root to leaf
     pub fn collect_path_nodes(
-        &self,
+        &mut self,
         root: [u8; 32],
         key_hash: [u8; 32],
     ) -> Result<Vec<(bool, SMTNode)>> {
@@ -303,7 +408,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Compute updates to the SMT for a key-value pair
     pub fn compute_smt_updates(
-        &self,
+        &mut self,
         key: &[u8],
         value: &[u8],
         current_root: [u8; 32],
@@ -407,7 +512,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Compute the new root after applying updates
     pub fn compute_new_root(
-        &self,
+        &mut self,
         current_root: [u8; 32],
         kvs: &[(Vec<u8>, Vec<u8>)],
         height: u32,
@@ -495,6 +600,36 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
         // Track that this key was updated at this height
         self.track_key_at_height(key, height)?;
+
+        Ok(())
+    }
+
+    /// Store multiple key-value pairs in the BST with height indexing using batch operations
+    pub fn bst_put_batch(&mut self, entries: &[(Vec<u8>, Vec<u8>)], height: u32) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        // Create a batch for all operations
+        let mut batch = self.storage.create_batch();
+
+        // Add all entries to the batch
+        for (key, value) in entries {
+            // Store the value with height annotation
+            let height_key =
+                format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
+            batch.put(height_key, value.clone());
+
+            // Track that this key was updated at this height
+            let keys_key =
+                format!("{}{}:{}", KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
+            batch.put(keys_key, Vec::new()); // Empty value, we just need the key
+        }
+
+        // Write the entire batch atomically
+        self.storage
+            .write_batch(batch)
+            .map_err(|e| anyhow::anyhow!("Batch write error: {:?}", e))?;
 
         Ok(())
     }

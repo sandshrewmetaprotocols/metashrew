@@ -23,6 +23,7 @@ use crate::{BlockCountResponse, BlockHashResponse, JsonRpcRequest};
 /// Bitcoin node adapter that connects to a real Bitcoin node via RPC
 #[derive(Clone)]
 pub struct BitcoinRpcAdapter {
+    client: Arc<reqwest::Client>,
     rpc_url: String,
     auth: Option<String>,
     bypass_ssl: bool,
@@ -37,7 +38,29 @@ impl BitcoinRpcAdapter {
         bypass_ssl: bool,
         tunnel_config: Option<SshTunnelConfig>,
     ) -> Self {
+        // Create optimized HTTP client with connection pooling
+        let client_builder = reqwest::ClientBuilder::new()
+            .timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Duration::from_secs(300)) // 5 minutes
+            .pool_max_idle_per_host(20) // Increased pool size
+            .tcp_keepalive(Duration::from_secs(60))
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .http2_keep_alive_timeout(Duration::from_secs(10));
+
+        let client = if bypass_ssl {
+            client_builder
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("Failed to create HTTP client")
+        } else {
+            client_builder
+                .build()
+                .expect("Failed to create HTTP client")
+        };
+
         Self {
+            client: Arc::new(client),
             rpc_url,
             auth,
             bypass_ssl,
@@ -53,7 +76,42 @@ impl BitcoinRpcAdapter {
         let max_delay = Duration::from_secs(16);
 
         for attempt in 0..max_retries {
-            // Get the existing tunnel if available
+            // For non-tunnel connections, use the persistent client directly
+            if self.tunnel_config.is_none() {
+                let mut request = self.client
+                    .post(&self.rpc_url)
+                    .header("Content-Type", "application/json")
+                    .body(body.clone());
+
+                // Add authentication if provided
+                if let Some(ref auth_str) = self.auth {
+                    if auth_str.contains(':') {
+                        // Basic auth
+                        let parts: Vec<&str> = auth_str.splitn(2, ':').collect();
+                        request = request.basic_auth(parts[0], Some(parts[1]));
+                    } else {
+                        // Bearer token
+                        request = request.bearer_auth(auth_str);
+                    }
+                }
+
+                match request.send().await {
+                    Ok(response) => {
+                        return Ok(TunneledResponse::new(response, None));
+                    }
+                    Err(e) => {
+                        error!("Direct HTTP request failed (attempt {}): {}", attempt + 1, e);
+                        if attempt == max_retries - 1 {
+                            return Err(anyhow!("Max retries exceeded: {}", e));
+                        }
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = std::cmp::min(max_delay, retry_delay * 2);
+                        continue;
+                    }
+                }
+            }
+
+            // For tunnel connections, use the existing tunnel logic
             let existing_tunnel = if self.tunnel_config.is_some() {
                 let active_tunnel = self.active_tunnel.lock().await;
                 active_tunnel.clone()
@@ -445,8 +503,8 @@ impl MetashrewRuntimeAdapter {
             // Get the memory size in bytes
             let memory_size = memory.data_size(&mut runtime.wasmstore);
 
-            // 1.75GB in bytes = 1.75 * 1024 * 1024 * 1024
-            let threshold_gb = 1.75;
+            // 1.0GB in bytes = 1.0 * 1024 * 1024 * 1024 (lowered from 1.75GB for better performance)
+            let threshold_gb = 1.0;
             let threshold_bytes = (threshold_gb * 1024.0 * 1024.0 * 1024.0) as usize;
 
             // Check if memory size is approaching the limit

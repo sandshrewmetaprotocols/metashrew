@@ -662,20 +662,34 @@ async fn main() -> Result<()> {
     );
 
     opts.create_if_missing(true);
-    opts.set_max_open_files(10000);
+    opts.set_max_open_files(20000); // Increased from 10000
     opts.set_use_fsync(false);
-    opts.set_bytes_per_sync(8388608); // 8MB
-    opts.optimize_for_point_lookup(1024);
-    opts.set_table_cache_num_shard_bits(6);
+    opts.set_bytes_per_sync(16 * 1024 * 1024); // Increased to 16MB
+    opts.optimize_for_point_lookup(2048); // Increased bloom filter bits
+    opts.set_table_cache_num_shard_bits(8); // Increased sharding
     opts.set_max_write_buffer_number(write_buffer_number);
-    opts.set_write_buffer_size(256 * 1024 * 1024);
-    opts.set_target_file_size_base(256 * 1024 * 1024);
-    opts.set_min_write_buffer_number_to_merge(2);
-    opts.set_level_zero_file_num_compaction_trigger(4);
-    opts.set_level_zero_slowdown_writes_trigger(20);
-    opts.set_level_zero_stop_writes_trigger(30);
-    opts.set_max_background_jobs(background_jobs);
+    opts.set_write_buffer_size(512 * 1024 * 1024); // Increased to 512MB
+    opts.set_target_file_size_base(512 * 1024 * 1024); // Increased to 512MB
+    opts.set_min_write_buffer_number_to_merge(4); // Increased from 2
+    opts.set_level_zero_file_num_compaction_trigger(8); // Increased from 4
+    opts.set_level_zero_slowdown_writes_trigger(32); // Increased from 20
+    opts.set_level_zero_stop_writes_trigger(48); // Increased from 30
+    opts.set_max_background_jobs(background_jobs * 2); // Doubled background jobs
     opts.set_disable_auto_compactions(false);
+    
+    // Additional optimizations for write-heavy workload
+    opts.set_compression_type(rocksdb::DBCompressionType::Lz4); // Fast compression
+    opts.set_level_compaction_dynamic_level_bytes(true); // Dynamic level sizing
+    opts.set_max_bytes_for_level_base(1024 * 1024 * 1024); // 1GB base level
+    opts.set_max_bytes_for_level_multiplier(8.0); // Aggressive level multiplier
+    opts.set_compaction_style(rocksdb::DBCompactionStyle::Level); // Level compaction
+    
+    // Optimize for batch writes
+    opts.set_allow_concurrent_memtable_write(true);
+    opts.set_enable_write_thread_adaptive_yield(true);
+    
+    // Memory optimization
+    opts.set_db_write_buffer_size(2 * 1024 * 1024 * 1024); // 2GB total write buffer
 
     let mut start_block = args.start_block.unwrap_or(0);
 

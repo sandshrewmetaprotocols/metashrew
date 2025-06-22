@@ -83,18 +83,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
     
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        // For now, generate a deterministic state root based on height
-        // In a full implementation, this would query the actual SMT state root
-        // from the runtime after block processing
-        let mut state_root = vec![0u8; 32];
-        let height_bytes = height.to_le_bytes();
-        
-        // Create a deterministic pattern based on height
-        for i in 0..32 {
-            state_root[i] = height_bytes[i % 4].wrapping_add((i as u8).wrapping_mul(7));
-        }
-        
-        Ok(state_root)
+        // This is a placeholder implementation for the generic adapter
+        // The actual implementation should query the SMT state root from storage
+        // For now, return an error to indicate that state root is not available
+        // This prevents false positives in block processing checks
+        Err(SyncError::Runtime(format!("State root not available for height {} in generic adapter", height)))
     }
     
     async fn refresh_memory(&mut self) -> SyncResult<()> {

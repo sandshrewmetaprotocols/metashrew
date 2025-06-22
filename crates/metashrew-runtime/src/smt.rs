@@ -30,7 +30,7 @@ pub enum SMTNode {
 
 /// Helper functions for SMT operations
 pub struct SMTHelper<T: KeyValueStoreLike> {
-    storage: T,
+    pub storage: T,
 }
 
 impl<T: KeyValueStoreLike> SMTHelper<T> {
@@ -581,24 +581,28 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Get all keys that were updated at this height
         let updated_keys = self.get_keys_at_height(height)?;
         
+        println!("DEBUG: State root calculation for height {}: found {} updated keys", height, updated_keys.len());
+        
         if updated_keys.is_empty() {
             // No updates at this height, return previous root
             let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
             self.storage.put(&root_key, &prev_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+            println!("DEBUG: No updates at height {}, using previous root: {}", height, hex::encode(prev_root));
             return Ok(prev_root);
         }
         
         // Build a map of all current key-value pairs for SMT calculation
         let mut current_state = BTreeMap::new();
         
-        // Get all keys that exist in the database up to this height
-        let prefix = format!("{}:", BST_HEIGHT_PREFIX);
-        
+        // Get all unique keys that exist in the database up to this height
+        let prefix = BST_HEIGHT_PREFIX.as_bytes();
         let mut all_keys = std::collections::HashSet::new();
-        // Get all keys with this prefix and extract original keys
-        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
+        
+        // Scan all BST entries to find unique keys
+        for (key, _) in self.storage.scan_prefix(prefix)? {
             let key_str = String::from_utf8_lossy(&key);
-            if let Some(rest) = key_str.strip_prefix(&prefix) {
+            if let Some(rest) = key_str.strip_prefix(BST_HEIGHT_PREFIX) {
+                // Format is: {hex_key}:{height}
                 if let Some(colon_pos) = rest.find(':') {
                     let hex_key = &rest[..colon_pos];
                     if let Ok(original_key) = hex::decode(hex_key) {
@@ -608,12 +612,17 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             }
         }
         
+        println!("DEBUG: Found {} unique keys in BST", all_keys.len());
+        
         // For each key, get its value at this height
         for key in all_keys {
             if let Ok(Some(value)) = self.bst_get_at_height(&key, height) {
-                current_state.insert(key, value);
+                current_state.insert(key.clone(), value);
+                println!("DEBUG: Added key to state: {} bytes", key.len());
             }
         }
+        
+        println!("DEBUG: Current state has {} key-value pairs", current_state.len());
         
         // Calculate the new SMT root based on current state
         let new_root = self.compute_smt_root_from_state(&current_state)?;
@@ -622,12 +631,15 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let root_key = format!("{}:{}", SMT_ROOT_PREFIX, height).into_bytes();
         self.storage.put(&root_key, &new_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         
+        println!("DEBUG: Calculated state root for height {}: {}", height, hex::encode(new_root));
+        
         Ok(new_root)
     }
     
     /// Compute SMT root from a complete state map
     fn compute_smt_root_from_state(&self, state: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<[u8; 32]> {
         if state.is_empty() {
+            println!("DEBUG: State is empty, returning empty node hash");
             return Ok(EMPTY_NODE_HASH);
         }
         
@@ -635,12 +647,20 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // In a production SMT, this would build the actual tree structure
         let mut hasher = Sha256::new();
         
+        // Add a salt to ensure we never get all zeros for non-empty state
+        hasher.update(b"metashrew_state_root_v1");
+        
         for (key, value) in state.iter() {
+            // Hash key length + key + value length + value for deterministic ordering
+            hasher.update(&(key.len() as u32).to_le_bytes());
             hasher.update(key);
+            hasher.update(&(value.len() as u32).to_le_bytes());
             hasher.update(value);
         }
         
-        Ok(hasher.finalize().into())
+        let result = hasher.finalize().into();
+        println!("DEBUG: Computed state root from {} entries: {}", state.len(), hex::encode(result));
+        Ok(result)
     }
     
     /// Get the current state root (most recent)

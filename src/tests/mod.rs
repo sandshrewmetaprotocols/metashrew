@@ -19,6 +19,7 @@ pub mod historical_view_test;
 pub mod bst_verification_test;
 pub mod reorg_focused_test;
 pub mod surface_api_test;
+pub mod state_root_debug_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

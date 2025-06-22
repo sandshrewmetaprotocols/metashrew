@@ -306,7 +306,7 @@ async fn test_surface_api_error_handling() -> Result<()> {
     println!("  ✓ Runtime recovered after invalid preview function");
     
     // Test 5: Concurrent view function calls (if supported)
-    let mut handles = vec![];
+    let mut handles: Vec<tokio::task::JoinHandle<()>> = vec![];
     for height in 0..chain.len() {
         let view_input = vec![];
         let result = runtime.view("blocktracker".to_string(), &view_input, height as u32).await?;

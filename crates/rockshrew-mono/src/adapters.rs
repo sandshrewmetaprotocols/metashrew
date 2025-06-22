@@ -9,7 +9,6 @@ use serde_json::{Number, Value};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tokio::time::sleep;
 
 use metashrew_runtime::{MetashrewRuntime, KeyValueStoreLike};
 use rockshrew_runtime::RocksDBRuntimeAdapter;
@@ -19,7 +18,6 @@ use rockshrew_sync::{
 };
 
 use crate::ssh_tunnel::{SshTunnel, SshTunnelConfig, TunneledResponse, make_request_with_tunnel};
-use crate::smt_helper::SMTHelper;
 use crate::{JsonRpcRequest, BlockCountResponse, BlockHashResponse};
 
 /// Bitcoin node adapter that connects to a real Bitcoin node via RPC
@@ -286,13 +284,21 @@ impl StorageAdapter for RocksDBStorageAdapter {
     }
     
     async fn store_state_root(&self, height: u32, root: &[u8]) -> SyncResult<()> {
-        let smt_helper = SMTHelper::new(self.db.clone());
-        smt_helper.store_smt_root_at_height(height, root)
+        // Use the generic SMT implementation with RocksDBRuntimeAdapter
+        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
+        let mut smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
+        
+        // Store the state root using the same format as the WASM runtime
+        let root_key = format!("smt:root:{}", height).into_bytes();
+        smt_helper.storage.put(&root_key, root)
             .map_err(|e| SyncError::Storage(format!("Failed to store state root: {}", e)))
     }
     
     async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        let smt_helper = SMTHelper::new(self.db.clone());
+        // Use the generic SMT implementation with RocksDBRuntimeAdapter
+        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
+        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
+        
         match smt_helper.get_smt_root_at_height(height) {
             Ok(root) => Ok(Some(root.to_vec())),
             Err(_) => Ok(None),
@@ -312,9 +318,6 @@ impl StorageAdapter for RocksDBStorageAdapter {
         
         info!("Rolling back from height {} to height {}", current_height, height);
         
-        // Create an SMTHelper instance for state root management
-        let smt_helper = SMTHelper::new(self.db.clone());
-        
         // Remove blockhashes for heights > target_height
         for h in (height + 1)..=current_height {
             let blockhash_key = format!("height-to-hash/{}", h).into_bytes();
@@ -325,9 +328,10 @@ impl StorageAdapter for RocksDBStorageAdapter {
             }
         }
         
-        // Remove state roots for heights > target_height
+        // Remove state roots for heights > target_height using the same format as WASM runtime
         for h in (height + 1)..=current_height {
-            if let Err(e) = smt_helper.delete_state_root_at_height(h) {
+            let root_key = format!("smt:root:{}", h).into_bytes();
+            if let Err(e) = self.db.delete(&root_key) {
                 warn!("Failed to delete state root for height {}: {}", h, e);
             } else {
                 debug!("Deleted state root for height {}", h);
@@ -435,7 +439,8 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
         }
         
         // Check if this block has already been processed by checking if we have a state root for this height
-        let smt_helper = SMTHelper::new(self.db.clone());
+        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
+        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
         let already_processed = smt_helper.get_smt_root_at_height(height).is_ok();
         
         if already_processed {
@@ -449,20 +454,16 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             Ok(_) => {
                 info!("RUNTIME_RUN: Successfully executed WASM for block {} (size: {} bytes)", height, block_size);
                 
-                // Calculate and store the state root
-                let new_root = match smt_helper.calculate_and_store_state_root(height) {
-                    Ok(root) => root,
-                    Err(e) => {
-                        error!("Failed to calculate state root: {}", e);
-                        [0u8; 32] // Use empty root if calculation fails
-                    }
-                };
-                
-                debug!("Stored state root for height {}: {}", height, hex::encode(&new_root));
+                // State root calculation is now handled inside the WASM runtime's __flush function
+                // This ensures the state root is calculated with access to all the key-value pairs
+                // that were just flushed, providing consistency with the test suite
+                debug!("State root calculation handled by WASM runtime for height {}", height);
                 Ok(())
             },
             Err(_e) => {
                 // Before retrying, check if the block was actually processed successfully
+                let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
+                let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
                 if smt_helper.get_smt_root_at_height(height).is_ok() {
                     info!("Block {} appears to have been processed despite WASM error, skipping retry", height);
                     return Ok(());
@@ -472,6 +473,8 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                 match runtime.refresh_memory() {
                     Ok(_) => {
                         // Check again if block was processed before retrying
+                        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
+                        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
                         if smt_helper.get_smt_root_at_height(height).is_ok() {
                             info!("Block {} was processed during memory refresh, skipping retry", height);
                             return Ok(());
@@ -483,10 +486,8 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                             Ok(_) => {
                                 info!("RUNTIME_RUN_RETRY: Successfully executed WASM for block {} after memory refresh (size: {} bytes)", height, block_size);
                                 
-                                // Calculate state root after retry
-                                if let Err(e) = smt_helper.calculate_and_store_state_root(height) {
-                                    error!("Failed to calculate state root after retry: {}", e);
-                                }
+                                // State root calculation is handled inside the WASM runtime's __flush function
+                                debug!("State root calculation handled by WASM runtime after retry for height {}", height);
                                 
                                 Ok(())
                             },
@@ -502,6 +503,15 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                     }
                 }
             }
+        }
+    }
+    
+    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
+        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
+        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
+        match smt_helper.get_smt_root_at_height(height) {
+            Ok(root) => Ok(root.to_vec()),
+            Err(e) => Err(SyncError::Runtime(format!("Failed to get state root for height {}: {}", height, e))),
         }
     }
     

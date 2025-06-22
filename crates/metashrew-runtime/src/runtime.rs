@@ -8,7 +8,6 @@ use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 use crate::traits::{BatchLike, KeyValueStoreLike};
 use crate::context::MetashrewRuntimeContext;
 use crate::smt::SMTHelper;
-use crate::optimized_bst::OptimizedBST;
 
 
 pub const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
@@ -23,7 +22,6 @@ fn try_into_vec<const N: usize>(bytes: [u8; N]) -> Result<Vec<u8>> {
 
 use crate::proto::metashrew::KeyValueFlush;
 
-type SerBlock = Vec<u8>;
 
 pub struct State {
     limits: StoreLimits,
@@ -105,12 +103,7 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     }
 }
 
-pub fn db_annotate_value(v: &Vec<u8>, block_height: u32) -> Result<Vec<u8>> {
-    let mut entry: Vec<u8> = v.clone();
-    let height = try_into_vec(block_height.to_le_bytes())?;
-    entry.extend(height);
-    Ok(entry)
-}
+// Legacy function removed - BST now handles height indexing directly
 
 pub fn to_signed_or_trap<'a, T: TryInto<i32>>(_caller: &mut Caller<'_, State>, v: T) -> i32 {
     return match <T as TryInto<i32>>::try_into(v) {
@@ -381,34 +374,15 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
     
-    /// Get the value of a key at a specific block height using the legacy approach
-    /// This function provides backward compatibility with the existing database structure
+    /// Get the value of a key at a specific block height using BST
+    /// This replaces the legacy annotated value approach
     pub fn db_value_at_block(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         height: u32
     ) -> Result<Vec<u8>> {
-        // Get the database adapter from the context
-        let db = {
-            let guard = context.lock().map_err(lock_err)?;
-            guard.db.clone()
-        };
-        
-        // For now, use the legacy approach with height annotation
-        // Try to get the value directly from the database
-        let labeled_key = crate::to_labeled_key(key);
-        
-        match db.get_immutable(&labeled_key).map_err(|e| anyhow!("Database error: {:?}", e))? {
-            Some(value) => {
-                // Remove height annotation if present (last 4 bytes)
-                if value.len() >= 4 {
-                    Ok(value[..value.len()-4].to_vec())
-                } else {
-                    Ok(value)
-                }
-            },
-            None => Ok(Vec::new())
-        }
+        // Use BST for historical queries - this is the unified approach
+        Self::bst_get_at_height(context, key, height)
     }
     
     /// Get a value from the BST at a specific height using historical queries
@@ -446,17 +420,20 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
     
-    /// Append an annotated value to the database using the legacy approach
-    pub fn db_append_annotated(
+    /// Store a value in the BST structure (replaces legacy annotated approach)
+    pub fn db_store_in_bst(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        batch: &mut T::Batch,
         key: &Vec<u8>,
         value: &Vec<u8>,
         height: u32
     ) -> Result<()> {
-        // For now, use the legacy approach with height annotation
-        let annotated_value = db_annotate_value(value, height)?;
-        batch.put(key, annotated_value);
+        let db = {
+            let guard = context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+        
+        let mut smt_helper = SMTHelper::new(db);
+        smt_helper.bst_put(key, value, height)?;
         
         Ok(())
     }
@@ -799,19 +776,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 let k_owned = <Vec<u8> as Clone>::clone(k);
                                 let v_owned = <Vec<u8> as Clone>::clone(v);
                                 
-                                let annotated = match db_annotate_value(&v_owned, height as u32) {
-                                    Ok(v) => v,
-                                    Err(_) => {
-                                        caller.data_mut().had_failure = true;
-                                        return;
-                                    }
-                                };
-
                                 // Create an SMTHelper to work with the BST
                                 let mut smt_helper = SMTHelper::new(ctx.db.clone());
                                 
-                                // Store in BST
-                                if let Err(_) = smt_helper.bst_put(&k_owned, &annotated, height) {
+                                // Store in BST (no legacy annotation needed)
+                                if let Err(_) = smt_helper.bst_put(&k_owned, &v_owned, height) {
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
@@ -1038,10 +1007,18 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         Ok(mut ctx) => {
                             ctx.state = 1;
                             
+                            println!("DEBUG: About to calculate state root for height {}", height);
+                            
                             // Calculate and store the state root for this height
-                            if let Err(_) = smt_helper.calculate_and_store_state_root(height) {
-                                caller.data_mut().had_failure = true;
-                                return;
+                            match smt_helper.calculate_and_store_state_root(height) {
+                                Ok(state_root) => {
+                                    println!("DEBUG: WASM runtime calculated state root for height {}: {}", height, hex::encode(state_root));
+                                },
+                                Err(e) => {
+                                    println!("ERROR: WASM runtime failed to calculate state root for height {}: {:?}", height, e);
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
                             }
                         }
                         Err(_) => {

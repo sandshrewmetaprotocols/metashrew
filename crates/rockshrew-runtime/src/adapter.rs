@@ -13,6 +13,15 @@ pub struct RocksDBRuntimeAdapter {
 }
 
 impl RocksDBRuntimeAdapter {
+    /// Create a new adapter from an existing DB handle
+    pub fn new(db: Arc<DB>) -> Self {
+        RocksDBRuntimeAdapter {
+            db,
+            height: 0,
+            kv_tracker: Arc::new(Mutex::new(None)),
+        }
+    }
+    
     pub fn open_secondary(
         primary_path: String,
         secondary_path: String,

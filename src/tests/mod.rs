@@ -34,6 +34,8 @@ pub mod stateroot_jsonrpc_test;
 pub mod smt_key_debug_test;
 #[cfg(test)]
 pub mod jsonrpc_height_test;
+#[cfg(test)]
+pub mod jsonrpc_preview_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

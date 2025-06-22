@@ -14,6 +14,7 @@ metashrew-runtime = { path = "../metashrew-runtime" }
 async-trait = "0.1.83"
 thiserror = "1.0.69"
 num_cpus = "1.16.0"
+bitcoin = "0.32.4"
 
 [features]
 default = []

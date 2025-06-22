@@ -3882,6 +3882,7 @@ version = "9.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bitcoin 0.32.6",
  "hex",
  "log",
  "memshrew-runtime",

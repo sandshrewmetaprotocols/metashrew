@@ -90,6 +90,9 @@ where
     async fn process_block(&self, height: u32, block_data: Vec<u8>) -> SyncResult<()> {
         info!("Processing block {} ({} bytes)", height, block_data.len());
         
+        // Get block hash before processing
+        let block_hash = self.node.get_block_hash(height).await?;
+        
         // Process with runtime
         {
             let mut runtime = self.runtime.write().await;
@@ -106,10 +109,11 @@ where
             runtime.get_state_root(height).await?
         };
         
-        // Update storage with height and state root
+        // Update storage with height, block hash, and state root
         {
             let storage = self.storage.write().await;
             storage.set_indexed_height(height).await?;
+            storage.store_block_hash(height, &block_hash).await?;
             storage.store_state_root(height, &state_root).await?;
         }
         
@@ -121,7 +125,7 @@ where
             *last_time = Some(SystemTime::now());
         }
         
-        info!("Successfully processed block {} with state root", height);
+        info!("Successfully processed block {} with state root and block hash", height);
         Ok(())
     }
 
@@ -301,6 +305,11 @@ where
     R: RuntimeAdapter,
 {
     async fn process_block(&self, height: u32, block_data: Vec<u8>) -> SyncResult<()> {
+        // We need access to the node to get block hash, but ProcessingClone doesn't have it
+        // For now, we'll compute the block hash from the block data
+        use bitcoin::hashes::{Hash, sha256d};
+        let block_hash = sha256d::Hash::hash(&block_data).to_byte_array().to_vec();
+        
         // Process with runtime
         {
             let mut runtime = self.runtime.write().await;
@@ -317,10 +326,11 @@ where
             runtime.get_state_root(height).await?
         };
         
-        // Update storage with height and state root
+        // Update storage with height, block hash, and state root
         {
             let storage = self.storage.write().await;
             storage.set_indexed_height(height).await?;
+            storage.store_block_hash(height, &block_hash).await?;
             storage.store_state_root(height, &state_root).await?;
         }
         

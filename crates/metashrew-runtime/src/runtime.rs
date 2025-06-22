@@ -963,6 +963,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         }
                     };
 
+
                     let mem = match caller.get_export("memory") {
                         Some(export) => match export.into_memory() {
                             Some(memory) => memory,

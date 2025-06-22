@@ -440,15 +440,9 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             }
         }
         
-        // Check if this block has already been processed by checking if we have a state root for this height
-        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
-        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
-        let already_processed = smt_helper.get_smt_root_at_height(height).is_ok();
-        
-        if already_processed {
-            info!("Block {} already processed (state root exists), skipping WASM execution", height);
-            return Ok(());
-        }
+        // The "already processed" check is now handled inside the metashrew-runtime's __flush function
+        // This ensures consistency between test and production environments
+        info!("Processing block {} - WASM runtime will handle duplicate detection", height);
         
         // Execute the runtime
         debug!("About to call runtime.run() for block {}", height);
@@ -463,24 +457,14 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                 Ok(())
             },
             Err(_e) => {
-                // Before retrying, check if the block was actually processed successfully
-                let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
-                let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
-                if smt_helper.get_smt_root_at_height(height).is_ok() {
-                    info!("Block {} appears to have been processed despite WASM error, skipping retry", height);
-                    return Ok(());
-                }
+                // The WASM runtime handles duplicate detection internally, so we should retry on errors
+                info!("WASM execution failed for block {}, attempting memory refresh and retry", height);
                 
                 // Try to refresh memory
                 match runtime.refresh_memory() {
                     Ok(_) => {
-                        // Check again if block was processed before retrying
-                        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
-                        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
-                        if smt_helper.get_smt_root_at_height(height).is_ok() {
-                            info!("Block {} was processed during memory refresh, skipping retry", height);
-                            return Ok(());
-                        }
+                        // Proceed with retry after memory refresh
+                        info!("Memory refreshed for block {}, proceeding with retry", height);
                         
                         // Try running again after memory refresh
                         debug!("About to call runtime.run() RETRY for block {} after memory refresh", height);

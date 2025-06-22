@@ -591,7 +591,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 "env",
                 "__flush",
                 move |_caller: Caller<'_, State>, _encoded: i32| {
-                    println!("DEBUG: View __flush called with encoded: {}", _encoded);
+                    // View mode __flush - no operation needed
                 },
             )
             .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
@@ -780,7 +780,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
-                    println!("DEBUG: Preview __flush called with encoded: {}", encoded);
                     let height = match context_ref.clone().lock() {
                         Ok(ctx) => ctx.height,
                         Err(_) => {
@@ -982,23 +981,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                         Ok(v) => v,
                         Err(e) => {
-                            println!("DEBUG: Failed to read arraybuffer: {:?}", e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
 
-                    println!("DEBUG: Indexer __flush called with {} bytes at height {}", encoded_vec.len(), height);
-
                     let mut batch = T::Batch::default();
 
                     let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
-                        Ok(d) => {
-                            println!("DEBUG: Successfully parsed KeyValueFlush with {} items", d.list.len());
-                            d
-                        },
+                        Ok(d) => d,
                         Err(e) => {
-                            println!("DEBUG: Failed to parse KeyValueFlush: {:?}", e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
@@ -1020,8 +1012,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
                         let v_owned = <Vec<u8> as Clone>::clone(v);
 
-                        println!("DEBUG: Processing key: {:?}, value: {} bytes", String::from_utf8_lossy(&k_owned), v_owned.len());
-
                         // Track key-value updates using the trait method
                         {
                             // Create a longer-lived value for the context reference
@@ -1040,11 +1030,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                         // Store in BST structure instead of legacy approach
                         match smt_helper.bst_put(&k_owned, &v_owned, height) {
-                            Ok(_) => {
-                                println!("DEBUG: Successfully stored key in BST: {:?}", String::from_utf8_lossy(&k_owned));
-                            },
+                            Ok(_) => {},
                             Err(e) => {
-                                println!("DEBUG: Failed to store key in BST: {:?}, error: {:?}", String::from_utf8_lossy(&k_owned), e);
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
@@ -1061,13 +1048,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         Ok(mut ctx) => {
                             ctx.state = 1;
                             
-                            println!("DEBUG: About to calculate state root for height {}", height);
-                            
                             // Calculate and store the state root for this height
                             match smt_helper.calculate_and_store_state_root(height) {
-                                Ok(state_root) => {
-                                    println!("DEBUG: WASM runtime calculated state root for height {}: {}", height, hex::encode(state_root));
-                                },
+                                Ok(state_root) => {},
                                 Err(e) => {
                                     println!("ERROR: WASM runtime failed to calculate state root for height {}: {:?}", height, e);
                                     caller.data_mut().had_failure = true;

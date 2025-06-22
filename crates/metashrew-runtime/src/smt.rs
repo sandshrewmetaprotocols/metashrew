@@ -591,13 +591,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Get all keys that were updated at this height
         let updated_keys = self.get_keys_at_height(height)?;
         
-        println!("DEBUG: State root calculation for height {}: found {} updated keys", height, updated_keys.len());
-        
         if updated_keys.is_empty() {
             // No updates at this height, return previous root
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
             self.storage.put(&root_key, &prev_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-            println!("DEBUG: No updates at height {}, using previous root: {}", height, hex::encode(prev_root));
             return Ok(prev_root);
         }
         
@@ -622,17 +619,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             }
         }
         
-        println!("DEBUG: Found {} unique keys in BST", all_keys.len());
-        
         // For each key, get its value at this height
         for key in all_keys {
             if let Ok(Some(value)) = self.bst_get_at_height(&key, height) {
                 current_state.insert(key.clone(), value);
-                println!("DEBUG: Added key to state: {} bytes", key.len());
             }
         }
-        
-        println!("DEBUG: Current state has {} key-value pairs", current_state.len());
         
         // Calculate the new SMT root based on current state
         let new_root = self.compute_smt_root_from_state(&current_state)?;
@@ -641,15 +633,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         self.storage.put(&root_key, &new_root).map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         
-        println!("DEBUG: Calculated state root for height {}: {}", height, hex::encode(new_root));
-        
         Ok(new_root)
     }
     
     /// Compute SMT root from a complete state map
     fn compute_smt_root_from_state(&self, state: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<[u8; 32]> {
         if state.is_empty() {
-            println!("DEBUG: State is empty, returning empty node hash");
             return Ok(EMPTY_NODE_HASH);
         }
         
@@ -669,7 +658,6 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
         
         let result = hasher.finalize().into();
-        println!("DEBUG: Computed state root from {} entries: {}", state.len(), hex::encode(result));
         Ok(result)
     }
     

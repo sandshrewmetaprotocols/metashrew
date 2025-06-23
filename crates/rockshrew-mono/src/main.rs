@@ -827,7 +827,20 @@ async fn main() -> Result<()> {
                 enabled: true,
             };
             
-            let provider = RockshrewSnapshotProvider::new(snapshot_config, storage_adapter_ref.clone());
+            let mut provider = RockshrewSnapshotProvider::new(snapshot_config, storage_adapter_ref.clone());
+            
+            // Initialize the snapshot directory structure with current height
+            if let Err(e) = provider.initialize(start_block).await {
+                error!("Failed to initialize snapshot provider: {}", e);
+                return Err(anyhow!("Failed to initialize snapshot provider: {}", e));
+            }
+            
+            // Set the current WASM file for snapshot metadata
+            if let Err(e) = provider.set_current_wasm(indexer_path.clone()).await {
+                error!("Failed to set current WASM for snapshots: {}", e);
+                return Err(anyhow!("Failed to set current WASM for snapshots: {}", e));
+            }
+            
             sync_engine.set_snapshot_provider(Box::new(provider)).await;
         }
         SyncMode::Repo(_config) => {

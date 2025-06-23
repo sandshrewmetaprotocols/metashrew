@@ -30,9 +30,20 @@ impl RockshrewSnapshotProvider {
     }
 
     #[allow(dead_code)]
-    pub async fn initialize(&self, db_path: &Path) -> Result<()> {
+    pub async fn initialize(&self, current_height: u32) -> Result<()> {
         let mut manager = self.manager.write().await;
-        manager.initialize_with_db(db_path).await
+        
+        // Initialize the directory structure first
+        manager.initialize().await?;
+        
+        // Set the last_snapshot_height to the current height without opening the database
+        manager.last_snapshot_height = current_height;
+        info!(
+            "Set last snapshot height to {} for snapshot provider",
+            current_height
+        );
+        
+        Ok(())
     }
 
     #[allow(dead_code)]

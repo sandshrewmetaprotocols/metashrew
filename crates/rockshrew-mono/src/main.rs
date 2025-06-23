@@ -39,7 +39,10 @@ use snapshot::{SnapshotConfig, SnapshotManager};
 mod snapshot_adapters;
 
 // Import the generic sync framework
-use rockshrew_sync::{MetashrewSync, RuntimeAdapter, StorageAdapter, SyncConfig};
+use rockshrew_sync::{
+    RuntimeAdapter, StorageAdapter, SyncConfig, SnapshotMetashrewSync, SyncMode,
+    RepoConfig, SnapshotConfig as GenericSnapshotConfig, SyncEngine,
+};
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -755,13 +758,6 @@ async fn main() -> Result<()> {
         context.db.db.clone()
     };
 
-    // Create adapters for the generic sync framework
-    let bitcoin_adapter =
-        BitcoinRpcAdapter::new(rpc_url, args_arc.auth.clone(), bypass_ssl, tunnel_config);
-
-    let storage_adapter = RocksDBStorageAdapter::new(db.clone());
-    let runtime_adapter = MetashrewRuntimeAdapter::new(runtime.clone(), db.clone());
-
     // Create sync configuration
     let sync_config = SyncConfig {
         start_block,
@@ -771,36 +767,58 @@ async fn main() -> Result<()> {
         reorg_check_threshold: args.reorg_check_threshold,
     };
 
-    // Create the generic sync engine
-    let sync_engine = Arc::new(RwLock::new(MetashrewSync::new(
+    // Determine sync mode based on command-line arguments
+    let sync_mode = if args.snapshot_directory.is_some() {
+        // Snapshot creation mode
+        let snapshot_config = GenericSnapshotConfig {
+            snapshot_interval: args.snapshot_interval,
+            max_snapshots: 10, // Default value
+            compression_level: 6, // Default value
+            reorg_buffer_size: 100, // Default value
+        };
+        SyncMode::Snapshot(snapshot_config)
+    } else if args.repo.is_some() {
+        // Repository consumption mode
+        let repo_config = RepoConfig {
+            repo_url: args.repo.clone().unwrap(),
+            check_interval: 300, // 5 minutes
+            max_snapshot_age: 86400, // 24 hours
+            continue_sync: true,
+            min_blocks_behind: 100,
+        };
+        SyncMode::Repo(repo_config)
+    } else {
+        // Normal sync mode
+        SyncMode::Normal
+    };
+
+    info!("Using sync mode: {:?}", sync_mode);
+
+    // Create adapters for the generic sync framework
+    let bitcoin_adapter =
+        BitcoinRpcAdapter::new(rpc_url, args_arc.auth.clone(), bypass_ssl, tunnel_config);
+    let storage_adapter = RocksDBStorageAdapter::new(db.clone());
+    let runtime_adapter = MetashrewRuntimeAdapter::new(runtime.clone(), db.clone());
+
+    // Keep direct references to adapters for JSON-RPC server
+    let storage_adapter_ref = Arc::new(RwLock::new(RocksDBStorageAdapter::new(db.clone())));
+    let runtime_adapter_ref = Arc::new(RwLock::new(MetashrewRuntimeAdapter::new(runtime.clone(), db.clone())));
+    let current_height = Arc::new(AtomicU32::new(start_block));
+
+    // Always use snapshot-enabled sync engine (it supports all modes including Normal)
+    let sync_engine = Arc::new(RwLock::new(SnapshotMetashrewSync::new(
         bitcoin_adapter,
         storage_adapter,
         runtime_adapter,
         sync_config,
+        sync_mode,
     )));
-
-    // Get reference to current height for direct access
-    let current_height = {
-        let sync_guard = sync_engine.read().await;
-        sync_guard.current_height.clone()
-    };
-
-    // Get direct references to storage and runtime to avoid lock contention
-    let storage_ref = {
-        let sync_guard = sync_engine.read().await;
-        sync_guard.storage().clone()
-    };
-
-    let runtime_ref = {
-        let sync_guard = sync_engine.read().await;
-        sync_guard.runtime().clone()
-    };
 
     // Create app state for JSON-RPC server
     let app_state = web::Data::new(AppState {
         current_height,
-        storage: storage_ref,
-        runtime: runtime_ref,
+        storage: storage_adapter_ref,
+        runtime: runtime_adapter_ref,
     });
 
     // Start the indexer in a separate task using the generic sync framework
@@ -813,7 +831,7 @@ async fn main() -> Result<()> {
             );
 
             // Use the generic sync framework's run method
-            if let Err(e) = sync_engine_clone.write().await.run().await {
+            if let Err(e) = sync_engine_clone.write().await.start().await {
                 error!("Indexer error: {}", e);
             }
         })

@@ -223,13 +223,13 @@ pub trait KeyValuePointer {
         Self: Sized,
     {
         let mut head_key = self.head_key();
-        if i == head_key.get_value() {
+        if i == head_key.get_value::<u32>() {
             let next = self.next_key(i).get_value::<u32>();
-            head_key.set_value(next);
+            head_key.set_value::<u32>(next);
         } else {
             let mut prev = self.next_key(i - 1);
             let next = self.next_key(i).get_value::<u32>();
-            prev.set_value(next);
+            prev.set_value::<u32>(next);
         }
         self.drop_index(i);
     }
@@ -240,7 +240,7 @@ pub trait KeyValuePointer {
         let length_key = self.length_key();
         let length = length_key.get_value::<u32>();
         let mut result = Vec::new();
-        let mut i: u32 = self.head_key().get_value();
+        let mut i: u32 = self.head_key().get_value::<u32>();
         while i < length {
             let item = self.select_index(i);
             let mut item_mut = item.clone();

@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 // Helper functions for BST database access
 fn get_blocktracker_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8>> {
-    let smt_helper = SMTHelper::new(adapter.clone());
+    let mut smt_helper = SMTHelper::new(adapter.clone());
     let key = b"/blocktracker".to_vec();
     Ok(smt_helper
         .bst_get_at_height(&key, height)?
@@ -21,7 +21,7 @@ fn get_blocktracker_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8
 }
 
 fn get_indexed_block_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
-    let smt_helper = SMTHelper::new(adapter.clone());
+    let mut smt_helper = SMTHelper::new(adapter.clone());
     let key = format!("/blocks/{}", height).into_bytes();
     Ok(smt_helper.bst_get_at_height(&key, height)?)
 }

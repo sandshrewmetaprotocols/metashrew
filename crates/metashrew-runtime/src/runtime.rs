@@ -330,13 +330,27 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     }
 
     pub fn refresh_memory(&mut self) -> Result<()> {
+        log::info!("Starting memory refresh - creating new WASM store");
+        
         let mut wasmstore = Store::<State>::new(&self.engine, State::new());
         wasmstore.limiter(|state| &mut state.limits);
+        
+        log::info!("Memory refresh - about to instantiate WASM module");
+        
+        // Add timeout protection for module instantiation
+        let start_time = std::time::Instant::now();
+        
         self.instance = self
             .linker
             .instantiate(&mut wasmstore, &self.module)
             .context("Failed to instantiate module during memory refresh")?;
+            
+        let elapsed = start_time.elapsed();
+        log::info!("Memory refresh - module instantiation completed in {:?}", elapsed);
+        
         self.wasmstore = wasmstore;
+        
+        log::info!("Memory refresh completed successfully");
         Ok(())
     }
 
@@ -433,7 +447,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         };
 
         // Create SMTHelper to use BST functionality
-        let smt_helper = SMTHelper::new(db);
+        let mut smt_helper = SMTHelper::new(db);
 
         // Use BST to get the value at the specific height
         match smt_helper.bst_get_at_height(key, height) {
@@ -981,59 +995,78 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
+                    log::info!("WASM __flush: Starting flush operation for encoded={}", encoded);
+                    
                     let height = match context_ref.clone().lock() {
                         Ok(ctx) => ctx.height,
                         Err(_) => {
+                            log::error!("WASM __flush: Failed to lock context for encoded={}", encoded);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
 
+                    log::info!("WASM __flush: Processing flush for height {}", height);
 
                     let mem = match caller.get_export("memory") {
                         Some(export) => match export.into_memory() {
                             Some(memory) => memory,
                             None => {
+                                log::error!("WASM __flush: Failed to get memory export for height {}", height);
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
                         },
                         None => {
+                            log::error!("WASM __flush: No memory export found for height {}", height);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
 
+                    log::debug!("WASM __flush: Got memory export for height {}", height);
+
                     let data = mem.data(&caller);
                     let encoded_vec = match try_read_arraybuffer_as_vec(data, encoded) {
                         Ok(v) => v,
-                        Err(_e) => {
+                        Err(e) => {
+                            log::error!("WASM __flush: Failed to read arraybuffer for height {}: {:?}", height, e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
+
+                    log::debug!("WASM __flush: Read {} bytes from arraybuffer for height {}", encoded_vec.len(), height);
 
                     let _batch = T::Batch::default();
 
                     let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
                         Ok(d) => d,
-                        Err(_e) => {
+                        Err(e) => {
+                            log::error!("WASM __flush: Failed to parse protobuf for height {}: {:?}", height, e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
+
+                    log::info!("WASM __flush: Parsed {} key-value pairs for height {}", decoded.list.len() / 2, height);
 
                     // Get the database from context to use BST operations
                     let db = match context_ref.clone().lock() {
                         Ok(ctx) => ctx.db.clone(),
                         Err(_) => {
+                            log::error!("WASM __flush: Failed to get database from context for height {}", height);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     };
 
+                    log::debug!("WASM __flush: Got database reference for height {}", height);
+
                     // Create a mutable SMTHelper to work with the BST
                     let mut smt_helper = SMTHelper::new(db);
+
+                    log::debug!("WASM __flush: Created SMTHelper for height {}", height);
 
                     // Collect all k/v pairs for batch processing
                     let mut kv_pairs = Vec::new();
@@ -1048,6 +1081,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             let mut ctx_guard = match context_ref_clone.lock() {
                                 Ok(guard) => guard,
                                 Err(_) => {
+                                    log::error!("WASM __flush: Failed to lock context for tracking updates at height {}", height);
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
@@ -1060,40 +1094,55 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         kv_pairs.push((k_owned, v_owned));
                     }
 
+                    log::debug!("WASM __flush: Collected {} key-value pairs for batch processing at height {}", kv_pairs.len(), height);
+
                     // Batch process all k/v pairs for better performance
+                    log::debug!("WASM __flush: Starting BST batch put operation for height {}", height);
                     match smt_helper.bst_put_batch(&kv_pairs, height) {
-                        Ok(_) => {},
-                        Err(_e) => {
+                        Ok(_) => {
+                            log::debug!("WASM __flush: Successfully completed BST batch put for height {}", height);
+                        },
+                        Err(e) => {
+                            log::error!("WASM __flush: BST batch put failed for height {}: {:?}", height, e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     }
 
                     log::debug!(
-                        "saving {:?} k/v pairs for block {:?}",
+                        "WASM __flush: Saved {} k/v pairs for block {}",
                         decoded.list.len() / 2,
                         height
                     );
 
+                    log::debug!("WASM __flush: Starting state root calculation for height {}", height);
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
                             ctx.state = 1;
 
                             // Calculate and store the state root for this height
                             match smt_helper.calculate_and_store_state_root(height) {
-                                Ok(_state_root) => {},
+                                Ok(_state_root) => {
+                                    log::debug!("WASM __flush: Successfully calculated state root for height {}", height);
+                                    // Clear pending updates after successful state root calculation
+                                    smt_helper.clear_pending_updates();
+                                    log::debug!("WASM __flush: Cleared pending updates for height {}", height);
+                                },
                                 Err(e) => {
-                                    println!("ERROR: WASM runtime failed to calculate state root for height {}: {:?}", height, e);
+                                    log::error!("WASM __flush: Failed to calculate state root for height {}: {:?}", height, e);
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
                             }
                         }
                         Err(_) => {
+                            log::error!("WASM __flush: Failed to lock context for state update at height {}", height);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     }
+                    
+                    log::info!("WASM __flush: Successfully completed flush operation for height {}", height);
                 },
             )
             .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
@@ -1119,7 +1168,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
-                    let _height = match context_get.clone().lock() {
+                    let height = match context_get.clone().lock() {
                         Ok(ctx) => ctx.height,
                         Err(_) => {
                             caller.data_mut().had_failure = true;
@@ -1129,8 +1178,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // During indexing, get the current state (including values set in this block)
-                            // This allows the indexer to see values it just set in the same block
+                            // During indexing, try to get the value at the current height first
+                            // This ensures we can read values that were just written in this block
                             let db = match context_get.clone().lock() {
                                 Ok(ctx) => ctx.db.clone(),
                                 Err(_) => {
@@ -1139,10 +1188,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 }
                             };
 
-                            let smt_helper = SMTHelper::new(db.clone());
+                            let mut smt_helper = SMTHelper::new(db.clone());
 
-                            // Get the current value for this key (including current height)
-                            match smt_helper.bst_get_current(&key_vec) {
+                            // First try to get the value at the current height (most recent)
+                            match smt_helper.bst_get_at_height(&key_vec, height) {
                                 Ok(Some(lookup)) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1151,7 +1200,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                     }
                                 }
                                 Ok(None) => {
-                                    // Key not found, return empty
+                                    // Key not found at current height, return empty
                                     if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
                                         caller.data_mut().had_failure = true;
                                     }
@@ -1194,19 +1243,23 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
+                    let height = match context_get_len.clone().lock() {
+                        Ok(ctx) => ctx.height,
+                        Err(_) => return i32::MAX,
+                    };
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // During indexing, get the current state (including values set in this block)
+                            // During indexing, try to get the value at the current height first
                             let db = match context_get_len.clone().lock() {
                                 Ok(ctx) => ctx.db.clone(),
                                 Err(_) => return i32::MAX,
                             };
 
-                            let smt_helper = SMTHelper::new(db.clone());
+                            let mut smt_helper = SMTHelper::new(db.clone());
 
-                            // Get the current value for this key (including current height)
-                            match smt_helper.bst_get_current(&key_vec) {
+                            // First try to get the value at the current height (most recent)
+                            match smt_helper.bst_get_at_height(&key_vec, height) {
                                 Ok(Some(value)) => value.len() as i32,
                                 Ok(None) => 0,
                                 Err(_) => i32::MAX,

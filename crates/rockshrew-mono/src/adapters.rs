@@ -403,8 +403,8 @@ impl StorageAdapter for RocksDBStorageAdapter {
     async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
         // Use the generic SMT implementation with RocksDBRuntimeAdapter
         let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
-        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
-
+        let mut smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
+        
         match smt_helper.get_smt_root_at_height(height) {
             Ok(root) => Ok(Some(root.to_vec())),
             Err(_) => Ok(None),
@@ -532,56 +532,47 @@ impl MetashrewRuntimeAdapter {
 impl RuntimeAdapter for MetashrewRuntimeAdapter {
     async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         info!(
-            "PROCESS_BLOCK: Starting to process block {} ({} bytes)",
+            "MetashrewRuntimeAdapter::process_block - Starting to process block {} ({} bytes)",
             height,
             block_data.len()
         );
 
-        // Get a lock on the runtime
-        let mut runtime = self.runtime.write().await;
-
         // Get the block data size for logging
         let block_size = block_data.len();
 
-        // Set block data
-        {
-            let mut context = runtime
-                .context
-                .lock()
-                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
-            context.block = block_data.to_vec();
-            context.height = height;
-            context.db.set_height(height);
-        } // Release context lock
+        // Execute the runtime in a separate scope to ensure lock is released
+        let execution_result = {
+            // Get a lock on the runtime for execution only
+            let mut runtime = self.runtime.write().await;
 
-        // Check if memory usage is approaching the limit and refresh if needed
-        if self.should_refresh_memory(&mut runtime, height) {
-            match runtime.refresh_memory() {
-                Ok(_) => info!(
-                    "Successfully performed preemptive memory refresh at block {}",
-                    height
-                ),
-                Err(e) => {
-                    error!("Failed to perform preemptive memory refresh: {}", e);
-                    info!("Continuing execution despite memory refresh failure");
-                    // Continue with execution even if preemptive refresh fails
-                }
-            }
-        }
+            // Set block data
+            {
+                let mut context = runtime
+                    .context
+                    .lock()
+                    .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+                context.block = block_data.to_vec();
+                context.height = height;
+                context.db.set_height(height);
+            } // Release context lock
 
-        // The "already processed" check is now handled inside the metashrew-runtime's __flush function
-        // This ensures consistency between test and production environments
-        info!(
-            "Processing block {} - WASM runtime will handle duplicate detection",
-            height
-        );
+            // The "already processed" check is now handled inside the metashrew-runtime's __flush function
+            // This ensures consistency between test and production environments
+            info!(
+                "Processing block {} - WASM runtime will handle duplicate detection",
+                height
+            );
 
-        // Execute the runtime
-        debug!("About to call runtime.run() for block {}", height);
-        match runtime.run() {
+            // Execute the runtime
+            debug!("About to call runtime.run() for block {}", height);
+            runtime.run()
+        }; // Release runtime write lock here
+
+        // Handle execution result
+        match execution_result {
             Ok(_) => {
                 info!(
-                    "RUNTIME_RUN: Successfully executed WASM for block {} (size: {} bytes)",
+                    "Successfully executed WASM for block {} (size: {} bytes)",
                     height, block_size
                 );
 
@@ -592,58 +583,36 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                     "State root calculation handled by WASM runtime for height {}",
                     height
                 );
-                Ok(())
-            }
-            Err(_e) => {
-                // The WASM runtime handles duplicate detection internally, so we should retry on errors
-                info!(
-                    "WASM execution failed for block {}, attempting memory refresh and retry",
-                    height
-                );
 
-                // Try to refresh memory
+                // CRITICAL: Always refresh memory AFTER successful block processing
+                // This prevents memory corruption and invalid pointers in subsequent blocks
+                // We do this AFTER releasing the runtime lock to prevent deadlocks
+                info!("Refreshing WASM memory after block {} to prevent memory corruption", height);
+                
+                // Get a fresh lock for memory refresh only
+                let mut runtime = self.runtime.write().await;
                 match runtime.refresh_memory() {
                     Ok(_) => {
-                        // Proceed with retry after memory refresh
-                        info!(
-                            "Memory refreshed for block {}, proceeding with retry",
-                            height
-                        );
-
-                        // Try running again after memory refresh
-                        debug!(
-                            "About to call runtime.run() RETRY for block {} after memory refresh",
-                            height
-                        );
-                        match runtime.run() {
-                            Ok(_) => {
-                                info!("RUNTIME_RUN_RETRY: Successfully executed WASM for block {} after memory refresh (size: {} bytes)", height, block_size);
-
-                                // State root calculation is handled inside the WASM runtime's __flush function
-                                debug!("State root calculation handled by WASM runtime after retry for height {}", height);
-
-                                Ok(())
-                            }
-                            Err(run_err) => {
-                                error!(
-                                    "Failed to process block {} after memory refresh: {}",
-                                    height, run_err
-                                );
-                                Err(SyncError::Runtime(format!(
-                                    "Runtime execution failed after retry: {}",
-                                    run_err
-                                )))
-                            }
-                        }
-                    }
-                    Err(refresh_err) => {
-                        error!("Memory refresh failed: {}", refresh_err);
-                        Err(SyncError::Runtime(format!(
-                            "Memory refresh failed: {}",
-                            refresh_err
-                        )))
+                        info!("Successfully refreshed WASM memory after block {}", height);
+                    },
+                    Err(e) => {
+                        error!("Failed to refresh WASM memory after block {}: {}", height, e);
+                        // Continue processing even if memory refresh fails since the block was processed successfully
+                        // Memory refresh failure is not critical enough to stop the entire pipeline
                     }
                 }
+                
+                Ok(())
+            }
+            Err(e) => {
+                error!(
+                    "WASM execution failed for block {}: {}",
+                    height, e
+                );
+                Err(SyncError::Runtime(format!(
+                    "Runtime execution failed: {}",
+                    e
+                )))
             }
         }
     }
@@ -655,7 +624,7 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
         info!(
-            "PROCESS_BLOCK_ATOMIC: Starting atomic processing for block {} ({} bytes)",
+            "Starting atomic processing for block {} ({} bytes)",
             height,
             block_data.len()
         );
@@ -670,7 +639,7 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
         {
             Ok(metashrew_result) => {
                 info!(
-                    "PROCESS_BLOCK_ATOMIC: Successfully processed block {} atomically",
+                    "Successfully processed block {} atomically",
                     height
                 );
 
@@ -686,7 +655,7 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             }
             Err(e) => {
                 warn!(
-                    "PROCESS_BLOCK_ATOMIC: Atomic processing failed for block {}: {}",
+                    "Atomic processing failed for block {}: {}",
                     height, e
                 );
                 Err(SyncError::Runtime(format!(
@@ -699,7 +668,7 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
         let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
-        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
+        let mut smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
         match smt_helper.get_smt_root_at_height(height) {
             Ok(root) => Ok(root.to_vec()),
             Err(e) => Err(SyncError::Runtime(format!(

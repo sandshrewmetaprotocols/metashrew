@@ -50,6 +50,12 @@ pub mod state_root_production_test;
 pub mod stateroot_jsonrpc_test;
 #[cfg(test)]
 pub mod surface_api_test;
+#[cfg(test)]
+pub mod memory_refresh_hang_test;
+#[cfg(test)]
+pub mod flush_memory_issue_test;
+#[cfg(test)]
+pub mod simple_memory_hang_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

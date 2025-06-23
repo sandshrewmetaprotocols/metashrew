@@ -25,6 +25,8 @@ anyhow = "1.0.86"
 tokio = { version = "1.43.0", features = ["full"] }
 futures = "0.3.30"
 async-trait = "0.1"
+log = { workspace = true }
+env_logger = "0.10"
 
 # Metashrew dependencies
 metashrew-runtime = { path = "crates/metashrew-runtime" }

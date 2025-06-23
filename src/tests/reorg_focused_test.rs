@@ -80,7 +80,7 @@ impl SimpleIndexer {
     /// Get state root using BST access
     pub fn get_state_root_bst(&self, height: u32) -> Result<Option<Vec<u8>>> {
         let adapter = &self.runtime.context.lock().unwrap().db;
-        let smt_helper = SMTHelper::new(adapter.clone());
+        let mut smt_helper = SMTHelper::new(adapter.clone());
         let key = format!("smt:root:{}", height).into_bytes();
         Ok(smt_helper.bst_get_at_height(&key, height)?)
     }

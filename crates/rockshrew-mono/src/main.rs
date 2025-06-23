@@ -37,6 +37,7 @@ use snapshot::{SnapshotConfig, SnapshotManager};
 
 // Import our snapshot adapters for generic framework integration
 mod snapshot_adapters;
+use snapshot_adapters::{RockshrewSnapshotProvider, RockshrewSnapshotConsumer};
 
 // Import the generic sync framework
 use rockshrew_sync::{
@@ -806,13 +807,51 @@ async fn main() -> Result<()> {
     let current_height = Arc::new(AtomicU32::new(start_block));
 
     // Always use snapshot-enabled sync engine (it supports all modes including Normal)
-    let sync_engine = Arc::new(RwLock::new(SnapshotMetashrewSync::new(
+    let sync_engine = SnapshotMetashrewSync::new(
         bitcoin_adapter,
         storage_adapter,
         runtime_adapter,
         sync_config,
-        sync_mode,
-    )));
+        sync_mode.clone(),
+    );
+
+    // Set up snapshot providers and consumers based on sync mode
+    match &sync_mode {
+        SyncMode::Snapshot(config) => {
+            info!("Setting up snapshot provider for snapshot creation mode");
+            
+            // Create snapshot config for the existing SnapshotManager
+            let snapshot_config = SnapshotConfig {
+                interval: config.snapshot_interval,
+                directory: args.snapshot_directory.clone().unwrap_or_else(|| PathBuf::from("snapshots")),
+                enabled: true,
+            };
+            
+            let provider = RockshrewSnapshotProvider::new(snapshot_config, storage_adapter_ref.clone());
+            sync_engine.set_snapshot_provider(Box::new(provider)).await;
+        }
+        SyncMode::Repo(_config) => {
+            info!("Setting up snapshot consumer for repository mode");
+            
+            // Create snapshot config for the existing SnapshotManager
+            let snapshot_config = SnapshotConfig {
+                interval: 1000, // Default interval for consumer
+                directory: PathBuf::from("temp_snapshots"),
+                enabled: true,
+            };
+            
+            let consumer = RockshrewSnapshotConsumer::new(snapshot_config, storage_adapter_ref.clone());
+            sync_engine.set_snapshot_consumer(Box::new(consumer)).await;
+        }
+        SyncMode::Normal => {
+            info!("Using normal sync mode - no snapshot components needed");
+        }
+        SyncMode::SnapshotServer(_config) => {
+            info!("Snapshot server mode not yet implemented");
+        }
+    }
+
+    let sync_engine = Arc::new(RwLock::new(sync_engine));
 
     // Create app state for JSON-RPC server
     let app_state = web::Data::new(AppState {

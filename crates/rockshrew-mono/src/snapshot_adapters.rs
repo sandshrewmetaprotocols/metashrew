@@ -227,9 +227,20 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
 
     /// Check if a snapshot should be created at this height
     fn should_create_snapshot(&self, height: u32) -> bool {
-        // This is a synchronous method, so we can't access the async manager
-        // For now, use a simple heuristic
-        height > 0 && height % 1000 == 0
+        // We need to access the config synchronously, so we'll need to restructure this
+        // For now, let's use a blocking approach to get the interval
+        if height == 0 {
+            return false;
+        }
+        
+        // Try to get the interval from the manager config
+        // This is not ideal but works for the current architecture
+        if let Ok(manager) = self.manager.try_read() {
+            height % manager.config.interval == 0
+        } else {
+            // Fallback to a reasonable default if we can't access the config
+            height % 100 == 0
+        }
     }
 }
 

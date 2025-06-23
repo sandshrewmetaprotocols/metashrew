@@ -53,20 +53,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
             context.db.set_height(height);
         }
 
-        // Execute the runtime
-        if let Err(e) = runtime.run() {
-            // Try to refresh memory and retry once
-            if let Ok(_) = runtime.refresh_memory() {
-                runtime.run().map_err(|retry_e| {
-                    SyncError::Runtime(format!("Runtime execution failed after retry: {}", retry_e))
-                })?;
-            } else {
-                return Err(SyncError::Runtime(format!(
-                    "Runtime execution failed: {}",
-                    e
-                )));
-            }
-        }
+        // Execute the runtime - memory refresh is now handled automatically by metashrew-runtime
+        runtime.run().map_err(|e| {
+            SyncError::Runtime(format!("Runtime execution failed: {}", e))
+        })?;
 
         Ok(())
     }
@@ -79,48 +69,23 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     ) -> SyncResult<AtomicBlockResult> {
         let mut runtime = self.runtime.lock().await;
 
-        // Set block data and height in the runtime context
-        {
-            let mut context = runtime
-                .context
-                .lock()
-                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
-            context.block = block_data.to_vec();
-            context.height = height;
-            context.db.set_height(height);
-        }
-
-        // Execute the runtime to collect all database operations
-        if let Err(e) = runtime.run() {
-            // Try to refresh memory and retry once
-            if let Ok(_) = runtime.refresh_memory() {
-                runtime.run().map_err(|retry_e| {
-                    SyncError::Runtime(format!("Runtime execution failed after retry: {}", retry_e))
-                })?;
-            } else {
-                return Err(SyncError::Runtime(format!(
-                    "Runtime execution failed: {}",
-                    e
-                )));
+        // Use the built-in atomic processing method from metashrew-runtime
+        // This handles memory refresh automatically
+        match runtime.process_block_atomic(height, block_data, block_hash).await {
+            Ok(result) => {
+                // Convert from metashrew_runtime::AtomicBlockResult to rockshrew_sync::AtomicBlockResult
+                Ok(AtomicBlockResult {
+                    state_root: result.state_root,
+                    batch_data: result.batch_data,
+                    height: result.height,
+                    block_hash: result.block_hash,
+                })
             }
+            Err(e) => Err(SyncError::Runtime(format!(
+                "Atomic block processing failed: {}",
+                e
+            )))
         }
-
-        // Get the state root after processing
-        let state_root = runtime
-            .calculate_state_root()
-            .map_err(|e| SyncError::Runtime(format!("Failed to calculate state root: {}", e)))?;
-
-        // Get the accumulated database operations as a batch
-        let batch_data = runtime
-            .get_accumulated_batch()
-            .map_err(|e| SyncError::Runtime(format!("Failed to get database batch: {}", e)))?;
-
-        Ok(AtomicBlockResult {
-            state_root,
-            batch_data,
-            height,
-            block_hash: block_hash.to_vec(),
-        })
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
@@ -162,12 +127,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {
-        let mut runtime = self.runtime.lock().await;
-
-        runtime
-            .refresh_memory()
-            .map_err(|e| SyncError::Runtime(format!("Memory refresh failed: {}", e)))?;
-
+        // Memory refresh is now handled automatically by metashrew-runtime after each block execution
+        // This method is kept for API compatibility but no longer performs manual refresh
+        log::info!("Manual memory refresh requested - note that memory is now refreshed automatically after each block");
         Ok(())
     }
 

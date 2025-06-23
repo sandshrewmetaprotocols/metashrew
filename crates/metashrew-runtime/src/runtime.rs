@@ -350,17 +350,29 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         // Handle any chain reorganizations before processing the block
         self.handle_reorg()?;
 
-        match start.call(&mut self.wasmstore, ()) {
+        let execution_result = match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
                 if self.context.lock().map_err(lock_err)?.state != 1
                     && !self.wasmstore.data().had_failure
                 {
-                    return Err(anyhow!("indexer exited unexpectedly"));
+                    Err(anyhow!("indexer exited unexpectedly"))
+                } else {
+                    Ok(())
                 }
-                Ok(())
             }
             Err(e) => Err(e).context("Error calling _start function"),
+        };
+
+        // ALWAYS refresh memory after block execution for deterministic behavior
+        // This ensures no WASM state persists between blocks
+        if let Err(refresh_err) = self.refresh_memory() {
+            log::error!("Failed to refresh memory after block execution: {}", refresh_err);
+            // Return the refresh error as it's critical for deterministic execution
+            return Err(refresh_err).context("Memory refresh failed after block execution");
         }
+
+        log::debug!("Memory refreshed after block execution for deterministic state isolation");
+        execution_result
     }
 
     /// Handle chain reorganization by rolling back to the specified height
@@ -1390,7 +1402,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .context("Failed to get _start function")?;
 
-        match start.call(&mut self.wasmstore, ()) {
+        let execution_result = match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
                 let context_state = {
                     let guard = self.context.lock().map_err(lock_err)?;
@@ -1398,26 +1410,49 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 };
 
                 if context_state != 1 && !self.wasmstore.data().had_failure {
-                    return Err(anyhow!(
+                    Err(anyhow!(
                         "indexer exited unexpectedly during atomic processing"
-                    ));
+                    ))
+                } else {
+                    Ok(())
                 }
             }
-            Err(e) => return Err(e).context("Error calling _start function in atomic processing"),
+            Err(e) => Err(e).context("Error calling _start function in atomic processing"),
+        };
+
+        // Calculate the state root and batch data before memory refresh
+        let (state_root, batch_data) = match execution_result {
+            Ok(_) => {
+                let state_root = self.calculate_state_root()?;
+                let batch_data = self.get_accumulated_batch()?;
+                
+                // Log the state root for atomic block processing
+                log::info!(
+                    "processed block {} atomically, state root: {}",
+                    height,
+                    hex::encode(&state_root)
+                );
+                
+                (state_root, batch_data)
+            }
+            Err(e) => {
+                // ALWAYS refresh memory even on execution failure for deterministic behavior
+                if let Err(refresh_err) = self.refresh_memory() {
+                    log::error!("Failed to refresh memory after failed atomic block execution: {}", refresh_err);
+                }
+                return Err(e);
+            }
+        };
+
+        // ALWAYS refresh memory after block execution for deterministic behavior
+        // This ensures no WASM state persists between blocks
+        if let Err(refresh_err) = self.refresh_memory() {
+            log::error!("Failed to refresh memory after atomic block execution: {}", refresh_err);
+            // Return the refresh error as it's critical for deterministic execution
+            return Err(refresh_err).context("Memory refresh failed after atomic block execution");
         }
 
-        // Calculate the state root after execution
-        let state_root = self.calculate_state_root()?;
-        
-        // Log the state root for atomic block processing
-        log::info!(
-            "processed block {} atomically, state root: {}",
-            height,
-            hex::encode(&state_root)
-        );
-
-        // Get the accumulated batch operations
-        let batch_data = self.get_accumulated_batch()?;
+        log::debug!("Memory refreshed after atomic block execution for deterministic state isolation");
 
         // Return the atomic result
         Ok(crate::traits::AtomicBlockResult {
@@ -1438,7 +1473,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             guard.state = 0;
         }
 
-        // Execute the block processing
+        // Execute the block processing - run() now handles memory refresh automatically
         self.run()
     }
 

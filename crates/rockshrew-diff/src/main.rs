@@ -333,75 +333,21 @@ impl RockshrewDiffRuntime {
             context.db.set_height(height);
         }
 
-        // Run primary runtime with better error handling
-        match self.primary_runtime.run() {
-            Ok(_) => {
-                debug!("Successfully ran primary WASM module for block {}", height);
-            }
-            Err(e) => {
-                error!(
-                    "Error running primary WASM module: {}, refreshing memory and retrying",
-                    e
-                );
-                self.primary_runtime
-                    .refresh_memory()
-                    .map_err(|refresh_err| {
-                        error!("Memory refresh failed for primary runtime: {}", refresh_err);
-                        anyhow!("Memory refresh failed for primary runtime: {}", refresh_err)
-                    })?;
+        // Run primary runtime - memory refresh is now handled automatically
+        self.primary_runtime.run().map_err(|e| {
+            error!("Error running primary WASM module for block {}: {}", height, e);
+            anyhow!("Error running primary WASM module: {}", e)
+        })?;
 
-                self.primary_runtime.run().map_err(|run_err| {
-                    error!(
-                        "Runtime execution failed after memory refresh for primary runtime: {}",
-                        run_err
-                    );
-                    anyhow!(
-                        "Error running primary WASM module after memory refresh: {}",
-                        run_err
-                    )
-                })?;
+        debug!("Successfully ran primary WASM module for block {}", height);
 
-                debug!(
-                    "Successfully ran primary WASM module for block {} after memory refresh",
-                    height
-                );
-            }
-        }
+        // Run compare runtime - memory refresh is now handled automatically
+        self.compare_runtime.run().map_err(|e| {
+            error!("Error running compare WASM module for block {}: {}", height, e);
+            anyhow!("Error running compare WASM module: {}", e)
+        })?;
 
-        // Run compare runtime with better error handling
-        match self.compare_runtime.run() {
-            Ok(_) => {
-                debug!("Successfully ran compare WASM module for block {}", height);
-            }
-            Err(e) => {
-                error!(
-                    "Error running compare WASM module: {}, refreshing memory and retrying",
-                    e
-                );
-                self.compare_runtime
-                    .refresh_memory()
-                    .map_err(|refresh_err| {
-                        error!("Memory refresh failed for compare runtime: {}", refresh_err);
-                        anyhow!("Memory refresh failed for compare runtime: {}", refresh_err)
-                    })?;
-
-                self.compare_runtime.run().map_err(|run_err| {
-                    error!(
-                        "Runtime execution failed after memory refresh for compare runtime: {}",
-                        run_err
-                    );
-                    anyhow!(
-                        "Error running compare WASM module after memory refresh: {}",
-                        run_err
-                    )
-                })?;
-
-                debug!(
-                    "Successfully ran compare WASM module for block {} after memory refresh",
-                    height
-                );
-            }
-        }
+        debug!("Successfully ran compare WASM module for block {}", height);
 
         // Get tracked updates from both adapters
         let primary_updates = {

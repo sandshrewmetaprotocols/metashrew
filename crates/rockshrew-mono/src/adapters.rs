@@ -431,50 +431,13 @@ impl MetashrewRuntimeAdapter {
         Self { runtime, db }
     }
 
-    /// Check if memory needs to be refreshed based on its size
-    fn should_refresh_memory(
-        &self,
-        runtime: &mut MetashrewRuntime<RocksDBRuntimeAdapter>,
-        height: u32,
-    ) -> bool {
-        // Get the memory instance
-        if let Some(memory) = runtime
-            .instance
-            .get_memory(&mut runtime.wasmstore, "memory")
-        {
-            // Get the memory size in bytes
-            let memory_size = memory.data_size(&mut runtime.wasmstore);
-
-            // 1.75GB in bytes = 1.75 * 1024 * 1024 * 1024
-            let threshold_gb = 1.75;
-            let threshold_bytes = (threshold_gb * 1024.0 * 1024.0 * 1024.0) as usize;
-
-            // Check if memory size is approaching the limit
-            if memory_size >= threshold_bytes {
-                info!(
-                    "Memory usage approaching threshold of {:.2}GB at block {}",
-                    threshold_gb, height
-                );
-                info!("Performing preemptive memory refresh to prevent out-of-memory errors");
-                return true;
-            } else if height % 1000 == 0 {
-                // Log memory stats periodically for monitoring
-                let memory_size_mb = memory_size as f64 / 1_048_576.0;
-                info!("Memory usage at block {}: {:.2} MB", height, memory_size_mb);
-            }
-        } else {
-            debug!("Could not get memory instance for block {}", height);
-        }
-
-        false
-    }
 }
 
 #[async_trait]
 impl RuntimeAdapter for MetashrewRuntimeAdapter {
     async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         info!(
-            "PROCESS_BLOCK: Starting to process block {} ({} bytes)",
+            "starting to process block {} ({} bytes)",
             height,
             block_data.len()
         );
@@ -496,21 +459,6 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             context.db.set_height(height);
         } // Release context lock
 
-        // Check if memory usage is approaching the limit and refresh if needed
-        if self.should_refresh_memory(&mut runtime, height) {
-            match runtime.refresh_memory() {
-                Ok(_) => info!(
-                    "Successfully performed preemptive memory refresh at block {}",
-                    height
-                ),
-                Err(e) => {
-                    error!("Failed to perform preemptive memory refresh: {}", e);
-                    info!("Continuing execution despite memory refresh failure");
-                    // Continue with execution even if preemptive refresh fails
-                }
-            }
-        }
-
         // The "already processed" check is now handled inside the metashrew-runtime's __flush function
         // This ensures consistency between test and production environments
         info!(
@@ -518,12 +466,12 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             height
         );
 
-        // Execute the runtime
+        // Execute the runtime - memory refresh is now handled automatically by metashrew-runtime
         debug!("About to call runtime.run() for block {}", height);
         match runtime.run() {
             Ok(_) => {
                 info!(
-                    "RUNTIME_RUN: Successfully executed WASM for block {} (size: {} bytes)",
+                    "successfully executed WASM for block {} (size: {} bytes)",
                     height, block_size
                 );
 
@@ -536,56 +484,15 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                 );
                 Ok(())
             }
-            Err(_e) => {
-                // The WASM runtime handles duplicate detection internally, so we should retry on errors
-                info!(
-                    "WASM execution failed for block {}, attempting memory refresh and retry",
-                    height
+            Err(run_err) => {
+                error!(
+                    "Failed to process block {}: {}",
+                    height, run_err
                 );
-
-                // Try to refresh memory
-                match runtime.refresh_memory() {
-                    Ok(_) => {
-                        // Proceed with retry after memory refresh
-                        info!(
-                            "Memory refreshed for block {}, proceeding with retry",
-                            height
-                        );
-
-                        // Try running again after memory refresh
-                        debug!(
-                            "About to call runtime.run() RETRY for block {} after memory refresh",
-                            height
-                        );
-                        match runtime.run() {
-                            Ok(_) => {
-                                info!("RUNTIME_RUN_RETRY: Successfully executed WASM for block {} after memory refresh (size: {} bytes)", height, block_size);
-
-                                // State root calculation is handled inside the WASM runtime's __flush function
-                                debug!("State root calculation handled by WASM runtime after retry for height {}", height);
-
-                                Ok(())
-                            }
-                            Err(run_err) => {
-                                error!(
-                                    "Failed to process block {} after memory refresh: {}",
-                                    height, run_err
-                                );
-                                Err(SyncError::Runtime(format!(
-                                    "Runtime execution failed after retry: {}",
-                                    run_err
-                                )))
-                            }
-                        }
-                    }
-                    Err(refresh_err) => {
-                        error!("Memory refresh failed: {}", refresh_err);
-                        Err(SyncError::Runtime(format!(
-                            "Memory refresh failed: {}",
-                            refresh_err
-                        )))
-                    }
-                }
+                Err(SyncError::Runtime(format!(
+                    "Runtime execution failed: {}",
+                    run_err
+                )))
             }
         }
     }
@@ -597,7 +504,7 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
         info!(
-            "PROCESS_BLOCK_ATOMIC: Starting atomic processing for block {} ({} bytes)",
+            "starting atomic processing for block {} ({} bytes)",
             height,
             block_data.len()
         );
@@ -612,7 +519,7 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
         {
             Ok(metashrew_result) => {
                 info!(
-                    "PROCESS_BLOCK_ATOMIC: Successfully processed block {} atomically",
+                    "successfully processed block {} atomically",
                     height
                 );
 
@@ -628,7 +535,7 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             }
             Err(e) => {
                 warn!(
-                    "PROCESS_BLOCK_ATOMIC: Atomic processing failed for block {}: {}",
+                    "atomic processing failed for block {}: {}",
                     height, e
                 );
                 Err(SyncError::Runtime(format!(
@@ -679,10 +586,10 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {
-        let mut runtime = self.runtime.write().await;
-        runtime
-            .refresh_memory()
-            .map_err(|e| SyncError::Runtime(format!("Memory refresh failed: {}", e)))
+        // Memory refresh is now handled automatically by metashrew-runtime after each block execution
+        // This method is kept for API compatibility but no longer performs manual refresh
+        info!("Manual memory refresh requested - note that memory is now refreshed automatically after each block");
+        Ok(())
     }
 
     async fn is_ready(&self) -> bool {

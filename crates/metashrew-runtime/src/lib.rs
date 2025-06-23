@@ -23,6 +23,7 @@ pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
 // Re-export helper types
 pub use helpers::{BSTHelper, BSTStatistics};
 pub use optimized_bst::{OptimizedBST, OptimizedBSTStatistics};
+pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
 
 // Utility functions that are storage-backend agnostic
 static mut _LABEL: Option<String> = None;

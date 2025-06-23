@@ -1,7 +1,7 @@
-use crate::traits::KeyValueStoreLike;
+use crate::traits::{BatchLike, KeyValueStoreLike};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 // Prefixes for different types of keys in the database
 pub const SMT_NODE_PREFIX: &str = "smt:node:";
@@ -31,6 +31,454 @@ pub enum SMTNode {
 /// Helper functions for SMT operations
 pub struct SMTHelper<T: KeyValueStoreLike> {
     pub storage: T,
+}
+
+/// Optimized batch-based SMT operations for better performance
+pub struct BatchedSMTHelper<T: KeyValueStoreLike> {
+    pub storage: T,
+    // In-memory cache for the current block processing (cleared after each block)
+    node_cache: HashMap<[u8; 32], SMTNode>,
+    // Pre-computed key hashes to avoid repeated hashing
+    key_hash_cache: HashMap<Vec<u8>, [u8; 32]>,
+}
+
+impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
+    pub fn new(storage: T) -> Self {
+        Self {
+            storage,
+            node_cache: HashMap::new(),
+            key_hash_cache: HashMap::new(),
+        }
+    }
+
+    /// Clear caches after block processing (no persistent state between blocks)
+    pub fn clear_caches(&mut self) {
+        self.node_cache.clear();
+        self.key_hash_cache.clear();
+    }
+
+    /// Check if caches are empty (for testing)
+    pub fn caches_are_empty(&self) -> bool {
+        self.node_cache.is_empty() && self.key_hash_cache.is_empty()
+    }
+
+    /// Get cached key hash or compute and cache it
+    fn get_key_hash(&mut self, key: &[u8]) -> [u8; 32] {
+        if let Some(&hash) = self.key_hash_cache.get(key) {
+            return hash;
+        }
+        let hash = SMTHelper::<T>::hash_key(key);
+        self.key_hash_cache.insert(key.to_vec(), hash);
+        hash
+    }
+
+    /// Get node from cache or storage
+    fn get_node_cached(&mut self, node_hash: &[u8; 32]) -> Result<Option<SMTNode>> {
+        if node_hash == &EMPTY_NODE_HASH {
+            return Ok(None);
+        }
+
+        // Check cache first
+        if let Some(node) = self.node_cache.get(node_hash) {
+            return Ok(Some(node.clone()));
+        }
+
+        // Load from storage and cache
+        let node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(node_hash)).into_bytes();
+        match self.storage.get_immutable(&node_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(node_data) => {
+                let node = SMTHelper::<T>::deserialize_node(&node_data)?;
+                self.node_cache.insert(*node_hash, node.clone());
+                Ok(Some(node))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Optimized batch calculation of state root for multiple keys
+    pub fn calculate_and_store_state_root_batched(
+        &mut self,
+        height: u32,
+        updated_keys: &[Vec<u8>],
+    ) -> Result<[u8; 32]> {
+        // Clear caches at start of block processing
+        self.clear_caches();
+
+        let prev_root = if height > 0 {
+            match self.get_smt_root_at_height(height - 1) {
+                Ok(root) => root,
+                Err(_) => EMPTY_NODE_HASH,
+            }
+        } else {
+            EMPTY_NODE_HASH
+        };
+
+        if updated_keys.is_empty() {
+            let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
+            self.storage.put(&root_key, &prev_root)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+            return Ok(prev_root);
+        }
+
+        // Create a batch for all operations
+        let mut batch = self.storage.create_batch();
+        
+        // Pre-compute all key hashes
+        let key_hashes: Vec<_> = updated_keys.iter()
+            .map(|key| (key.clone(), self.get_key_hash(key)))
+            .collect();
+
+        // Get all values in batch
+        let mut key_values = Vec::new();
+        for (key, _) in &key_hashes {
+            if let Some(value) = self.bst_get_at_height_fast(key, height)? {
+                key_values.push((key.clone(), value));
+            }
+        }
+
+        // Process all updates in a single pass
+        let new_root = self.compute_batched_smt_root(
+            prev_root,
+            &key_values,
+            height,
+            &mut batch,
+        )?;
+
+        // Store the new root in batch
+        let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
+        batch.put(root_key, new_root.to_vec());
+
+        // Write entire batch at once
+        self.storage.write(batch)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+
+        // Clear caches after block processing
+        self.clear_caches();
+
+        Ok(new_root)
+    }
+
+    /// Fast BST lookup using binary search on heights
+    fn bst_get_at_height_fast(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
+        // Use binary search for height lookup instead of linear scan
+        let mut low = 0;
+        let mut high = height;
+        let mut result = None;
+
+        while low <= high {
+            let mid = (low + high) / 2;
+            let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), mid).into_bytes();
+            
+            match self.storage.get_immutable(&height_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                Some(value) => {
+                    result = Some(value);
+                    low = mid + 1; // Look for higher heights
+                }
+                None => {
+                    if mid == 0 { break; }
+                    high = mid - 1; // Look for lower heights
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Compute SMT root for multiple keys in batch
+    fn compute_batched_smt_root(
+        &mut self,
+        current_root: [u8; 32],
+        key_values: &[(Vec<u8>, Vec<u8>)],
+        height: u32,
+        batch: &mut T::Batch,
+    ) -> Result<[u8; 32]> {
+        let mut working_root = current_root;
+
+        // Process all keys in batch
+        for (key, value) in key_values {
+            working_root = self.update_smt_for_key_batched(
+                working_root,
+                key,
+                value,
+                height,
+                batch,
+            )?;
+        }
+
+        Ok(working_root)
+    }
+
+    /// Update SMT for a single key using batch operations
+    fn update_smt_for_key_batched(
+        &mut self,
+        current_root: [u8; 32],
+        key: &[u8],
+        value: &[u8],
+        height: u32,
+        batch: &mut T::Batch,
+    ) -> Result<[u8; 32]> {
+        let key_hash = self.get_key_hash(key);
+        let value_hash = SMTHelper::<T>::hash_value(value);
+
+        // Create the new leaf node
+        let new_leaf = SMTNode::Leaf {
+            key: key.to_vec(),
+            value_index: value_hash,
+        };
+        let new_leaf_hash = SMTHelper::<T>::hash_node(&new_leaf);
+
+        // Add to batch instead of immediate storage
+        let leaf_node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_leaf_hash)).into_bytes();
+        batch.put(leaf_node_key, SMTHelper::<T>::serialize_node(&new_leaf));
+
+        let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
+        batch.put(value_key, value.to_vec());
+
+        // Cache the new leaf node
+        self.node_cache.insert(new_leaf_hash, new_leaf);
+
+        if current_root == EMPTY_NODE_HASH {
+            return Ok(new_leaf_hash);
+        }
+
+        // Compute path updates using cached nodes
+        let path_updates = self.compute_path_updates_batched(
+            current_root,
+            key_hash,
+            new_leaf_hash,
+            batch,
+        )?;
+
+        if let Some((_, new_root_hash)) = path_updates.last() {
+            Ok(*new_root_hash)
+        } else {
+            Ok(new_leaf_hash)
+        }
+    }
+
+    /// Compute path updates using batch operations and caching
+    fn compute_path_updates_batched(
+        &mut self,
+        current_root: [u8; 32],
+        key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+        batch: &mut T::Batch,
+    ) -> Result<Vec<(usize, [u8; 32])>> {
+        let mut updates = Vec::new();
+        let mut current_hash = current_root;
+        let mut depth = 0;
+        let mut path_nodes = Vec::new();
+
+        // Traverse down using cached nodes
+        loop {
+            let node = match self.get_node_cached(&current_hash)? {
+                Some(n) => n,
+                None => break,
+            };
+
+            match node {
+                SMTNode::Leaf { key: ref existing_key, .. } => {
+                    let existing_key_hash = self.get_key_hash(existing_key);
+                    
+                    if existing_key_hash == key_hash {
+                        path_nodes.push((depth, node, true));
+                        break;
+                    } else {
+                        path_nodes.push((depth, node, false));
+                        break;
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    path_nodes.push((depth, node, false));
+                    
+                    let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+                    current_hash = if bit == 0 { left_child } else { right_child };
+                    depth += 1;
+
+                    if depth >= 256 {
+                        return Err(anyhow!("Maximum SMT depth exceeded"));
+                    }
+                }
+            }
+        }
+
+        // Build new nodes and add to batch
+        let mut new_child_hash = new_leaf_hash;
+
+        for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
+            match node {
+                SMTNode::Leaf { key: existing_key, value_index } => {
+                    if is_replacement {
+                        updates.push((node_depth, new_child_hash));
+                    } else {
+                        let existing_key_hash = self.get_key_hash(&existing_key);
+                        let existing_leaf_hash = SMTHelper::<T>::hash_node(&SMTNode::Leaf {
+                            key: existing_key,
+                            value_index,
+                        });
+
+                        new_child_hash = self.create_separating_internals_batched(
+                            node_depth,
+                            existing_key_hash,
+                            existing_leaf_hash,
+                            key_hash,
+                            new_child_hash,
+                            batch,
+                        )?;
+                        updates.push((node_depth, new_child_hash));
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
+                    let new_internal = if bit == 0 {
+                        SMTNode::Internal {
+                            left_child: new_child_hash,
+                            right_child,
+                        }
+                    } else {
+                        SMTNode::Internal {
+                            left_child,
+                            right_child: new_child_hash,
+                        }
+                    };
+
+                    let new_internal_hash = SMTHelper::<T>::hash_node(&new_internal);
+                    let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_internal_hash)).into_bytes();
+                    batch.put(internal_key, SMTHelper::<T>::serialize_node(&new_internal));
+
+                    // Cache the new internal node
+                    self.node_cache.insert(new_internal_hash, new_internal);
+
+                    updates.push((node_depth, new_internal_hash));
+                    new_child_hash = new_internal_hash;
+                }
+            }
+        }
+
+        Ok(updates)
+    }
+
+    /// Create separating internals using batch operations
+    fn create_separating_internals_batched(
+        &mut self,
+        start_depth: usize,
+        existing_key_hash: [u8; 32],
+        existing_leaf_hash: [u8; 32],
+        new_key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+        batch: &mut T::Batch,
+    ) -> Result<[u8; 32]> {
+        let mut depth = start_depth;
+        let mut left_hash = EMPTY_NODE_HASH;
+        let mut right_hash = EMPTY_NODE_HASH;
+
+        // Find divergence point
+        while depth < 256 {
+            let existing_bit = (existing_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+            let new_bit = (new_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+
+            if existing_bit != new_bit {
+                if existing_bit == 0 {
+                    left_hash = existing_leaf_hash;
+                    right_hash = new_leaf_hash;
+                } else {
+                    left_hash = new_leaf_hash;
+                    right_hash = existing_leaf_hash;
+                }
+                break;
+            }
+            depth += 1;
+        }
+
+        if depth >= 256 {
+            return Err(anyhow!("Keys are identical - cannot separate"));
+        }
+
+        // Create internal node at divergence
+        let internal = SMTNode::Internal {
+            left_child: left_hash,
+            right_child: right_hash,
+        };
+        let internal_hash = SMTHelper::<T>::hash_node(&internal);
+        let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(internal_hash)).into_bytes();
+        batch.put(internal_key, SMTHelper::<T>::serialize_node(&internal));
+
+        // Cache the internal node
+        self.node_cache.insert(internal_hash, internal);
+
+        // Create parent internals if needed
+        let mut current_hash = internal_hash;
+        for d in (start_depth..depth).rev() {
+            let bit = (new_key_hash[d / 8] >> (7 - (d % 8))) & 1;
+            let parent_internal = if bit == 0 {
+                SMTNode::Internal {
+                    left_child: current_hash,
+                    right_child: EMPTY_NODE_HASH,
+                }
+            } else {
+                SMTNode::Internal {
+                    left_child: EMPTY_NODE_HASH,
+                    right_child: current_hash,
+                }
+            };
+
+            let parent_hash = SMTHelper::<T>::hash_node(&parent_internal);
+            let parent_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(parent_hash)).into_bytes();
+            batch.put(parent_key, SMTHelper::<T>::serialize_node(&parent_internal));
+
+            // Cache the parent node
+            self.node_cache.insert(parent_hash, parent_internal);
+
+            current_hash = parent_hash;
+        }
+
+        Ok(current_hash)
+    }
+
+    /// Delegate to SMTHelper for compatibility
+    fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
+        // Use the storage directly instead of cloning
+        let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, height).into_bytes();
+        if let Some(root_data) = self.storage
+            .get_immutable(&root_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            if root_data.len() == 32 {
+                let mut root = [0u8; 32];
+                root.copy_from_slice(&root_data);
+                return Ok(root);
+            }
+        }
+
+        // If exact height not found, look for the closest previous height
+        if height > 0 {
+            let mut target_height = height - 1;
+            loop {
+                let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, target_height).into_bytes();
+                if let Some(root_data) = self.storage
+                    .get_immutable(&root_key)
+                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                    if root_data.len() == 32 {
+                        let mut root = [0u8; 32];
+                        root.copy_from_slice(&root_data);
+                        return Ok(root);
+                    }
+                }
+
+                if target_height == 0 {
+                    break;
+                }
+                target_height -= 1;
+            }
+        }
+
+        // If no root found at all, return an error
+        Err(anyhow!(
+            "No state root found for height {} or any previous height",
+            height
+        ))
+    }
 }
 
 impl<T: KeyValueStoreLike> SMTHelper<T> {
@@ -731,6 +1179,297 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         Ok(new_root)
+    }
+
+    /// Optimized batch calculation of state root for multiple keys
+    pub fn calculate_and_store_state_root_batched(
+        &mut self,
+        height: u32,
+        updated_keys: &[Vec<u8>],
+    ) -> Result<[u8; 32]> {
+        let prev_root = if height > 0 {
+            match self.get_smt_root_at_height(height - 1) {
+                Ok(root) => root,
+                Err(_) => EMPTY_NODE_HASH,
+            }
+        } else {
+            EMPTY_NODE_HASH
+        };
+
+        if updated_keys.is_empty() {
+            let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
+            self.storage.put(&root_key, &prev_root)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+            return Ok(prev_root);
+        }
+
+        // Create a batch for all operations
+        let mut batch = self.storage.create_batch();
+        
+        // Get all values in batch
+        let mut key_values = Vec::new();
+        for key in updated_keys {
+            if let Some(value) = self.bst_get_at_height(key, height)? {
+                key_values.push((key.clone(), value));
+            }
+        }
+
+        // Process all updates in a single pass
+        let new_root = self.compute_batched_smt_root(
+            prev_root,
+            &key_values,
+            height,
+            &mut batch,
+        )?;
+
+        // Store the new root in batch
+        let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
+        batch.put(root_key, new_root.to_vec());
+
+        // Write entire batch at once
+        self.storage.write(batch)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+
+        Ok(new_root)
+    }
+
+    /// Compute SMT root for multiple keys in batch
+    fn compute_batched_smt_root(
+        &mut self,
+        current_root: [u8; 32],
+        key_values: &[(Vec<u8>, Vec<u8>)],
+        height: u32,
+        batch: &mut T::Batch,
+    ) -> Result<[u8; 32]> {
+        let mut working_root = current_root;
+
+        // Process all keys in batch
+        for (key, value) in key_values {
+            working_root = self.update_smt_for_key_batched(
+                working_root,
+                key,
+                value,
+                height,
+                batch,
+            )?;
+        }
+
+        Ok(working_root)
+    }
+
+    /// Update SMT for a single key using batch operations
+    fn update_smt_for_key_batched(
+        &mut self,
+        current_root: [u8; 32],
+        key: &[u8],
+        value: &[u8],
+        height: u32,
+        batch: &mut T::Batch,
+    ) -> Result<[u8; 32]> {
+        let key_hash = Self::hash_key(key);
+        let value_hash = Self::hash_value(value);
+
+        // Create the new leaf node
+        let new_leaf = SMTNode::Leaf {
+            key: key.to_vec(),
+            value_index: value_hash,
+        };
+        let new_leaf_hash = Self::hash_node(&new_leaf);
+
+        // Add to batch instead of immediate storage
+        let leaf_node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_leaf_hash)).into_bytes();
+        batch.put(leaf_node_key, Self::serialize_node(&new_leaf));
+
+        let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
+        batch.put(value_key, value.to_vec());
+
+        if current_root == EMPTY_NODE_HASH {
+            return Ok(new_leaf_hash);
+        }
+
+        // Compute path updates using batch operations
+        let path_updates = self.compute_path_updates_batched(
+            current_root,
+            key_hash,
+            new_leaf_hash,
+            batch,
+        )?;
+
+        if let Some((_, new_root_hash)) = path_updates.last() {
+            Ok(*new_root_hash)
+        } else {
+            Ok(new_leaf_hash)
+        }
+    }
+
+    /// Compute path updates using batch operations
+    fn compute_path_updates_batched(
+        &mut self,
+        current_root: [u8; 32],
+        key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+        batch: &mut T::Batch,
+    ) -> Result<Vec<(usize, [u8; 32])>> {
+        let mut updates = Vec::new();
+        let mut current_hash = current_root;
+        let mut depth = 0;
+        let mut path_nodes = Vec::new();
+
+        // Traverse down
+        loop {
+            let node = match self.get_node(&current_hash)? {
+                Some(n) => n,
+                None => break,
+            };
+
+            match node {
+                SMTNode::Leaf { key: ref existing_key, .. } => {
+                    let existing_key_hash = Self::hash_key(existing_key);
+                    
+                    if existing_key_hash == key_hash {
+                        path_nodes.push((depth, node, true));
+                        break;
+                    } else {
+                        path_nodes.push((depth, node, false));
+                        break;
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    path_nodes.push((depth, node, false));
+                    
+                    let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+                    current_hash = if bit == 0 { left_child } else { right_child };
+                    depth += 1;
+
+                    if depth >= 256 {
+                        return Err(anyhow!("Maximum SMT depth exceeded"));
+                    }
+                }
+            }
+        }
+
+        // Build new nodes and add to batch
+        let mut new_child_hash = new_leaf_hash;
+
+        for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
+            match node {
+                SMTNode::Leaf { key: existing_key, value_index } => {
+                    if is_replacement {
+                        updates.push((node_depth, new_child_hash));
+                    } else {
+                        let existing_key_hash = Self::hash_key(&existing_key);
+                        let existing_leaf_hash = Self::hash_node(&SMTNode::Leaf {
+                            key: existing_key,
+                            value_index,
+                        });
+
+                        new_child_hash = self.create_separating_internals_batched(
+                            node_depth,
+                            existing_key_hash,
+                            existing_leaf_hash,
+                            key_hash,
+                            new_child_hash,
+                            batch,
+                        )?;
+                        updates.push((node_depth, new_child_hash));
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
+                    let new_internal = if bit == 0 {
+                        SMTNode::Internal {
+                            left_child: new_child_hash,
+                            right_child,
+                        }
+                    } else {
+                        SMTNode::Internal {
+                            left_child,
+                            right_child: new_child_hash,
+                        }
+                    };
+
+                    let new_internal_hash = Self::hash_node(&new_internal);
+                    let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_internal_hash)).into_bytes();
+                    batch.put(internal_key, Self::serialize_node(&new_internal));
+
+                    updates.push((node_depth, new_internal_hash));
+                    new_child_hash = new_internal_hash;
+                }
+            }
+        }
+
+        Ok(updates)
+    }
+
+    /// Create separating internals using batch operations
+    fn create_separating_internals_batched(
+        &mut self,
+        start_depth: usize,
+        existing_key_hash: [u8; 32],
+        existing_leaf_hash: [u8; 32],
+        new_key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+        batch: &mut T::Batch,
+    ) -> Result<[u8; 32]> {
+        let mut depth = start_depth;
+        let mut left_hash = EMPTY_NODE_HASH;
+        let mut right_hash = EMPTY_NODE_HASH;
+
+        // Find divergence point
+        while depth < 256 {
+            let existing_bit = (existing_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+            let new_bit = (new_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+
+            if existing_bit != new_bit {
+                if existing_bit == 0 {
+                    left_hash = existing_leaf_hash;
+                    right_hash = new_leaf_hash;
+                } else {
+                    left_hash = new_leaf_hash;
+                    right_hash = existing_leaf_hash;
+                }
+                break;
+            }
+            depth += 1;
+        }
+
+        if depth >= 256 {
+            return Err(anyhow!("Keys are identical - cannot separate"));
+        }
+
+        // Create internal node at divergence
+        let internal = SMTNode::Internal {
+            left_child: left_hash,
+            right_child: right_hash,
+        };
+        let internal_hash = Self::hash_node(&internal);
+        let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(internal_hash)).into_bytes();
+        batch.put(internal_key, Self::serialize_node(&internal));
+
+        // Create parent internals if needed
+        let mut current_hash = internal_hash;
+        for d in (start_depth..depth).rev() {
+            let bit = (new_key_hash[d / 8] >> (7 - (d % 8))) & 1;
+            let parent_internal = if bit == 0 {
+                SMTNode::Internal {
+                    left_child: current_hash,
+                    right_child: EMPTY_NODE_HASH,
+                }
+            } else {
+                SMTNode::Internal {
+                    left_child: EMPTY_NODE_HASH,
+                    right_child: current_hash,
+                }
+            };
+
+            let parent_hash = Self::hash_node(&parent_internal);
+            let parent_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(parent_hash)).into_bytes();
+            batch.put(parent_key, Self::serialize_node(&parent_internal));
+
+            current_hash = parent_hash;
+        }
+
+        Ok(current_hash)
     }
 
     /// Compute SMT root incrementally by only updating affected paths

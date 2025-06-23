@@ -43,6 +43,8 @@ pub mod smt_key_debug_test;
 #[cfg(test)]
 pub mod snapshot_repo_test;
 #[cfg(test)]
+pub mod snapshot_retention_test;
+#[cfg(test)]
 pub mod state_root_debug_test;
 #[cfg(test)]
 pub mod state_root_gap_test;

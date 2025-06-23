@@ -185,9 +185,17 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
     }
 
     /// Delete old snapshots beyond the configured limit
+    ///
+    /// NOTE: For snapshot repositories, we should maintain ALL snapshots to provide
+    /// a complete history. This method should only be used for local cleanup when
+    /// disk space is a concern, and should respect the max_snapshots configuration.
     async fn cleanup_snapshots(&mut self) -> SyncResult<usize> {
-        info!("Cleaning up old snapshots");
+        info!("Checking for snapshot cleanup (maintaining complete snapshot history)");
 
+        // For snapshot repositories, we should NOT automatically delete old snapshots
+        // as they provide the complete history needed for syncing from any point.
+        // Only clean up if explicitly configured with a max_snapshots limit.
+        
         let manager = self.manager.read().await;
         let intervals_dir = manager.config.directory.join("intervals");
 
@@ -195,6 +203,19 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             return Ok(0);
         }
 
+        // Check if we have a max_snapshots configuration
+        // For now, we'll disable automatic cleanup to maintain complete snapshot history
+        // This can be made configurable in the future if needed
+        let max_snapshots = None; // TODO: Add max_snapshots to SnapshotConfig if needed
+        
+        if max_snapshots.is_none() {
+            info!("No max_snapshots limit configured - maintaining complete snapshot history");
+            return Ok(0);
+        }
+
+        // If max_snapshots is configured, proceed with cleanup
+        let max_snapshots = max_snapshots.unwrap();
+        
         // Read all interval directories
         let mut entries = tokio::fs::read_dir(&intervals_dir).await.map_err(|e| {
             SyncError::Runtime(format!("Failed to read intervals directory: {}", e))
@@ -220,17 +241,21 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             }
         }
 
-        // Sort by end height (descending) and keep only the most recent 10
+        // Sort by end height (descending) and keep only the most recent max_snapshots
         intervals.sort_by(|a, b| b.0.cmp(&a.0));
 
         let mut removed_count = 0;
-        for (_, path) in intervals.into_iter().skip(10) {
+        for (_, path) in intervals.into_iter().skip(max_snapshots) {
             info!("Removing old snapshot directory: {:?}", path);
             if let Err(e) = tokio::fs::remove_dir_all(&path).await {
                 error!("Failed to remove snapshot directory {:?}: {}", path, e);
             } else {
                 removed_count += 1;
             }
+        }
+
+        if removed_count > 0 {
+            info!("Cleaned up {} old snapshots (keeping {} most recent)", removed_count, max_snapshots);
         }
 
         Ok(removed_count)

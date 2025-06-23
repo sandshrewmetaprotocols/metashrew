@@ -847,13 +847,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
                             ctx.state = 1;
+                            
+                            // Create a single SMTHelper for all operations
+                            let mut smt_helper = SMTHelper::new(ctx.db.clone());
+                            
                             // Write directly to the database
                             for (k, v) in decoded.list.iter().tuples() {
                                 let k_owned = <Vec<u8> as Clone>::clone(k);
                                 let v_owned = <Vec<u8> as Clone>::clone(v);
-
-                                // Create an SMTHelper to work with the BST
-                                let mut smt_helper = SMTHelper::new(ctx.db.clone());
 
                                 // Store in BST (no legacy annotation needed)
                                 if let Err(_) = smt_helper.bst_put(&k_owned, &v_owned, height) {
@@ -1035,6 +1036,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     // Create a mutable SMTHelper to work with the BST
                     let mut smt_helper = SMTHelper::new(db);
 
+                    // Collect all key-value pairs for batch processing
+                    let mut key_values = Vec::new();
                     for (k, v) in decoded.list.iter().tuples() {
                         let k_owned = <Vec<u8> as Clone>::clone(k);
                         let v_owned = <Vec<u8> as Clone>::clone(v);
@@ -1063,23 +1066,27 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 return;
                             }
                         }
+
+                        key_values.push(k_owned);
                     }
 
-                    log::debug!(
-                        "saving {:?} k/v pairs for block {:?}",
-                        decoded.list.len() / 2,
-                        height
-                    );
 
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
                             ctx.state = 1;
 
-                            // Calculate and store the state root for this height
-                            match smt_helper.calculate_and_store_state_root(height) {
-                                Ok(_state_root) => {},
+                            // Use batch optimization for state root calculation
+                            match smt_helper.calculate_and_store_state_root_batched(height, &key_values) {
+                                Ok(state_root) => {
+                                    log::info!(
+                                        "indexed block {} with {} k/v pairs, state root: {}",
+                                        height,
+                                        decoded.list.len() / 2,
+                                        hex::encode(state_root)
+                                    );
+                                },
                                 Err(e) => {
-                                    println!("ERROR: WASM runtime failed to calculate state root for height {}: {:?}", height, e);
+                                    log::error!("failed to calculate state root for height {}: {:?}", height, e);
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
@@ -1135,21 +1142,39 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 }
                             };
 
-                            let smt_helper = SMTHelper::new(db.clone());
-
-                            // Get the current value for this key (including current height)
-                            match smt_helper.bst_get_current(&key_vec) {
-                                Ok(Some(lookup)) => {
-                                    if let Err(_) =
-                                        mem.write(&mut caller, value as usize, lookup.as_slice())
-                                    {
-                                        caller.data_mut().had_failure = true;
+                            // Use direct BST lookup without creating new SMTHelper
+                            let height_key = format!("{}{}:", crate::smt::BST_HEIGHT_PREFIX, hex::encode(&key_vec));
+                            
+                            // Find the highest height for this key
+                            match db.scan_prefix(height_key.as_bytes()) {
+                                Ok(entries) => {
+                                    let mut highest_value = None;
+                                    let mut highest_height = 0u32;
+                                    
+                                    for (key, value) in entries {
+                                        let key_str = String::from_utf8_lossy(&key);
+                                        if let Some(height_str) = key_str.strip_prefix(&height_key) {
+                                            if let Ok(height) = height_str.parse::<u32>() {
+                                                if height >= highest_height {
+                                                    highest_height = height;
+                                                    highest_value = Some(value);
+                                                }
+                                            }
+                                        }
                                     }
-                                }
-                                Ok(None) => {
-                                    // Key not found, return empty
-                                    if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
-                                        caller.data_mut().had_failure = true;
+                                    
+                                    match highest_value {
+                                        Some(lookup) => {
+                                            if let Err(_) = mem.write(&mut caller, value as usize, lookup.as_slice()) {
+                                                caller.data_mut().had_failure = true;
+                                            }
+                                        }
+                                        None => {
+                                            // Key not found, return empty
+                                            if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
+                                                caller.data_mut().had_failure = true;
+                                            }
+                                        }
                                     }
                                 }
                                 Err(_) => {
@@ -1199,12 +1224,32 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 Err(_) => return i32::MAX,
                             };
 
-                            let smt_helper = SMTHelper::new(db.clone());
-
-                            // Get the current value for this key (including current height)
-                            match smt_helper.bst_get_current(&key_vec) {
-                                Ok(Some(value)) => value.len() as i32,
-                                Ok(None) => 0,
+                            // Use direct BST lookup without creating new SMTHelper
+                            let height_key = format!("{}{}:", crate::smt::BST_HEIGHT_PREFIX, hex::encode(&key_vec));
+                            
+                            // Find the highest height for this key
+                            match db.scan_prefix(height_key.as_bytes()) {
+                                Ok(entries) => {
+                                    let mut highest_value = None;
+                                    let mut highest_height = 0u32;
+                                    
+                                    for (key, value) in entries {
+                                        let key_str = String::from_utf8_lossy(&key);
+                                        if let Some(height_str) = key_str.strip_prefix(&height_key) {
+                                            if let Ok(height) = height_str.parse::<u32>() {
+                                                if height >= highest_height {
+                                                    highest_height = height;
+                                                    highest_value = Some(value);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    match highest_value {
+                                        Some(value) => value.len() as i32,
+                                        None => 0,
+                                    }
+                                }
                                 Err(_) => i32::MAX,
                             }
                         }
@@ -1363,6 +1408,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
         // Calculate the state root after execution
         let state_root = self.calculate_state_root()?;
+        
+        // Log the state root for atomic block processing
+        log::info!(
+            "processed block {} atomically, state root: {}",
+            height,
+            hex::encode(&state_root)
+        );
 
         // Get the accumulated batch operations
         let batch_data = self.get_accumulated_batch()?;

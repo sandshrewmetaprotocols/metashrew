@@ -13,7 +13,7 @@ pub const BST_HEIGHT_PREFIX: &str = "bst:height:";
 pub const KEYS_AT_HEIGHT_PREFIX: &str = "keys:height:";
 
 // Default empty hash (represents empty nodes)
-const EMPTY_NODE_HASH: [u8; 32] = [0; 32];
+pub const EMPTY_NODE_HASH: [u8; 32] = [0; 32];
 
 /// SMT node types
 #[derive(Debug, Clone)]
@@ -153,31 +153,45 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Get the SMT root for a specific height
     pub fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
-        // Find the closest height less than or equal to the requested height
-        let mut target_height = height;
-
-        loop {
-            let root_key = format!("{}{}", SMT_ROOT_PREFIX, target_height).into_bytes();
-            if let Some(root_data) = self
-                .storage
-                .get_immutable(&root_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-            {
-                if root_data.len() == 32 {
-                    let mut root = [0u8; 32];
-                    root.copy_from_slice(&root_data);
-                    return Ok(root);
-                }
+        // First, check if the exact height exists
+        let exact_root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
+        if let Some(root_data) = self
+            .storage
+            .get_immutable(&exact_root_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            if root_data.len() == 32 {
+                let mut root = [0u8; 32];
+                root.copy_from_slice(&root_data);
+                return Ok(root);
             }
-
-            // If we've reached height 0 and found nothing, return error
-            if target_height == 0 {
-                break;
-            }
-            target_height -= 1;
         }
 
-        // If no root found, return an error instead of empty hash
+        // If exact height not found, look for the closest previous height
+        if height > 0 {
+            let mut target_height = height - 1;
+            loop {
+                let root_key = format!("{}{}", SMT_ROOT_PREFIX, target_height).into_bytes();
+                if let Some(root_data) = self
+                    .storage
+                    .get_immutable(&root_key)
+                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+                {
+                    if root_data.len() == 32 {
+                        let mut root = [0u8; 32];
+                        root.copy_from_slice(&root_data);
+                        return Ok(root);
+                    }
+                }
+
+                if target_height == 0 {
+                    break;
+                }
+                target_height -= 1;
+            }
+        }
+
+        // If no root found at all, return an error
         Err(anyhow!(
             "No state root found for height {} or any previous height",
             height
@@ -682,11 +696,14 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(results)
     }
 
-    /// Calculate and store the SMT state root for a specific height
+    /// Calculate and store the SMT state root for a specific height using incremental updates
     pub fn calculate_and_store_state_root(&mut self, height: u32) -> Result<[u8; 32]> {
         let prev_root = if height > 0 {
             // For heights > 0, get the previous state root
-            self.get_smt_root_at_height(height - 1)?
+            match self.get_smt_root_at_height(height - 1) {
+                Ok(root) => root,
+                Err(_) => EMPTY_NODE_HASH, // If no previous root exists, start with empty
+            }
         } else {
             // For height 0, start with empty root
             EMPTY_NODE_HASH
@@ -704,36 +721,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             return Ok(prev_root);
         }
 
-        // Build a map of all current key-value pairs for SMT calculation
-        let mut current_state = BTreeMap::new();
-
-        // Get all unique keys that exist in the database up to this height
-        let prefix = BST_HEIGHT_PREFIX.as_bytes();
-        let mut all_keys = std::collections::HashSet::new();
-
-        // Scan all BST entries to find unique keys
-        for (key, _) in self.storage.scan_prefix(prefix)? {
-            let key_str = String::from_utf8_lossy(&key);
-            if let Some(rest) = key_str.strip_prefix(BST_HEIGHT_PREFIX) {
-                // Format is: {hex_key}:{height}
-                if let Some(colon_pos) = rest.find(':') {
-                    let hex_key = &rest[..colon_pos];
-                    if let Ok(original_key) = hex::decode(hex_key) {
-                        all_keys.insert(original_key);
-                    }
-                }
-            }
-        }
-
-        // For each key, get its value at this height
-        for key in all_keys {
-            if let Ok(Some(value)) = self.bst_get_at_height(&key, height) {
-                current_state.insert(key.clone(), value);
-            }
-        }
-
-        // Calculate the new SMT root based on current state
-        let new_root = self.compute_smt_root_from_state(&current_state)?;
+        // Use incremental SMT updates instead of full state enumeration
+        let new_root = self.compute_incremental_smt_root(prev_root, &updated_keys, height)?;
 
         // Store the new root
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
@@ -744,14 +733,272 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(new_root)
     }
 
+    /// Compute SMT root incrementally by only updating affected paths
+    fn compute_incremental_smt_root(
+        &mut self,
+        current_root: [u8; 32],
+        updated_keys: &[Vec<u8>],
+        height: u32,
+    ) -> Result<[u8; 32]> {
+        let mut working_root = current_root;
+
+        // Process each updated key individually
+        for key in updated_keys {
+            // Get the current value for this key at this height
+            let value = match self.bst_get_at_height(key, height)? {
+                Some(v) => v,
+                None => continue, // Skip if no value found
+            };
+
+            // Update the SMT for this single key-value pair
+            working_root = self.update_smt_for_key(working_root, key, &value, height)?;
+        }
+
+        Ok(working_root)
+    }
+
+    /// Update the SMT for a single key-value pair, returning the new root
+    fn update_smt_for_key(
+        &mut self,
+        current_root: [u8; 32],
+        key: &[u8],
+        value: &[u8],
+        height: u32,
+    ) -> Result<[u8; 32]> {
+        let key_hash = Self::hash_key(key);
+        let value_hash = Self::hash_value(value);
+
+        // Create the new leaf node
+        let new_leaf = SMTNode::Leaf {
+            key: key.to_vec(),
+            value_index: value_hash,
+        };
+        let new_leaf_hash = Self::hash_node(&new_leaf);
+
+        // Store the leaf node
+        let leaf_node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_leaf_hash)).into_bytes();
+        self.storage
+            .put(&leaf_node_key, &Self::serialize_node(&new_leaf))
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+
+        // Store the value with height annotation
+        let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
+        self.storage
+            .put(&value_key, value)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+
+        // If the tree is empty, the new leaf becomes the root
+        if current_root == EMPTY_NODE_HASH {
+            return Ok(new_leaf_hash);
+        }
+
+        // Find the path to insert/update this key
+        let path_updates = self.compute_path_updates(current_root, key_hash, new_leaf_hash)?;
+
+        // Apply the path updates and return the new root
+        if let Some((_, new_root_hash)) = path_updates.last() {
+            Ok(*new_root_hash)
+        } else {
+            Ok(new_leaf_hash)
+        }
+    }
+
+    /// Compute the minimal set of node updates needed for a key insertion/update
+    fn compute_path_updates(
+        &mut self,
+        current_root: [u8; 32],
+        key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+    ) -> Result<Vec<(usize, [u8; 32])>> {
+        let mut updates = Vec::new();
+        let mut current_hash = current_root;
+        let mut depth = 0;
+        let mut path_nodes = Vec::new();
+
+        // Traverse down to find the insertion point
+        loop {
+            let node = match self.get_node(&current_hash)? {
+                Some(n) => n,
+                None => break, // Empty subtree, insert here
+            };
+
+            match node {
+                SMTNode::Leaf { key: ref existing_key, .. } => {
+                    let existing_key_hash = Self::hash_key(existing_key);
+                    
+                    if existing_key_hash == key_hash {
+                        // Replacing existing leaf - path ends here
+                        path_nodes.push((depth, node, true)); // true = replace
+                        break;
+                    } else {
+                        // Need to create internal nodes to separate the keys
+                        path_nodes.push((depth, node, false)); // false = split
+                        break;
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    path_nodes.push((depth, node, false));
+                    
+                    // Determine which child to follow
+                    let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+                    current_hash = if bit == 0 { left_child } else { right_child };
+                    depth += 1;
+
+                    if depth >= 256 {
+                        return Err(anyhow!("Maximum SMT depth exceeded"));
+                    }
+                }
+            }
+        }
+
+        // Now build the new nodes from bottom up
+        let mut new_child_hash = new_leaf_hash;
+
+        // Process path nodes in reverse order (bottom up)
+        for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
+            match node {
+                SMTNode::Leaf { key: existing_key, value_index } => {
+                    if is_replacement {
+                        // Simple replacement - new leaf becomes the child
+                        updates.push((node_depth, new_child_hash));
+                        new_child_hash = new_child_hash;
+                    } else {
+                        // Need to split - create internal nodes
+                        let existing_key_hash = Self::hash_key(&existing_key);
+                        let existing_leaf_hash = Self::hash_node(&SMTNode::Leaf {
+                            key: existing_key,
+                            value_index,
+                        });
+
+                        // Create internal nodes to separate the keys
+                        new_child_hash = self.create_separating_internals(
+                            node_depth,
+                            existing_key_hash,
+                            existing_leaf_hash,
+                            key_hash,
+                            new_child_hash,
+                        )?;
+                        updates.push((node_depth, new_child_hash));
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    // Create new internal node with updated child
+                    let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
+                    let new_internal = if bit == 0 {
+                        SMTNode::Internal {
+                            left_child: new_child_hash,
+                            right_child,
+                        }
+                    } else {
+                        SMTNode::Internal {
+                            left_child,
+                            right_child: new_child_hash,
+                        }
+                    };
+
+                    let new_internal_hash = Self::hash_node(&new_internal);
+                    let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_internal_hash)).into_bytes();
+                    self.storage
+                        .put(&internal_key, &Self::serialize_node(&new_internal))
+                        .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+
+                    updates.push((node_depth, new_internal_hash));
+                    new_child_hash = new_internal_hash;
+                }
+            }
+        }
+
+        Ok(updates)
+    }
+
+    /// Create internal nodes to separate two leaf nodes with different key hashes
+    fn create_separating_internals(
+        &mut self,
+        start_depth: usize,
+        existing_key_hash: [u8; 32],
+        existing_leaf_hash: [u8; 32],
+        new_key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+    ) -> Result<[u8; 32]> {
+        let mut depth = start_depth;
+        let mut left_hash = EMPTY_NODE_HASH;
+        let mut right_hash = EMPTY_NODE_HASH;
+
+        // Find the first bit where the keys differ
+        while depth < 256 {
+            let existing_bit = (existing_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+            let new_bit = (new_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+
+            if existing_bit != new_bit {
+                // Keys diverge here - place the leaves
+                if existing_bit == 0 {
+                    left_hash = existing_leaf_hash;
+                    right_hash = new_leaf_hash;
+                } else {
+                    left_hash = new_leaf_hash;
+                    right_hash = existing_leaf_hash;
+                }
+                break;
+            }
+            depth += 1;
+        }
+
+        if depth >= 256 {
+            return Err(anyhow!("Keys are identical - cannot separate"));
+        }
+
+        // Create the internal node at the divergence point
+        let internal = SMTNode::Internal {
+            left_child: left_hash,
+            right_child: right_hash,
+        };
+        let internal_hash = Self::hash_node(&internal);
+        let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(internal_hash)).into_bytes();
+        self.storage
+            .put(&internal_key, &Self::serialize_node(&internal))
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+
+        // If we need more internal nodes above this point, create them
+        let mut current_hash = internal_hash;
+        for d in (start_depth..depth).rev() {
+            let bit = (new_key_hash[d / 8] >> (7 - (d % 8))) & 1;
+            let parent_internal = if bit == 0 {
+                SMTNode::Internal {
+                    left_child: current_hash,
+                    right_child: EMPTY_NODE_HASH,
+                }
+            } else {
+                SMTNode::Internal {
+                    left_child: EMPTY_NODE_HASH,
+                    right_child: current_hash,
+                }
+            };
+
+            let parent_hash = Self::hash_node(&parent_internal);
+            let parent_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(parent_hash)).into_bytes();
+            self.storage
+                .put(&parent_key, &Self::serialize_node(&parent_internal))
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+
+            current_hash = parent_hash;
+        }
+
+        Ok(current_hash)
+    }
+
     /// Compute SMT root from a complete state map
+    ///
+    /// WARNING: This method is deprecated and should only be used for testing or migration.
+    /// It enumerates the entire state which is inefficient for large databases.
+    /// Use compute_incremental_smt_root() instead for production workloads.
     fn compute_smt_root_from_state(&self, state: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<[u8; 32]> {
         if state.is_empty() {
             return Ok(EMPTY_NODE_HASH);
         }
 
-        // For a simple implementation, we'll hash all key-value pairs together
-        // In a production SMT, this would build the actual tree structure
+        // This is a simplified hash-based approach for compatibility
+        // A proper SMT would build the actual tree structure, but that would be
+        // even more expensive for large state maps
         let mut hasher = Sha256::new();
 
         // Add a salt to ensure we never get all zeros for non-empty state

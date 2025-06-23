@@ -11,6 +11,10 @@ pub mod runtime;
 pub mod smt;
 pub mod traits;
 
+// Test modules
+#[cfg(test)]
+pub mod tests;
+
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;
 pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};

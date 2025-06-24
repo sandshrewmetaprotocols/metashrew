@@ -6,9 +6,8 @@
 //! Use metashrew_runtime::smt::SMTHelper instead.
 
 // Re-export constants that were used by the old implementation
-pub use metashrew_runtime::smt::{
-    BST_HEIGHT_PREFIX as BST_HEIGHT_INDEX_PREFIX, BST_PREFIX as BST_KEY_PREFIX,
-};
+// These constants are no longer needed since we fixed the snapshot tracking
+// to use the correct constants directly from metashrew_runtime::smt
 
 // Re-export the generic SMT implementation for backward compatibility
 #[allow(unused_imports)]

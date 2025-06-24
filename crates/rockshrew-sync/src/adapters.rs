@@ -1,4 +1,90 @@
-//! Real adapter implementations for production use
+//! # Production Adapter Implementations
+//!
+//! This module provides concrete implementations of the adapter traits for production
+//! use with the Metashrew runtime system. These adapters bridge the generic synchronization
+//! framework with the actual Metashrew components, enabling real-world Bitcoin indexing
+//! applications.
+//!
+//! ## Core Adapters
+//!
+//! ### [`MetashrewRuntimeAdapter`]
+//! The primary runtime adapter that wraps the [`MetashrewRuntime`] for use with the
+//! synchronization framework. This adapter provides:
+//! - **WASM Execution**: Safe execution of indexer WASM modules
+//! - **Atomic Processing**: Support for atomic block processing with rollback
+//! - **View Functions**: Query execution against indexed state
+//! - **Preview Functions**: Hypothetical block processing for testing
+//! - **Memory Management**: Automatic memory refresh and optimization
+//!
+//! ## Integration Features
+//!
+//! ### Thread Safety
+//! All adapters are designed for safe concurrent access:
+//! - **Arc/Mutex Protection**: Shared ownership with exclusive access control
+//! - **Async Operations**: Non-blocking operations throughout
+//! - **Clone Support**: Efficient cloning for multi-threaded usage
+//! - **Send/Sync Bounds**: Safe transfer between threads
+//!
+//! ### Error Handling
+//! Comprehensive error handling with proper error type conversion:
+//! - **Error Mapping**: Convert Metashrew errors to sync framework errors
+//! - **Context Preservation**: Maintain error context for debugging
+//! - **Graceful Degradation**: Fallback strategies for failed operations
+//! - **Detailed Logging**: Comprehensive logging for troubleshooting
+//!
+//! ### Performance Optimization
+//! Optimized for high-throughput indexing:
+//! - **Atomic Operations**: Batch processing for improved performance
+//! - **Memory Efficiency**: Automatic memory management and cleanup
+//! - **Resource Monitoring**: Statistics collection for performance tuning
+//! - **Lazy Initialization**: Efficient resource allocation patterns
+//!
+//! ## Usage Examples
+//!
+//! ### Basic Runtime Adapter Setup
+//! ```rust
+//! use rockshrew_sync::adapters::*;
+//! use metashrew_runtime::*;
+//!
+//! // Create Metashrew runtime
+//! let runtime = MetashrewRuntime::new(storage, wasm_module)?;
+//!
+//! // Wrap in adapter
+//! let adapter = MetashrewRuntimeAdapter::new(runtime);
+//!
+//! // Use with sync engine
+//! let sync_engine = MetashrewSync::new(
+//!     node_adapter,
+//!     storage_adapter,
+//!     adapter,  // Runtime adapter
+//!     config
+//! );
+//! ```
+//!
+//! ### Shared Runtime Usage
+//! ```rust
+//! use std::sync::Arc;
+//! use tokio::sync::Mutex;
+//!
+//! // Create shared runtime
+//! let shared_runtime = Arc::new(Mutex::new(runtime));
+//!
+//! // Create adapter from shared runtime
+//! let adapter = MetashrewRuntimeAdapter::from_arc(shared_runtime.clone());
+//!
+//! // Runtime can be shared across multiple components
+//! ```
+//!
+//! ## Integration with Metashrew
+//!
+//! These adapters enable seamless integration between:
+//! - **Synchronization Framework**: Generic blockchain sync capabilities
+//! - **Metashrew Runtime**: WASM-based indexer execution environment
+//! - **Storage Systems**: Various database backends and storage adapters
+//! - **Bitcoin Nodes**: Different node implementations and protocols
+//!
+//! The adapters handle all the complexity of bridging these systems while
+//! maintaining type safety, performance, and reliability.
 
 use async_trait::async_trait;
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};

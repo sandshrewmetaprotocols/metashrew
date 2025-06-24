@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -30,9 +30,20 @@ impl RockshrewSnapshotProvider {
     }
 
     #[allow(dead_code)]
-    pub async fn initialize(&self, db_path: &Path) -> Result<()> {
+    pub async fn initialize(&self, current_height: u32) -> Result<()> {
         let mut manager = self.manager.write().await;
-        manager.initialize_with_db(db_path).await
+        
+        // Initialize the directory structure first
+        manager.initialize().await?;
+        
+        // Set the last_snapshot_height to the current height without opening the database
+        manager.last_snapshot_height = current_height;
+        info!(
+            "Set last snapshot height to {} for snapshot provider",
+            current_height
+        );
+        
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -56,25 +67,63 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             })?
         };
 
-        // Create snapshot using the existing manager
-        {
+        // Get the database handle to track changes
+        let db = {
+            let storage = self.storage.read().await;
+            storage.get_db_handle().await.map_err(|e| {
+                SyncError::Runtime(format!("Failed to get database handle: {}", e))
+            })?
+        };
+
+        // Track database changes for this snapshot interval
+        let (_start_height, actual_size) = {
             let mut manager = self.manager.write().await;
+            let start_height = manager.last_snapshot_height;
+            
+            info!("Tracking database changes for snapshot interval {}-{}", start_height, height);
+            
+            // Track all database changes that happened in this interval
+            manager.track_db_changes(&db, start_height, height).await.map_err(|e| {
+                SyncError::Runtime(format!("Failed to track database changes: {}", e))
+            })?;
+            
+            info!("Tracked {} key-value changes for snapshot", manager.key_changes.len());
+            
+            // Create the snapshot with the tracked changes
             manager
                 .create_snapshot(height, &state_root)
                 .await
                 .map_err(|e| SyncError::Runtime(format!("Failed to create snapshot: {}", e)))?;
-        }
+            
+            // Calculate the actual size of the snapshot data
+            let mut total_size = 0u64;
+            for (key, value) in &manager.key_changes {
+                total_size += 8; // 4 bytes for key length + 4 bytes for value length
+                total_size += key.len() as u64;
+                total_size += value.len() as u64;
+            }
+            
+            (start_height, total_size)
+        };
+
+        // Get block hash from storage
+        let block_hash = {
+            let storage = self.storage.read().await;
+            storage.get_block_hash(height).await?.unwrap_or_else(|| vec![0u8; 32])
+        };
+
+        info!("Successfully created snapshot for height {} with {} bytes of data", height, actual_size);
 
         // Return metadata in the format expected by the trait
         Ok(GenericMetadata {
             height,
-            block_hash: vec![0u8; 32], // TODO: Get actual block hash
+            block_hash,
             state_root,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            size_bytes: 0,             // TODO: Get actual size
+            size_bytes: actual_size,
             checksum: "".to_string(),  // TODO: Calculate checksum
             wasm_hash: "".to_string(), // TODO: Get WASM hash
         })
@@ -174,9 +223,17 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
     }
 
     /// Delete old snapshots beyond the configured limit
+    ///
+    /// NOTE: For snapshot repositories, we should maintain ALL snapshots to provide
+    /// a complete history. This method should only be used for local cleanup when
+    /// disk space is a concern, and should respect the max_snapshots configuration.
     async fn cleanup_snapshots(&mut self) -> SyncResult<usize> {
-        info!("Cleaning up old snapshots");
+        info!("Checking for snapshot cleanup (maintaining complete snapshot history)");
 
+        // For snapshot repositories, we should NOT automatically delete old snapshots
+        // as they provide the complete history needed for syncing from any point.
+        // Only clean up if explicitly configured with a max_snapshots limit.
+        
         let manager = self.manager.read().await;
         let intervals_dir = manager.config.directory.join("intervals");
 
@@ -184,6 +241,19 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             return Ok(0);
         }
 
+        // Check if we have a max_snapshots configuration
+        // For now, we'll disable automatic cleanup to maintain complete snapshot history
+        // This can be made configurable in the future if needed
+        let max_snapshots = None; // TODO: Add max_snapshots to SnapshotConfig if needed
+        
+        if max_snapshots.is_none() {
+            info!("No max_snapshots limit configured - maintaining complete snapshot history");
+            return Ok(0);
+        }
+
+        // If max_snapshots is configured, proceed with cleanup
+        let max_snapshots = max_snapshots.unwrap();
+        
         // Read all interval directories
         let mut entries = tokio::fs::read_dir(&intervals_dir).await.map_err(|e| {
             SyncError::Runtime(format!("Failed to read intervals directory: {}", e))
@@ -209,11 +279,11 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             }
         }
 
-        // Sort by end height (descending) and keep only the most recent 10
+        // Sort by end height (descending) and keep only the most recent max_snapshots
         intervals.sort_by(|a, b| b.0.cmp(&a.0));
 
         let mut removed_count = 0;
-        for (_, path) in intervals.into_iter().skip(10) {
+        for (_, path) in intervals.into_iter().skip(max_snapshots) {
             info!("Removing old snapshot directory: {:?}", path);
             if let Err(e) = tokio::fs::remove_dir_all(&path).await {
                 error!("Failed to remove snapshot directory {:?}: {}", path, e);
@@ -222,14 +292,29 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             }
         }
 
+        if removed_count > 0 {
+            info!("Cleaned up {} old snapshots (keeping {} most recent)", removed_count, max_snapshots);
+        }
+
         Ok(removed_count)
     }
 
     /// Check if a snapshot should be created at this height
     fn should_create_snapshot(&self, height: u32) -> bool {
-        // This is a synchronous method, so we can't access the async manager
-        // For now, use a simple heuristic
-        height > 0 && height % 1000 == 0
+        // We need to access the config synchronously, so we'll need to restructure this
+        // For now, let's use a blocking approach to get the interval
+        if height == 0 {
+            return false;
+        }
+        
+        // Try to get the interval from the manager config
+        // This is not ideal but works for the current architecture
+        if let Ok(manager) = self.manager.try_read() {
+            height % manager.config.interval == 0
+        } else {
+            // Fallback to a reasonable default if we can't access the config
+            height % 100 == 0
+        }
     }
 }
 

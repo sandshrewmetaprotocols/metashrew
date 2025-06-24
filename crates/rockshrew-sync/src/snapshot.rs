@@ -1,8 +1,140 @@
-//! Snapshot and repository mode traits and implementations
+//! # Snapshot and Repository Mode Infrastructure
 //!
-//! This module provides the infrastructure for snapshot-based synchronization
-//! where one instance can create snapshots at regular intervals and another
-//! instance can sync from those snapshots (repo mode).
+//! This module provides comprehensive infrastructure for snapshot-based synchronization,
+//! enabling fast bootstrap and distributed indexing architectures. The system supports
+//! both snapshot creation and consumption, allowing one instance to create periodic
+//! snapshots while other instances can rapidly sync from those snapshots.
+//!
+//! ## Core Concepts
+//!
+//! ### Snapshot-Based Synchronization
+//! Traditional blockchain synchronization requires processing every block from genesis,
+//! which can take days or weeks for Bitcoin. Snapshot-based sync enables:
+//! - **Fast Bootstrap**: Start indexing from a recent snapshot instead of genesis
+//! - **Distributed Architecture**: Multiple indexers sharing snapshot data
+//! - **Backup and Recovery**: Reliable state backup and restoration
+//! - **Development Efficiency**: Quick setup for testing and development
+//!
+//! ### Repository Mode
+//! Repository mode enables a distributed architecture where:
+//! - **Snapshot Providers**: Create and serve snapshots at regular intervals
+//! - **Snapshot Consumers**: Download and apply snapshots for fast sync
+//! - **Hybrid Operation**: Instances can both create and consume snapshots
+//! - **Automatic Fallback**: Seamless transition to normal sync after catching up
+//!
+//! ## Architecture Overview
+//!
+//! ### Snapshot Creation Pipeline
+//! 1. **State Capture**: Extract current indexed state at specific heights
+//! 2. **Compression**: Compress state data for efficient storage and transfer
+//! 3. **Metadata Generation**: Create checksums and verification data
+//! 4. **Storage**: Store snapshots locally or serve via HTTP
+//! 5. **Cleanup**: Remove old snapshots based on retention policies
+//!
+//! ### Snapshot Consumption Pipeline
+//! 1. **Discovery**: Find available snapshots from repositories
+//! 2. **Selection**: Choose optimal snapshot based on current state
+//! 3. **Download**: Retrieve snapshot data with integrity verification
+//! 4. **Verification**: Validate checksums and state consistency
+//! 5. **Application**: Apply snapshot to local storage
+//! 6. **Sync Continuation**: Resume normal sync from snapshot height
+//!
+//! ## Usage Examples
+//!
+//! ### Creating Snapshots
+//! ```rust
+//! use rockshrew_sync::snapshot::*;
+//!
+//! // Configure snapshot creation
+//! let config = SnapshotConfig {
+//!     snapshot_interval: 1000,  // Every 1000 blocks
+//!     max_snapshots: 10,        // Keep 10 snapshots
+//!     compression_level: 6,     // Balanced compression
+//!     reorg_buffer_size: 100,   // 100 blocks for reorg detection
+//! };
+//!
+//! // Create snapshot provider
+//! let mut provider = MySnapshotProvider::new(config);
+//!
+//! // Check if snapshot should be created
+//! if provider.should_create_snapshot(current_height) {
+//!     let metadata = provider.create_snapshot(current_height).await?;
+//!     println!("Created snapshot at height {}", metadata.height);
+//! }
+//! ```
+//!
+//! ### Consuming Snapshots
+//! ```rust
+//! use rockshrew_sync::snapshot::*;
+//!
+//! // Configure repository mode
+//! let config = RepoConfig {
+//!     repo_url: "https://snapshots.example.com".to_string(),
+//!     check_interval: 300,      // Check every 5 minutes
+//!     max_snapshot_age: 86400,  // Accept snapshots up to 24 hours old
+//!     continue_sync: true,      // Continue normal sync after catching up
+//!     min_blocks_behind: 100,   // Use snapshots if >100 blocks behind
+//! };
+//!
+//! // Create snapshot consumer
+//! let mut consumer = MySnapshotConsumer::new(config);
+//!
+//! // Check if snapshots should be used
+//! if consumer.should_use_snapshots(current_height, tip_height).await? {
+//!     if let Some(metadata) = consumer.get_best_snapshot(current_height, tip_height).await? {
+//!         consumer.apply_snapshot(&metadata).await?;
+//!         println!("Applied snapshot from height {}", metadata.height);
+//!     }
+//! }
+//! ```
+//!
+//! ### Serving Snapshots
+//! ```rust
+//! use rockshrew_sync::snapshot::*;
+//!
+//! // Create snapshot server
+//! let mut server = MySnapshotServer::new();
+//! server.start().await?;
+//!
+//! // Register new snapshots
+//! server.register_snapshot(metadata, snapshot_data).await?;
+//!
+//! // Server automatically handles HTTP requests for snapshot data
+//! ```
+//!
+//! ## Key Features
+//!
+//! ### Data Integrity
+//! - **Cryptographic Checksums**: SHA-256 verification of snapshot data
+//! - **State Root Validation**: Consistency checks using SMT state roots
+//! - **WASM Module Verification**: Ensure snapshots match indexer version
+//! - **Reorg Protection**: Include recent block hashes for fork detection
+//!
+//! ### Performance Optimization
+//! - **Compression**: Configurable compression levels for size/speed tradeoffs
+//! - **Streaming**: Large snapshots can be streamed for memory efficiency
+//! - **Parallel Processing**: Concurrent snapshot creation and consumption
+//! - **Incremental Updates**: Delta snapshots for efficient updates
+//!
+//! ### Operational Features
+//! - **Automatic Cleanup**: Configurable retention policies for old snapshots
+//! - **Health Monitoring**: Status reporting and availability checks
+//! - **Error Recovery**: Robust error handling and retry mechanisms
+//! - **Metrics Collection**: Comprehensive statistics for monitoring
+//!
+//! ## Integration Patterns
+//!
+//! ### Production Deployment
+//! - **Primary Indexer**: Creates snapshots while processing new blocks
+//! - **Replica Indexers**: Bootstrap from snapshots for fast deployment
+//! - **CDN Distribution**: Serve snapshots via content delivery networks
+//! - **Backup Strategy**: Regular snapshots for disaster recovery
+//!
+//! ### Development Workflow
+//! - **Quick Setup**: Developers can start from recent snapshots
+//! - **Testing**: Consistent test environments using snapshot data
+//! - **Debugging**: Reproduce issues from specific blockchain states
+//! - **Performance Testing**: Benchmark indexers with realistic data
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

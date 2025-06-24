@@ -314,26 +314,27 @@ impl SnapshotManager {
             start_height, end_height
         );
 
-        // Get all keys updated in this height range
-        let mut updated_keys: Vec<Vec<u8>> = Vec::new();
+        // Get all keys updated in this height range using the correct SMT constants
+        let mut updated_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
-        // Use BST key prefix and height index prefix directly
-        use crate::smt_helper::{BST_HEIGHT_INDEX_PREFIX, BST_KEY_PREFIX};
+        // Use the correct constants from metashrew_runtime::smt
+        use metashrew_runtime::smt::{KEYS_AT_HEIGHT_PREFIX, BST_HEIGHT_PREFIX};
 
         for height in start_height..=end_height {
-            // Create the prefix for this height
-            let prefix = format!("{}{}", BST_HEIGHT_INDEX_PREFIX, height);
+            // Create the prefix for keys tracked at this height
+            let prefix = format!("{}{}:", KEYS_AT_HEIGHT_PREFIX, height);
 
             // Iterate over all keys with this prefix
             let iter = db.prefix_iterator(prefix.as_bytes());
             for item in iter {
                 match item {
                     Ok((key, _)) => {
-                        // Extract the original key from the height index key
+                        // Extract the original key from the keys-at-height tracking key
+                        // Format is: "keys:height:{height}:{hex_encoded_key}"
                         let key_str = String::from_utf8_lossy(&key);
-                        if let Some(hex_key) = key_str.split(':').nth(1) {
+                        if let Some(hex_key) = key_str.strip_prefix(&prefix) {
                             if let Ok(original_key) = hex::decode(hex_key) {
-                                updated_keys.push(original_key);
+                                updated_keys.insert(original_key);
                             }
                         }
                     }
@@ -344,12 +345,26 @@ impl SnapshotManager {
             }
         }
 
-        // Get the latest value for each key
+        info!("Found {} unique keys updated in height range {}-{}", updated_keys.len(), start_height, end_height);
+
+        // Get the latest value for each key at the end height
         for key in updated_keys {
-            // Use the BST key format
-            let bst_key = [BST_KEY_PREFIX.as_bytes(), &key].concat();
-            if let Ok(Some(value)) = db.get(&bst_key) {
-                self.key_changes.insert(key, value.to_vec());
+            // Find the most recent value for this key up to end_height
+            let mut found_value = None;
+            
+            // Search backwards from end_height to find the most recent value
+            for h in (0..=end_height).rev() {
+                let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(&key), h);
+                if let Ok(Some(value)) = db.get(height_key.as_bytes()) {
+                    found_value = Some(value.to_vec());
+                    break;
+                }
+            }
+            
+            if let Some(value) = found_value {
+                self.key_changes.insert(key, value);
+            } else {
+                info!("No value found for tracked key: {}", hex::encode(&key));
             }
         }
 
@@ -358,10 +373,6 @@ impl SnapshotManager {
             self.key_changes.len()
         );
 
-        info!(
-            "Tracked {} key-value changes for snapshot",
-            self.key_changes.len()
-        );
         Ok(())
     }
 
@@ -708,18 +719,17 @@ impl SnapshotManager {
                 i += value_len;
 
                 // Apply to database using BST approach
-                let bst_key = [crate::smt_helper::BST_KEY_PREFIX.as_bytes(), &key].concat();
-                db.put(&bst_key, &value)?;
+                let bst_key = format!("{}{}:{}", metashrew_runtime::smt::BST_HEIGHT_PREFIX, hex::encode(&key), interval.end_height);
+                db.put(bst_key.as_bytes(), &value)?;
 
-                // Also store in height index
-                let height_index_key = format!(
+                // Also store in keys-at-height tracking
+                let keys_at_height_key = format!(
                     "{}{}:{}",
-                    crate::smt_helper::BST_HEIGHT_INDEX_PREFIX,
+                    metashrew_runtime::smt::KEYS_AT_HEIGHT_PREFIX,
                     interval.end_height,
                     hex::encode(&key)
-                )
-                .into_bytes();
-                db.put(&height_index_key, &[0u8; 0])?;
+                );
+                db.put(keys_at_height_key.as_bytes(), &[0u8; 0])?;
 
                 applied_keys += 1;
             }

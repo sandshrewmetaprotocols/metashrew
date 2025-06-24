@@ -2,8 +2,8 @@
 ## Technical Specification and Implementation Guide
 
 **Version:** 9.0.0  
-**Date:** December 2024  
-**Authors:** Metashrew Development Team  
+**Date:** June 23rd, 2025
+**Author:** Raymond Wesley Pulver IV
 
 ---
 

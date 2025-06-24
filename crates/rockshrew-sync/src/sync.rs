@@ -1,4 +1,94 @@
-//! Core synchronization engine implementation
+//! # Core Synchronization Engine Implementation
+//!
+//! This module provides the main synchronization engine that coordinates Bitcoin blockchain
+//! indexing using the adapter pattern. The [`MetashrewSync`] engine orchestrates the
+//! interaction between Bitcoin nodes, storage backends, and WASM runtime environments
+//! to provide reliable, high-performance blockchain indexing.
+//!
+//! ## Architecture Overview
+//!
+//! The synchronization engine implements a pipeline architecture with the following components:
+//!
+//! ### Pipeline Processing
+//! - **Block Fetcher**: Asynchronously fetches blocks from Bitcoin nodes
+//! - **Block Processor**: Processes blocks through WASM indexer modules
+//! - **Result Handler**: Manages processing results and error recovery
+//! - **Atomic Operations**: Ensures data consistency through atomic block processing
+//!
+//! ### Concurrency Model
+//! - **Parallel Fetching**: Blocks are fetched in parallel to maximize throughput
+//! - **Async Processing**: Non-blocking I/O operations throughout the pipeline
+//! - **Thread Safety**: Safe concurrent access to shared state using atomic operations
+//! - **Backpressure**: Automatic flow control to prevent memory exhaustion
+//!
+//! ### Error Recovery
+//! - **Graceful Degradation**: Fallback from atomic to non-atomic processing
+//! - **Retry Logic**: Automatic retry of failed operations with exponential backoff
+//! - **Chain Reorganization**: Detection and handling of blockchain forks
+//! - **State Consistency**: Rollback capabilities for maintaining data integrity
+//!
+//! ## Usage Examples
+//!
+//! ### Basic Synchronization
+//! ```rust
+//! use rockshrew_sync::*;
+//!
+//! // Create adapters
+//! let node_adapter = MyBitcoinNodeAdapter::new();
+//! let storage_adapter = MyStorageAdapter::new();
+//! let runtime_adapter = MyRuntimeAdapter::new();
+//!
+//! // Configure synchronization
+//! let config = SyncConfig {
+//!     start_block: 0,
+//!     exit_at: None,
+//!     pipeline_size: Some(10),
+//!     max_reorg_depth: 100,
+//!     reorg_check_threshold: 6,
+//! };
+//!
+//! // Create and start sync engine
+//! let mut sync_engine = MetashrewSync::new(
+//!     node_adapter,
+//!     storage_adapter,
+//!     runtime_adapter,
+//!     config
+//! );
+//!
+//! sync_engine.start().await?;
+//! ```
+//!
+//! ### JSON-RPC API Integration
+//! ```rust
+//! // The sync engine also implements JsonRpcProvider
+//! let result = sync_engine.metashrew_view(
+//!     "get_balance".to_string(),
+//!     "0x1234...".to_string(),
+//!     "latest".to_string()
+//! ).await?;
+//! ```
+//!
+//! ## Performance Characteristics
+//!
+//! ### Pipeline Optimization
+//! - **Adaptive Pipeline Size**: Automatically adjusts based on CPU cores
+//! - **Memory Management**: Controlled memory usage with bounded channels
+//! - **Batch Operations**: Efficient database operations through batching
+//! - **State Root Caching**: Optimized state root calculation and storage
+//!
+//! ### Monitoring and Observability
+//! - **Real-time Metrics**: Blocks per second, processing latency, error rates
+//! - **Status Reporting**: Current height, blocks behind, sync progress
+//! - **Health Checks**: Component availability and connectivity monitoring
+//! - **Detailed Logging**: Comprehensive logging for debugging and auditing
+//!
+//! ## Integration with Metashrew
+//!
+//! This engine serves as the foundation for:
+//! - **rockshrew-mono**: Production Bitcoin indexer implementation
+//! - **Custom indexers**: Application-specific blockchain data processing
+//! - **Development tools**: Testing and prototyping of indexing strategies
+//! - **API services**: JSON-RPC endpoints for accessing indexed data
 
 use async_trait::async_trait;
 use log::{debug, error, info, warn};

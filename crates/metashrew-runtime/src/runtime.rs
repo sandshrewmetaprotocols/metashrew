@@ -1,3 +1,69 @@
+//! Core WebAssembly runtime for executing Bitcoin indexers
+//!
+//! This module provides the main [`MetashrewRuntime`] struct that executes WebAssembly
+//! modules for Bitcoin block processing. It implements the host side of the WASM
+//! interface, providing functions that WASM modules can call to interact with the
+//! database and retrieve blockchain data.
+//!
+//! # Architecture
+//!
+//! The runtime follows a generic design pattern where it's parameterized over a
+//! storage type `T: KeyValueStoreLike`. This enables:
+//!
+//! - **Testing**: Use in-memory storage for fast unit tests
+//! - **Production**: Use RocksDB for persistent, high-performance storage
+//! - **Flexibility**: Support for future storage backends
+//!
+//! # Key Components
+//!
+//! ## WASM Execution Environment
+//!
+//! The runtime uses Wasmtime to execute WebAssembly modules with:
+//! - **Deterministic execution**: Configured for reproducible results
+//! - **Memory isolation**: Each block execution starts with fresh memory
+//! - **Resource limits**: Configurable memory and execution limits
+//! - **Host function bindings**: Provides database and I/O operations to WASM
+//!
+//! ## Host Functions
+//!
+//! The runtime provides these functions to WASM modules:
+//! - `__host_len()`: Get input data length
+//! - `__load_input(ptr)`: Load block data into WASM memory
+//! - `__get(key_ptr, value_ptr)`: Read from database
+//! - `__get_len(key_ptr)`: Get value length for a key
+//! - `__flush(data_ptr)`: Write key-value pairs to database
+//! - `__log(ptr)`: Output debug messages
+//!
+//! ## Execution Modes
+//!
+//! The runtime supports multiple execution modes:
+//! - **Normal**: Standard block processing with database writes
+//! - **View**: Read-only execution for querying state
+//! - **Preview**: Isolated execution for testing block effects
+//! - **Atomic**: Batch processing with rollback capability
+//!
+//! # Example Usage
+//!
+//! ```rust
+//! use metashrew_runtime::{MetashrewRuntime, traits::KeyValueStoreLike};
+//! use std::path::PathBuf;
+//!
+//! async fn process_blocks<T: KeyValueStoreLike>(
+//!     mut runtime: MetashrewRuntime<T>,
+//!     block_data: &[u8],
+//!     height: u32
+//! ) -> anyhow::Result<()> {
+//!     // Process a block
+//!     runtime.process_block(height, block_data).await?;
+//!
+//!     // Query the resulting state
+//!     let state_root = runtime.get_state_root(height).await?;
+//!     println!("State root: {}", hex::encode(state_root));
+//!
+//!     Ok(())
+//! }
+//! ```
+
 use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
 use protobuf::Message;
@@ -9,6 +75,10 @@ use crate::context::MetashrewRuntimeContext;
 use crate::smt::SMTHelper;
 use crate::traits::{BatchLike, KeyValueStoreLike};
 
+/// Internal key used to store the current blockchain tip height
+///
+/// This key is used internally by the runtime to track the highest block
+/// that has been successfully processed and committed to the database.
 pub const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 
 fn lock_err<T>(err: std::sync::PoisonError<T>) -> anyhow::Error {
@@ -21,12 +91,54 @@ fn try_into_vec<const N: usize>(bytes: [u8; N]) -> Result<Vec<u8>> {
 
 use crate::proto::metashrew::KeyValueFlush;
 
+/// WASM execution state tracking for deterministic execution
+///
+/// This struct maintains the execution state for a single WASM instance,
+/// including resource limits and failure tracking. It's designed to ensure
+/// deterministic execution across different environments.
+///
+/// # Fields
+///
+/// - `limits`: Resource limits for WASM execution (memory, tables, instances)
+/// - `had_failure`: Tracks whether any host function call failed during execution
+///
+/// # Deterministic Execution
+///
+/// The state is configured with maximum resource limits to ensure consistent
+/// behavior across different environments. Memory is pre-allocated to avoid
+/// non-deterministic growth patterns.
 pub struct State {
+    /// Resource limits for WASM execution
+    ///
+    /// Set to maximum values to ensure deterministic behavior by avoiding
+    /// dynamic resource allocation during execution.
     limits: StoreLimits,
+    
+    /// Tracks execution failures in host functions
+    ///
+    /// When a host function encounters an error (e.g., database failure,
+    /// memory access error), it sets this flag to signal the runtime
+    /// that execution should be aborted.
     had_failure: bool,
 }
 
 impl State {
+    /// Create a new WASM execution state with maximum resource limits
+    ///
+    /// # Returns
+    ///
+    /// A new [`State`] instance configured for deterministic execution with:
+    /// - Maximum memory allocation
+    /// - Maximum table allocation
+    /// - Maximum instance allocation
+    /// - No execution failures initially
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let state = State::new();
+    /// // State is ready for deterministic WASM execution
+    /// ```
     pub fn new() -> Self {
         State {
             limits: StoreLimitsBuilder::new()
@@ -39,15 +151,154 @@ impl State {
     }
 }
 
-/// Generic MetashrewRuntime that works with any storage backend
+/// Core WebAssembly runtime for executing Bitcoin indexers
+///
+/// [`MetashrewRuntime`] is the main execution engine that runs WebAssembly modules
+/// for Bitcoin block processing. It's generic over storage backends, enabling
+/// flexible deployment scenarios from testing to production.
+///
+/// # Type Parameters
+///
+/// - `T`: Storage backend implementing [`KeyValueStoreLike`] + [`Clone`] + [`Send`] + [`Sync`]
+///
+/// # Architecture
+///
+/// The runtime maintains both synchronous and asynchronous execution engines:
+/// - **Synchronous engine**: Used for block processing and preview operations
+/// - **Asynchronous engine**: Used for view functions and cooperative yielding
+///
+/// # Key Components
+///
+/// ## Execution Context
+/// - `context`: Shared state including database, block data, and execution height
+/// - `wasmstore`: WASM execution store with resource limits and failure tracking
+///
+/// ## WASM Engines
+/// - `engine`: Synchronous Wasmtime engine for block processing
+/// - `async_engine`: Asynchronous Wasmtime engine for view functions
+/// - `module`: Compiled WASM module for synchronous execution
+/// - `async_module`: Compiled WASM module for asynchronous execution
+///
+/// ## Host Interface
+/// - `linker`: Provides host functions to WASM modules
+/// - `instance`: Instantiated WASM module ready for execution
+///
+/// # Execution Modes
+///
+/// ## Block Processing (`run`)
+/// Normal block processing with database writes and state updates:
+/// ```rust
+/// runtime.run()?; // Process current block
+/// ```
+///
+/// ## View Functions (`view`)
+/// Read-only execution for querying historical state:
+/// ```rust
+/// let result = runtime.view("get_balance".to_string(), &input, height).await?;
+/// ```
+///
+/// ## Preview Mode (`preview`)
+/// Isolated execution for testing block effects without committing:
+/// ```rust
+/// let result = runtime.preview(&block_data, "view_function".to_string(), &input, height)?;
+/// ```
+///
+/// ## Atomic Processing (`process_block_atomic`)
+/// Batch processing with rollback capability:
+/// ```rust
+/// let atomic_result = runtime.process_block_atomic(height, &block_data, &block_hash).await?;
+/// ```
+///
+/// # Memory Management
+///
+/// The runtime ensures deterministic execution through:
+/// - **Memory isolation**: Fresh memory for each block execution
+/// - **Resource limits**: Pre-allocated maximum memory to avoid growth
+/// - **Automatic refresh**: Memory is reset after each block for consistency
+///
+/// # Thread Safety
+///
+/// All shared state is protected by [`Arc<Mutex<_>>`] for safe concurrent access.
+/// The runtime can be safely shared across threads for parallel view operations.
+///
+/// # Example Usage
+///
+/// ```rust
+/// use metashrew_runtime::{MetashrewRuntime, traits::KeyValueStoreLike};
+/// use std::path::PathBuf;
+///
+/// async fn run_indexer<T: KeyValueStoreLike + Clone + Send + Sync + 'static>(
+///     indexer_path: PathBuf,
+///     storage: T,
+///     block_data: &[u8],
+///     height: u32
+/// ) -> anyhow::Result<()> {
+///     // Load the runtime with WASM indexer
+///     let mut runtime = MetashrewRuntime::load(indexer_path, storage)?;
+///
+///     // Process a block
+///     runtime.process_block(height, block_data).await?;
+///
+///     // Query the resulting state
+///     let balance = runtime.view(
+///         "get_balance".to_string(),
+///         &address_bytes,
+///         height
+///     ).await?;
+///
+///     println!("Balance: {}", hex::encode(balance));
+///     Ok(())
+/// }
+/// ```
 pub struct MetashrewRuntime<T: KeyValueStoreLike> {
+    /// Shared execution context containing database, block data, and state
+    ///
+    /// Protected by [`Arc<Mutex<_>>`] for thread-safe access across
+    /// different execution modes and concurrent view operations.
     pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+    
+    /// Synchronous Wasmtime engine for block processing
+    ///
+    /// Configured for deterministic execution with:
+    /// - NaN canonicalization for consistent floating point
+    /// - Relaxed SIMD determinism
+    /// - Static memory allocation
     pub engine: wasmtime::Engine,
+    
+    /// Asynchronous Wasmtime engine for view functions
+    ///
+    /// Supports cooperative yielding and fuel-based execution limits
+    /// for long-running view operations that need to yield control.
     pub async_engine: wasmtime::Engine,
+    
+    /// WASM execution store with state tracking
+    ///
+    /// Contains the execution state including resource limits and
+    /// failure tracking. Reset after each block for deterministic behavior.
     pub wasmstore: wasmtime::Store<State>,
+    
+    /// Compiled WASM module for asynchronous execution
+    ///
+    /// Used by view functions and other operations that need
+    /// cooperative yielding and async execution.
     pub async_module: wasmtime::Module,
+    
+    /// Compiled WASM module for synchronous execution
+    ///
+    /// Used for block processing and other operations that
+    /// need deterministic, non-yielding execution.
     pub module: wasmtime::Module,
+    
+    /// Host function linker providing database and I/O operations
+    ///
+    /// Binds host functions like `__get`, `__flush`, `__log` that
+    /// WASM modules can call to interact with the database and runtime.
     pub linker: wasmtime::Linker<State>,
+    
+    /// Instantiated WASM module ready for execution
+    ///
+    /// Contains the loaded and linked WASM instance with all
+    /// host functions bound and ready to execute.
     pub instance: wasmtime::Instance,
 }
 
@@ -118,6 +369,60 @@ pub fn to_usize_or_trap<'a, T: TryInto<usize>>(_caller: &mut Caller<'_, State>, 
 }
 
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
+    /// Load and initialize a new MetashrewRuntime from a WASM indexer file
+    ///
+    /// This is the primary constructor that loads a WebAssembly indexer module
+    /// and sets up the complete runtime environment for Bitcoin block processing.
+    ///
+    /// # Parameters
+    ///
+    /// - `indexer`: Path to the compiled WASM indexer module file
+    /// - `store`: Storage backend implementing [`KeyValueStoreLike`]
+    ///
+    /// # Returns
+    ///
+    /// A fully initialized [`MetashrewRuntime`] ready for block processing
+    ///
+    /// # Configuration
+    ///
+    /// The runtime is configured for deterministic execution with:
+    /// - **NaN canonicalization**: Ensures consistent floating point behavior
+    /// - **Relaxed SIMD determinism**: Makes SIMD operations deterministic
+    /// - **Static memory allocation**: Pre-allocates 4GB maximum memory
+    /// - **Memory guards**: 64KB guard pages for memory safety
+    /// - **Async support**: Separate engine for cooperative yielding
+    ///
+    /// # Host Functions
+    ///
+    /// Sets up the complete host function interface:
+    /// - `__host_len()`: Get input data length
+    /// - `__load_input(ptr)`: Load block data into WASM memory
+    /// - `__get(key_ptr, value_ptr)`: Read from database
+    /// - `__get_len(key_ptr)`: Get value length for a key
+    /// - `__flush(data_ptr)`: Write key-value pairs to database
+    /// - `__log(ptr)`: Output debug messages
+    /// - `abort()`: Handle WASM abort calls
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - WASM module file cannot be loaded or parsed
+    /// - Engine configuration fails
+    /// - Module instantiation fails
+    /// - Host function binding fails
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use metashrew_runtime::MetashrewRuntime;
+    /// use std::path::PathBuf;
+    ///
+    /// // Load runtime with RocksDB storage
+    /// let runtime = MetashrewRuntime::load(
+    ///     PathBuf::from("indexer.wasm"),
+    ///     my_storage_backend
+    /// )?;
+    /// ```
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
@@ -174,6 +479,67 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         })
     }
 
+    /// Execute a block in preview mode with isolated database state
+    ///
+    /// Preview mode allows testing the effects of a block without committing
+    /// changes to the main database. It creates an isolated copy of the database,
+    /// processes the block, then executes a view function on the resulting state.
+    ///
+    /// # Parameters
+    ///
+    /// - `block`: Raw block data to process
+    /// - `symbol`: Name of the view function to execute after block processing
+    /// - `input`: Input data for the view function
+    /// - `height`: Block height for processing context
+    ///
+    /// # Returns
+    ///
+    /// The result of executing the view function on the preview state
+    ///
+    /// # Process Flow
+    ///
+    /// 1. **Create isolated database**: Copy current database state
+    /// 2. **Process block**: Execute `_start` function with block data
+    /// 3. **Create view runtime**: Set up new runtime for view execution
+    /// 4. **Execute view function**: Run the specified view function
+    /// 5. **Return result**: Extract and return the view function output
+    ///
+    /// # Isolation Guarantees
+    ///
+    /// - Changes are made to a database copy, not the original
+    /// - Original database state remains unchanged
+    /// - Multiple previews can run concurrently
+    /// - Preview state is discarded after execution
+    ///
+    /// # Use Cases
+    ///
+    /// - **Testing**: Validate block effects before committing
+    /// - **Simulation**: Explore "what-if" scenarios
+    /// - **Debugging**: Inspect intermediate state during development
+    /// - **Analysis**: Query state changes without persistence
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// // Preview the effect of a block on account balances
+    /// let balance_after = runtime.preview(
+    ///     &block_data,
+    ///     "get_balance".to_string(),
+    ///     &address_bytes,
+    ///     height
+    /// )?;
+    ///
+    /// println!("Balance after block: {}", hex::encode(balance_after));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Database copy creation fails
+    /// - Block processing fails during `_start` execution
+    /// - View function is not found in the WASM module
+    /// - View function execution fails
+    /// - Memory access errors occur
     pub fn preview(
         &self,
         block: &Vec<u8>,
@@ -282,6 +648,76 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         self.preview(block, symbol, input, height)
     }
 
+    /// Execute a view function to query historical blockchain state
+    ///
+    /// View functions provide read-only access to the blockchain state at any
+    /// historical block height. They use the asynchronous engine with cooperative
+    /// yielding to handle long-running queries without blocking.
+    ///
+    /// # Parameters
+    ///
+    /// - `symbol`: Name of the view function to execute
+    /// - `input`: Input data for the view function (typically query parameters)
+    /// - `height`: Block height to query (determines database state snapshot)
+    ///
+    /// # Returns
+    ///
+    /// The result of the view function execution as raw bytes
+    ///
+    /// # Execution Model
+    ///
+    /// - **Read-only**: No database modifications are allowed
+    /// - **Historical**: Queries state at the specified block height
+    /// - **Asynchronous**: Uses cooperative yielding for long operations
+    /// - **Isolated**: Each view runs in its own WASM instance
+    ///
+    /// # State Access
+    ///
+    /// View functions access historical state through:
+    /// - **BST queries**: Height-indexed binary search tree lookups
+    /// - **Immutable snapshots**: Consistent view of state at target height
+    /// - **Efficient indexing**: Optimized for historical range queries
+    ///
+    /// # Cooperative Yielding
+    ///
+    /// The async engine provides:
+    /// - **Fuel limits**: Prevents infinite loops and resource exhaustion
+    /// - **Yield intervals**: Periodic yielding for responsive execution
+    /// - **Cancellation**: Ability to abort long-running queries
+    ///
+    /// # Use Cases
+    ///
+    /// - **Balance queries**: Get account balances at specific heights
+    /// - **Transaction history**: Query transaction effects over time
+    /// - **State analysis**: Analyze protocol state evolution
+    /// - **API endpoints**: Power JSON-RPC query interfaces
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// // Query account balance at a specific block height
+    /// let balance = runtime.view(
+    ///     "get_balance".to_string(),
+    ///     &address_bytes,
+    ///     height
+    /// ).await?;
+    ///
+    /// // Query transaction count for an address
+    /// let tx_count = runtime.view(
+    ///     "get_transaction_count".to_string(),
+    ///     &address_bytes,
+    ///     height
+    /// ).await?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - View function is not found in the WASM module
+    /// - Input data is malformed or invalid
+    /// - Database query fails or times out
+    /// - WASM execution encounters an error
+    /// - Memory access violations occur
     pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
         let db = {
             let guard = self.context.lock().map_err(lock_err)?;
@@ -340,6 +776,74 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
 
+    /// Execute the current block through the WASM indexer
+    ///
+    /// This is the core block processing method that executes the WASM module's
+    /// `_start` function to process the current block data. It handles the complete
+    /// block processing lifecycle including chain reorganization detection,
+    /// execution, and memory cleanup.
+    ///
+    /// # Block Processing Flow
+    ///
+    /// 1. **Initialize state**: Reset execution state to 0 (starting)
+    /// 2. **Handle reorgs**: Check for and handle chain reorganizations
+    /// 3. **Execute WASM**: Call the `_start` function with current block data
+    /// 4. **Validate completion**: Ensure indexer completed successfully (state = 1)
+    /// 5. **Refresh memory**: Reset WASM memory for deterministic execution
+    ///
+    /// # Deterministic Execution
+    ///
+    /// The runtime ensures deterministic behavior through:
+    /// - **Memory isolation**: Fresh WASM memory for each block
+    /// - **State validation**: Strict execution state checking
+    /// - **Error handling**: Consistent error propagation
+    /// - **Resource limits**: Bounded execution resources
+    ///
+    /// # Chain Reorganization Handling
+    ///
+    /// Before processing, the method:
+    /// - Compares context height with database tip height
+    /// - Detects potential chain reorganizations
+    /// - Handles rollback scenarios (implementation pending)
+    ///
+    /// # Memory Management
+    ///
+    /// After each block execution:
+    /// - WASM memory is completely refreshed
+    /// - Module instance is recreated
+    /// - No state persists between blocks
+    /// - Ensures consistent execution environment
+    ///
+    /// # State Validation
+    ///
+    /// The method validates that:
+    /// - Indexer reaches completion state (state = 1)
+    /// - No host function failures occurred
+    /// - WASM execution completed without traps
+    ///
+    /// # Example Usage
+    ///
+    /// ```rust
+    /// // Set block data in context first
+    /// {
+    ///     let mut guard = runtime.context.lock()?;
+    ///     guard.block = block_data.to_vec();
+    ///     guard.height = height;
+    /// }
+    ///
+    /// // Process the block
+    /// runtime.run()?;
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Chain reorganization handling fails
+    /// - `_start` function is not found in WASM module
+    /// - WASM execution traps or fails
+    /// - Indexer exits without reaching completion state
+    /// - Memory refresh fails after execution
+    /// - Host function failures occur during execution
     pub fn run(&mut self) -> Result<(), anyhow::Error> {
         self.context.lock().map_err(lock_err)?.state = 0;
         let start = self

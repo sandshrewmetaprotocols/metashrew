@@ -1,44 +1,300 @@
+//! Sparse Merkle Tree implementation for blockchain state management
+//!
+//! This module provides a complete Sparse Merkle Tree (SMT) implementation optimized
+//! for Bitcoin indexing workloads. It combines traditional SMT operations with
+//! height-indexed Binary Search Trees (BST) for efficient historical state queries.
+//!
+//! # Architecture Overview
+//!
+//! The implementation uses a hybrid approach:
+//! - **Sparse Merkle Tree**: Provides cryptographic state commitments and proofs
+//! - **Height-Indexed BST**: Enables efficient historical queries at any block height
+//! - **Batch Operations**: Optimizes performance for block processing workloads
+//!
+//! # Key Features
+//!
+//! ## State Commitment
+//! - **Deterministic roots**: Same state always produces the same root hash
+//! - **Incremental updates**: Only affected paths are recomputed
+//! - **Cryptographic security**: SHA-256 based hashing for integrity
+//!
+//! ## Historical Queries
+//! - **Height indexing**: Query state at any historical block height
+//! - **Efficient lookups**: Binary search optimization for height ranges
+//! - **Rollback support**: Revert state to previous heights
+//!
+//! ## Performance Optimization
+//! - **Batch processing**: Group operations for better database performance
+//! - **Caching**: In-memory caches for frequently accessed nodes
+//! - **Lazy evaluation**: Compute only what's needed for current operations
+//!
+//! # Database Schema
+//!
+//! The implementation uses several key prefixes for data organization:
+//!
+//! - `smt:node:`: SMT internal and leaf nodes
+//! - `smt:root:`: State roots at specific heights
+//! - `bst:height:`: Height-indexed key-value pairs
+//! - `keys:height:`: Keys modified at specific heights
+//!
+//! # Usage Patterns
+//!
+//! ## Block Processing
+//! ```rust
+//! let mut smt_helper = SMTHelper::new(storage);
+//!
+//! // Store key-value pairs with height indexing
+//! smt_helper.bst_put(key, value, height)?;
+//!
+//! // Calculate and store state root
+//! let state_root = smt_helper.calculate_and_store_state_root(height)?;
+//! ```
+//!
+//! ## Historical Queries
+//! ```rust
+//! // Query value at specific height
+//! let value = smt_helper.bst_get_at_height(key, height)?;
+//!
+//! // Get state root at height
+//! let root = smt_helper.get_smt_root_at_height(height)?;
+//! ```
+//!
+//! ## Batch Operations
+//! ```rust
+//! let mut batched_helper = BatchedSMTHelper::new(storage);
+//! let state_root = batched_helper.calculate_and_store_state_root_batched(
+//!     height,
+//!     &updated_keys
+//! )?;
+//! ```
+
 use crate::traits::{BatchLike, KeyValueStoreLike};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 
-// Prefixes for different types of keys in the database
+/// Database key prefix for SMT internal and leaf nodes
+///
+/// Format: `smt:node:{node_hash}` where node_hash is hex-encoded
 pub const SMT_NODE_PREFIX: &str = "smt:node:";
+
+/// Database key prefix for SMT state roots at specific heights
+///
+/// Format: `smt:root:{height}` where height is the block height
 pub const SMT_ROOT_PREFIX: &str = "smt:root:";
+
+/// Database key prefix for SMT leaf nodes (legacy, use SMT_NODE_PREFIX)
+///
+/// Format: `smt:leaf:{key_hash}` where key_hash is hex-encoded
 pub const SMT_LEAF_PREFIX: &str = "smt:leaf:";
+
+/// Database key prefix for height-indexed values (legacy SMT approach)
+///
+/// Format: `smt:height:{key}:{height}` where key is hex-encoded
 pub const HEIGHT_INDEX_PREFIX: &str = "smt:height:";
+
+/// Database key prefix for BST operations (legacy, use BST_HEIGHT_PREFIX)
+///
+/// Format: `bst:{key}` where key is hex-encoded
 pub const BST_PREFIX: &str = "bst:";
+
+/// Database key prefix for height-indexed BST key-value pairs
+///
+/// Format: `bst:height:{key}:{height}` where key is hex-encoded
 pub const BST_HEIGHT_PREFIX: &str = "bst:height:";
+
+/// Database key prefix for tracking keys modified at specific heights
+///
+/// Format: `keys:height:{height}:{key}` where key is hex-encoded
 pub const KEYS_AT_HEIGHT_PREFIX: &str = "keys:height:";
 
-// Default empty hash (represents empty nodes)
+/// Empty node hash representing uninitialized or empty SMT nodes
+///
+/// This constant is used throughout the SMT to represent:
+/// - Empty subtrees in internal nodes
+/// - Uninitialized state roots
+/// - Default values for missing nodes
 pub const EMPTY_NODE_HASH: [u8; 32] = [0; 32];
 
-/// SMT node types
+/// Sparse Merkle Tree node types
+///
+/// SMT nodes can be either internal nodes (with two children) or leaf nodes
+/// (containing actual key-value data). This enum represents both types with
+/// their associated data structures.
+///
+/// # Node Structure
+///
+/// ## Internal Nodes
+/// Internal nodes contain references (hashes) to their left and right children.
+/// They don't store actual data but serve as routing nodes in the tree structure.
+///
+/// ## Leaf Nodes
+/// Leaf nodes contain the actual key and a reference to the value. The value
+/// itself is stored separately with height indexing for historical queries.
+///
+/// # Hashing
+///
+/// Each node type has a different hash calculation:
+/// - Internal: `SHA256(0x00 || left_hash || right_hash)`
+/// - Leaf: `SHA256(0x01 || key || value_hash)`
+///
+/// # Serialization
+///
+/// Nodes are serialized for database storage with type prefixes:
+/// - Internal: `[0x00, left_hash[32], right_hash[32]]` (65 bytes)
+/// - Leaf: `[0x01, key_len[4], key[...], value_hash[32]]` (variable length)
 #[derive(Debug, Clone)]
 pub enum SMTNode {
+    /// Internal node with references to left and right children
+    ///
+    /// Internal nodes route traversal based on key hash bits. The left child
+    /// corresponds to bit value 0, right child to bit value 1 at the current depth.
     Internal {
+        /// Hash of the left child node (bit 0 path)
         left_child: [u8; 32],
+        /// Hash of the right child node (bit 1 path)
         right_child: [u8; 32],
     },
+    /// Leaf node containing actual key-value data
+    ///
+    /// Leaf nodes store the original key and a hash reference to the value.
+    /// The actual value is stored separately with height indexing.
     Leaf {
+        /// Original key bytes (not hashed)
         key: Vec<u8>,
-        value_index: [u8; 32], // Reference to the latest value
+        /// SHA-256 hash of the value (reference to actual value)
+        value_index: [u8; 32],
     },
 }
 
-/// Helper functions for SMT operations
+/// Core Sparse Merkle Tree operations and utilities
+///
+/// [`SMTHelper`] provides the fundamental SMT operations including node management,
+/// state root calculation, and historical queries. It combines traditional SMT
+/// functionality with height-indexed Binary Search Tree operations for efficient
+/// blockchain state management.
+///
+/// # Type Parameters
+///
+/// - `T`: Storage backend implementing [`KeyValueStoreLike`]
+///
+/// # Core Functionality
+///
+/// ## SMT Operations
+/// - **Node management**: Create, store, and retrieve SMT nodes
+/// - **Tree traversal**: Navigate the tree structure for queries and updates
+/// - **State roots**: Calculate cryptographic commitments to state
+///
+/// ## BST Operations
+/// - **Height indexing**: Store and query values at specific block heights
+/// - **Historical queries**: Retrieve state at any historical height
+/// - **Rollback support**: Revert state changes to previous heights
+///
+/// ## Batch Processing
+/// - **Incremental updates**: Only recompute affected tree paths
+/// - **Batch optimization**: Group database operations for performance
+/// - **Memory management**: Efficient handling of large state updates
+///
+/// # Usage Patterns
+///
+/// ## Basic Operations
+/// ```rust
+/// let mut smt = SMTHelper::new(storage);
+///
+/// // Store a key-value pair at specific height
+/// smt.bst_put(b"key", b"value", height)?;
+///
+/// // Calculate state root for the height
+/// let root = smt.calculate_and_store_state_root(height)?;
+/// ```
+///
+/// ## Historical Queries
+/// ```rust
+/// // Get value at specific height
+/// let value = smt.bst_get_at_height(b"key", height)?;
+///
+/// // Get all heights where key was modified
+/// let heights = smt.bst_get_heights_for_key(b"key")?;
+/// ```
+///
+/// ## State Management
+/// ```rust
+/// // Get current state root
+/// let current_root = smt.get_current_state_root()?;
+///
+/// // Rollback to previous height
+/// smt.bst_rollback_to_height(target_height)?;
+/// ```
 pub struct SMTHelper<T: KeyValueStoreLike> {
+    /// Storage backend for persisting SMT nodes and data
     pub storage: T,
 }
 
-/// Optimized batch-based SMT operations for better performance
+/// High-performance batched SMT operations with caching
+///
+/// [`BatchedSMTHelper`] provides optimized SMT operations designed for high-throughput
+/// block processing. It uses in-memory caching and batch database operations to
+/// minimize I/O overhead during intensive workloads.
+///
+/// # Type Parameters
+///
+/// - `T`: Storage backend implementing [`KeyValueStoreLike`]
+///
+/// # Performance Optimizations
+///
+/// ## Caching Strategy
+/// - **Node cache**: Frequently accessed SMT nodes kept in memory
+/// - **Key hash cache**: Pre-computed key hashes to avoid repeated SHA-256
+/// - **Batch operations**: Group database writes for better performance
+///
+/// ## Memory Management
+/// - **Block-scoped caches**: Caches are cleared after each block
+/// - **Deterministic behavior**: No persistent state between blocks
+/// - **Memory bounds**: Caches are bounded to prevent memory exhaustion
+///
+/// ## Batch Processing
+/// - **Atomic operations**: All changes in a block are applied atomically
+/// - **Optimized traversal**: Cached nodes reduce database lookups
+/// - **Bulk updates**: Process multiple keys efficiently
+///
+/// # Usage Pattern
+///
+/// ```rust
+/// let mut batched_smt = BatchedSMTHelper::new(storage);
+///
+/// // Process multiple keys in a single batch
+/// let state_root = batched_smt.calculate_and_store_state_root_batched(
+///     height,
+///     &updated_keys
+/// )?;
+///
+/// // Caches are automatically cleared after processing
+/// assert!(batched_smt.caches_are_empty());
+/// ```
+///
+/// # Cache Lifecycle
+///
+/// 1. **Initialization**: Caches start empty
+/// 2. **Population**: Nodes and hashes are cached during processing
+/// 3. **Usage**: Subsequent operations benefit from cached data
+/// 4. **Cleanup**: Caches are cleared after block completion
+///
+/// # Thread Safety
+///
+/// This struct is not thread-safe due to internal mutable caches.
+/// Use separate instances for concurrent operations.
 pub struct BatchedSMTHelper<T: KeyValueStoreLike> {
+    /// Storage backend for persisting SMT nodes and data
     pub storage: T,
-    // In-memory cache for the current block processing (cleared after each block)
+    /// In-memory cache for SMT nodes during current block processing
+    ///
+    /// This cache stores frequently accessed nodes to reduce database I/O.
+    /// It's cleared after each block to ensure deterministic behavior.
     node_cache: HashMap<[u8; 32], SMTNode>,
-    // Pre-computed key hashes to avoid repeated hashing
+    /// Pre-computed key hashes to avoid repeated SHA-256 operations
+    ///
+    /// Since key hashing is expensive and keys are often reused within
+    /// a block, this cache provides significant performance benefits.
     key_hash_cache: HashMap<Vec<u8>, [u8; 32]>,
 }
 
@@ -482,25 +738,121 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 }
 
 impl<T: KeyValueStoreLike> SMTHelper<T> {
+    /// Create a new SMTHelper with the given storage backend
+    ///
+    /// # Parameters
+    ///
+    /// - `storage`: Storage backend implementing [`KeyValueStoreLike`]
+    ///
+    /// # Returns
+    ///
+    /// A new [`SMTHelper`] instance ready for SMT operations
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let smt = SMTHelper::new(my_storage_backend);
+    /// ```
     pub fn new(storage: T) -> Self {
         Self { storage }
     }
 
-    /// Hash a key to get a fixed-length path
+    /// Hash a key to produce a deterministic 256-bit path through the SMT
+    ///
+    /// This function converts arbitrary-length keys into fixed-length hashes
+    /// that serve as paths through the binary tree. The hash determines the
+    /// route from root to leaf: each bit indicates left (0) or right (1).
+    ///
+    /// # Parameters
+    ///
+    /// - `key`: The key bytes to hash
+    ///
+    /// # Returns
+    ///
+    /// A 32-byte SHA-256 hash that serves as the SMT path
+    ///
+    /// # Determinism
+    ///
+    /// This function is deterministic - the same key always produces the
+    /// same hash, ensuring consistent tree structure across different runs.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let key_hash = SMTHelper::<Storage>::hash_key(b"my_key");
+    /// // key_hash is now a 32-byte path through the SMT
+    /// ```
     pub fn hash_key(key: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(key);
         hasher.finalize().into()
     }
 
-    /// Hash a value to get a fixed-length reference
+    /// Hash a value to produce a deterministic content identifier
+    ///
+    /// This function creates a content-addressable reference to values.
+    /// The hash serves as both an integrity check and a compact reference
+    /// that can be stored in SMT leaf nodes.
+    ///
+    /// # Parameters
+    ///
+    /// - `value`: The value bytes to hash
+    ///
+    /// # Returns
+    ///
+    /// A 32-byte SHA-256 hash serving as the value identifier
+    ///
+    /// # Usage
+    ///
+    /// Value hashes are stored in SMT leaf nodes while the actual values
+    /// are stored separately with height indexing for historical queries.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let value_hash = SMTHelper::<Storage>::hash_value(b"my_value");
+    /// // value_hash can be stored in an SMT leaf node
+    /// ```
     pub fn hash_value(value: &[u8]) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(value);
         hasher.finalize().into()
     }
 
-    /// Hash a node to get its identifier
+    /// Hash an SMT node to produce its unique identifier
+    ///
+    /// This function creates deterministic hashes for SMT nodes that serve
+    /// as both node identifiers and integrity checks. Different node types
+    /// use different hash formats to prevent collision attacks.
+    ///
+    /// # Parameters
+    ///
+    /// - `node`: The SMT node to hash
+    ///
+    /// # Returns
+    ///
+    /// A 32-byte SHA-256 hash uniquely identifying the node
+    ///
+    /// # Hash Format
+    ///
+    /// ## Internal Nodes
+    /// `SHA256(0x00 || left_child_hash || right_child_hash)`
+    ///
+    /// ## Leaf Nodes
+    /// `SHA256(0x01 || key || value_hash)`
+    ///
+    /// The type prefix (0x00/0x01) prevents collision attacks between
+    /// internal and leaf nodes with similar content.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// let leaf = SMTNode::Leaf {
+    ///     key: b"key".to_vec(),
+    ///     value_index: value_hash,
+    /// };
+    /// let node_hash = SMTHelper::<Storage>::hash_node(&leaf);
+    /// ```
     pub fn hash_node(node: &SMTNode) -> [u8; 32] {
         let mut hasher = Sha256::new();
         match node {

@@ -899,6 +899,6 @@ This specification provides a complete technical reference that maps directly to
 ---
 
 **Document Version:** 1.0
-**Last Updated:** December 2024
+**Last Updated:** June 2025
 **License:** MIT License
 **Repository:** https://github.com/sandshrewmetaprotocols/metashrew

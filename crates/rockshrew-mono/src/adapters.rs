@@ -418,6 +418,11 @@ impl StorageAdapter for RocksDBStorageAdapter {
             storage_size_bytes,
         })
     }
+
+    /// Get the underlying database handle for snapshot operations
+    async fn get_db_handle(&self) -> SyncResult<Arc<DB>> {
+        Ok(self.db.clone())
+    }
 }
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime

@@ -827,7 +827,7 @@ async fn main() -> Result<()> {
                 enabled: true,
             };
             
-            let mut provider = RockshrewSnapshotProvider::new(snapshot_config, storage_adapter_ref.clone());
+            let provider = RockshrewSnapshotProvider::new(snapshot_config, storage_adapter_ref.clone());
             
             // Initialize the snapshot directory structure with current height
             if let Err(e) = provider.initialize(start_block).await {

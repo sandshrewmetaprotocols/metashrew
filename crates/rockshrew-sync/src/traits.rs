@@ -54,6 +54,12 @@ pub trait StorageAdapter: Send + Sync {
 
     /// Get storage statistics (size, entries, etc.)
     async fn get_stats(&self) -> SyncResult<StorageStats>;
+
+    /// Get the underlying database handle for snapshot operations
+    /// This is specific to RocksDB implementations and may not be available for all storage adapters
+    async fn get_db_handle(&self) -> SyncResult<std::sync::Arc<rocksdb::DB>> {
+        Err(crate::SyncError::Storage("Database handle not available for this storage adapter".to_string()))
+    }
 }
 
 /// Storage statistics

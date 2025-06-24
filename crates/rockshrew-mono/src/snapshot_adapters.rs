@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use log::{debug, error, info};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -67,25 +67,63 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
             })?
         };
 
-        // Create snapshot using the existing manager
-        {
+        // Get the database handle to track changes
+        let db = {
+            let storage = self.storage.read().await;
+            storage.get_db_handle().await.map_err(|e| {
+                SyncError::Runtime(format!("Failed to get database handle: {}", e))
+            })?
+        };
+
+        // Track database changes for this snapshot interval
+        let (_start_height, actual_size) = {
             let mut manager = self.manager.write().await;
+            let start_height = manager.last_snapshot_height;
+            
+            info!("Tracking database changes for snapshot interval {}-{}", start_height, height);
+            
+            // Track all database changes that happened in this interval
+            manager.track_db_changes(&db, start_height, height).await.map_err(|e| {
+                SyncError::Runtime(format!("Failed to track database changes: {}", e))
+            })?;
+            
+            info!("Tracked {} key-value changes for snapshot", manager.key_changes.len());
+            
+            // Create the snapshot with the tracked changes
             manager
                 .create_snapshot(height, &state_root)
                 .await
                 .map_err(|e| SyncError::Runtime(format!("Failed to create snapshot: {}", e)))?;
-        }
+            
+            // Calculate the actual size of the snapshot data
+            let mut total_size = 0u64;
+            for (key, value) in &manager.key_changes {
+                total_size += 8; // 4 bytes for key length + 4 bytes for value length
+                total_size += key.len() as u64;
+                total_size += value.len() as u64;
+            }
+            
+            (start_height, total_size)
+        };
+
+        // Get block hash from storage
+        let block_hash = {
+            let storage = self.storage.read().await;
+            storage.get_block_hash(height).await?.unwrap_or_else(|| vec![0u8; 32])
+        };
+
+        info!("Successfully created snapshot for height {} with {} bytes of data", height, actual_size);
 
         // Return metadata in the format expected by the trait
         Ok(GenericMetadata {
             height,
-            block_hash: vec![0u8; 32], // TODO: Get actual block hash
+            block_hash,
             state_root,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
-            size_bytes: 0,             // TODO: Get actual size
+            size_bytes: actual_size,
             checksum: "".to_string(),  // TODO: Calculate checksum
             wasm_hash: "".to_string(), // TODO: Get WASM hash
         })

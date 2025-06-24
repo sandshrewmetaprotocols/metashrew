@@ -112,7 +112,7 @@ Bitcoin's base layer provides a robust, decentralized foundation for value trans
 f(chaindata, height) → metaprotocol_state
 ```
 
-Where the same function applied to the same inputs always produces the same output, regardless of when or where it's executed.
+Where the same function applied to the same inputs always produces the same output, regardless of when or where it is executed.
 
 ---
 
@@ -1214,11 +1214,7 @@ Content-Type: application/json
 {
   "jsonrpc": "2.0",
   "method": "metashrew_view",
-  "params": {
-    "function": "get_balance",
-    "input": "0x1234567890abcdef",
-    "height": "latest"
-  },
+  "params": ["get_balance", "0x1234567890abcdef", "latest"],
   "id": 1
 }
 ```
@@ -1232,7 +1228,7 @@ Content-Type: application/json
 }
 ```
 
-#### 8.1.2 Core API Methods
+#### 8.1.2 Complete API Methods Reference
 
 **1. metashrew_view**
 Query indexed data by calling a view function in the WASM indexer.
@@ -1242,104 +1238,216 @@ Query indexed data by calling a view function in the WASM indexer.
 - `input_data` (string): Hex-encoded input data with 0x prefix
 - `height` (string|number): Block height for historical queries or "latest" for current state
 
+**Request Example:**
 ```json
 {
+  "jsonrpc": "2.0",
   "method": "metashrew_view",
-  "params": ["get_balance", "0x1234567890abcdef", "latest"]
+  "params": ["get_balance", "0x1234567890abcdef", "latest"],
+  "id": 1
 }
 ```
 
 **Response:**
 ```json
 {
-  "result": "0xabcdef1234567890"        // Hex-encoded result data
+  "jsonrpc": "2.0",
+  "result": "0xabcdef1234567890",
+  "id": 1
+}
+```
+
+**Historical Query Example:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "metashrew_view",
+  "params": ["get_balance", "0x1234567890abcdef", 850000],
+  "id": 2
 }
 ```
 
 **2. metashrew_preview**
 Test indexer logic against a specific block without persisting state changes.
 
-**Parameters:** `[block_data, function_name, input_data]`
+**Parameters:** `[block_data, function_name, input_data, height]`
 - `block_data` (string): Hex-encoded block data with 0x prefix (can be built from mempool)
 - `function_name` (string): Name of the view function to call
 - `input_data` (string): Hex-encoded input data with 0x prefix
+- `height` (string|number): Block height context for the preview
 
+**Request Example:**
 ```json
 {
+  "jsonrpc": "2.0",
   "method": "metashrew_preview",
-  "params": ["0x0100000000000000...", "get_balance", "0x1234567890abcdef"]
+  "params": [
+    "0x0100000000000000000000000000000000000000000000000000000000000000000000003ba3edfd7a7b12b27ac72c3e67768f617fc81bc3888a51323a9fb8aa4b1e5e4a29ab5f49ffff001d1dac2b7c0101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff4d04ffff001d0104455468652054696d65732030332f4a616e2f32303039204368616e63656c6c6f72206f6e206272696e6b206f66207365636f6e64206261696c6f757420666f722062616e6b73ffffffff0100f2052a01000000434104678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38c4f35504e51ec112de5c384df7ba0b8d578a4c702b6bf11d5fac00000000",
+    "get_balance",
+    "0x1234567890abcdef",
+    "latest"
+  ],
+  "id": 3
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": "0xabcdef1234567890",
+  "id": 3
 }
 ```
 
 **Note:** Preview executes the block data first (without side effects), then runs the view function on the resulting state.
 
-**3. metashrew_stateroot**
-Get the cryptographic state root at a specific block height.
-
-**Parameters**: `["latest"|blockheight]` (optional)
-- Single parameter: Block height (number) or "latest" (string) for current height
-- If no parameters provided, defaults to latest height
-
-**Examples:**
-```json
-{
-  "method": "metashrew_stateroot",
-  "params": ["latest"]
-}
-```
-
-```json
-{
-  "method": "metashrew_stateroot",
-  "params": [850000]
-}
-```
-
-```json
-{
-  "method": "metashrew_stateroot",
-  "params": []
-}
-```
-
-**Response:**
-```json
-{
-  "result": "0x1234567890abcdef..."     // 32-byte state root hash
-}
-```
-
-**4. metashrew_height**
+**3. metashrew_height**
 Get the current indexed block height.
 
-**Parameters**: `[]` (no parameters)
+**Parameters:** `[]` (no parameters)
 
-**Example:**
+**Request Example:**
 ```json
 {
+  "jsonrpc": "2.0",
   "method": "metashrew_height",
-  "params": []
+  "params": [],
+  "id": 4
 }
 ```
 
 **Response:**
 ```json
 {
-  "result": 850000                      // Current indexed height as number
+  "jsonrpc": "2.0",
+  "result": 850000,
+  "id": 4
 }
 ```
 
-#### 8.1.3 Height Parameters
+**4. metashrew_getblockhash**
+Get the block hash for a specific block height.
 
-**Height Specification:**
+**Parameters:** `[block_number]`
+- `block_number` (number): Block height to retrieve hash for
+
+**Request Example:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "metashrew_getblockhash",
+  "params": [850000],
+  "id": 5
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": "0x00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054",
+  "id": 5
+}
+```
+
+**5. metashrew_stateroot**
+Get the cryptographic state root at a specific block height.
+
+**Parameters:** `[height]` (optional)
+- `height` (string|number): Block height or "latest" for current height
+- If no parameters provided, defaults to latest height
+
+**Request Examples:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "metashrew_stateroot",
+  "params": ["latest"],
+  "id": 6
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "metashrew_stateroot",
+  "params": [850000],
+  "id": 7
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "metashrew_stateroot",
+  "params": [],
+  "id": 8
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": "0x1234567890abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "id": 6
+}
+```
+
+**6. metashrew_snapshot**
+Get snapshot and indexer status information.
+
+**Parameters:** `[]` (no parameters)
+
+**Request Example:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "metashrew_snapshot",
+  "params": [],
+  "id": 9
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": "{\"enabled\":true,\"current_height\":850001,\"indexed_height\":850000,\"total_entries\":1234567,\"storage_size_bytes\":987654321}",
+  "id": 9
+}
+```
+
+**Parsed Response Object:**
+```json
+{
+  "enabled": true,
+  "current_height": 850001,
+  "indexed_height": 850000,
+  "total_entries": 1234567,
+  "storage_size_bytes": 987654321
+}
+```
+
+#### 8.1.3 Parameter Format Specifications
+
+**Height Parameters:**
 - `"latest"`: Most recent indexed block
+- `123456`: Specific block height (number)
 - `"123456"`: Specific block height (decimal string)
 - `"0x1e240"`: Specific block height (hex string)
 
-**Height Validation:**
+**Hex Data Format:**
+- All hex data must be prefixed with `0x`
+- Input data and block data are hex-encoded byte arrays
+- Block hashes and state roots are returned as hex strings
+
+**Parameter Validation:**
 - Heights beyond the current tip return an error
 - Historical queries use the optimized BST for efficient lookups
 - Invalid height formats return a parsing error
+- Invalid hex data returns a parsing error
 
 #### 8.1.4 Error Handling
 
@@ -1363,20 +1471,115 @@ Get the current indexed block height.
 - `-32602`: Invalid params
 - `-32603`: Internal error (storage, runtime, or node errors)
 
-#### 8.1.5 JsonRpcProvider Trait
-**Location:** [`crates/rockshrew-sync/src/traits.rs`](crates/rockshrew-sync/src/traits.rs:75)
+**Method-Specific Error Examples:**
 
-**RPC Method Definitions:**
-```rust
-#[async_trait]
-pub trait JsonRpcProvider: Send + Sync {
-    async fn metashrew_view(&self, function_name: String, input_hex: String, height: String) -> SyncResult<String>;
-    async fn metashrew_preview(&self, block_hex: String, function_name: String, input_hex: String, height: String) -> SyncResult<String>;
-    async fn metashrew_stateroot(&self, height: String) -> SyncResult<String>;
+**metashrew_view Invalid Parameters:**
+```json
+{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": -32602,
+    "message": "Invalid params: requires [view_name, input_data, height]"
+  },
+  "id": 1
 }
 ```
 
-#### 8.1.2 View Function Execution
+**metashrew_getblockhash Block Not Found:**
+```json
+{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": -32000,
+    "message": "Block hash not found"
+  },
+  "id": 1
+}
+```
+
+**metashrew_stateroot Invalid Height:**
+```json
+{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": -32602,
+    "message": "Invalid params: height must be a number or 'latest'"
+  },
+  "id": 1
+}
+```
+
+#### 8.1.5 Complete Method Summary
+
+**Available JSON-RPC Methods:**
+1. **`metashrew_view`** - Query indexed data through view functions
+2. **`metashrew_preview`** - Test indexer logic with hypothetical blocks
+3. **`metashrew_height`** - Get current indexed block height
+4. **`metashrew_getblockhash`** - Get block hash by height
+5. **`metashrew_stateroot`** - Get cryptographic state root at height
+6. **`metashrew_snapshot`** - Get indexer status and statistics
+
+#### 8.1.6 JsonRpcProvider Trait
+**Location:** [`crates/rockshrew-sync/src/traits.rs`](crates/rockshrew-sync/src/traits.rs:294)
+
+**Complete RPC Method Definitions:**
+```rust
+#[async_trait]
+pub trait JsonRpcProvider: Send + Sync {
+    /// Execute a view function call
+    async fn metashrew_view(
+        &self,
+        function_name: String,
+        input_hex: String,
+        height: String,
+    ) -> SyncResult<String>;
+
+    /// Execute a preview function call
+    async fn metashrew_preview(
+        &self,
+        block_hex: String,
+        function_name: String,
+        input_hex: String,
+        height: String,
+    ) -> SyncResult<String>;
+
+    /// Get the current indexed height
+    async fn metashrew_height(&self) -> SyncResult<u32>;
+
+    /// Get a block hash by height
+    async fn metashrew_getblockhash(&self, height: u32) -> SyncResult<String>;
+
+    /// Get a state root by height
+    async fn metashrew_stateroot(&self, height: String) -> SyncResult<String>;
+
+    /// Get snapshot information
+    async fn metashrew_snapshot(&self) -> SyncResult<serde_json::Value>;
+}
+```
+
+#### 8.1.7 Implementation Reference
+**Location:** [`crates/rockshrew-mono/src/main.rs`](crates/rockshrew-mono/src/main.rs:204)
+
+The complete JSON-RPC implementation can be found in the `handle_jsonrpc` function, which processes all available methods:
+
+```rust
+async fn handle_jsonrpc(
+    body: web::Json<JsonRpcRequest>,
+    state: web::Data<AppState>,
+) -> ActixResult<impl Responder> {
+    match body.method.as_str() {
+        "metashrew_view" => { /* Implementation */ },
+        "metashrew_preview" => { /* Implementation */ },
+        "metashrew_height" => { /* Implementation */ },
+        "metashrew_getblockhash" => { /* Implementation */ },
+        "metashrew_stateroot" => { /* Implementation */ },
+        "metashrew_snapshot" => { /* Implementation */ },
+        _ => { /* Method not found error */ }
+    }
+}
+```
+
+#### 8.1.8 View Function Execution
 **Location:** [`crates/rockshrew-sync/src/sync.rs`](crates/rockshrew-sync/src/sync.rs:678)
 
 **View Call Structure:**
@@ -1409,7 +1612,7 @@ async fn metashrew_view(&self, function_name: String, input_hex: String, height:
 }
 ```
 
-#### 8.1.3 Preview Function Execution
+#### 8.1.9 Preview Function Execution
 **Location:** [`crates/rockshrew-sync/src/sync.rs`](crates/rockshrew-sync/src/sync.rs:702)
 
 **Preview Call Structure:**
@@ -1708,17 +1911,46 @@ The framework has been designed with security, performance, and maintainability 
 4. **Scalability**: Generic design enables adaptation to different storage backends and Bitcoin node implementations
 5. **Reliability**: Atomic operations, chain reorganization handling, and comprehensive error recovery
 
-### 12.4 Future Considerations
+### 12.4 General-Purpose UTXO Compatibility
+
+Metashrew's architecture is designed to be general-purpose enough to adapt to the evolving landscape of UTXO-based blockchain systems. The framework's modular design and adapter patterns enable deployment across any system that implements the UTXO model and exposes a compatible RPC interface.
+
+**Proven Success at Scale:**
+The ALKANES metaprotocol ([source code](https://github.com/kungfuflex/alkanes-rs)) demonstrates Metashrew's capability to power sophisticated smart contract systems at production scale. ALKANES implements a complete Turing-complete execution environment on Bitcoin L1, showcasing the framework's ability to support complex metaprotocol applications with real-world usage and value.
+
+**Cross-Chain Deployment Potential:**
+Metashrew's generic adapter architecture enables plug-and-play deployment across UTXO-compatible systems:
+
+1. **Alternative Cryptocurrencies**: Direct deployment on systems like Dogecoin, Litecoin, or Bitcoin Cash with minimal configuration changes
+2. **Future Bitcoin Variants**: Seamless adaptation to potential quantum-safe Bitcoin forks or other Bitcoin protocol upgrades
+3. **Merged-Mined Networks**: Native support for AuxPoW-enabled networks through existing block parsing capabilities
+4. **Custom UTXO Systems**: Adaptation to novel UTXO-based consensus mechanisms or experimental blockchain designs
+
+**Architectural Advantages for Multi-Chain Support:**
+- **Generic Node Adapters**: The [`BitcoinNodeAdapter`](crates/rockshrew-sync/src/traits.rs:15) trait abstracts RPC communication, enabling support for any node that provides compatible block data access
+- **Flexible Block Parsing**: Extended block format support through [`AuxpowHeader`](crates/metashrew-support/src/block.rs:15) and modular parsing utilities
+- **Deterministic Execution**: WASM-based indexers ensure identical behavior across different underlying blockchain systems
+- **Storage Abstraction**: The [`KeyValueStoreLike`](crates/metashrew-runtime/src/traits.rs:8) trait enables deployment with different storage backends optimized for specific environments
+
+**Metaprotocol Portability:**
+The same metaprotocol WASM module can be deployed across multiple compatible blockchain networks, enabling:
+- **Cross-Chain Consistency**: Identical metaprotocol behavior across different base layers
+- **Network Migration**: Ability to migrate metaprotocols between blockchain networks as ecosystems evolve
+- **Multi-Chain Applications**: Applications that operate across multiple UTXO-based networks simultaneously
+
+This general-purpose design positions Metashrew as a foundational infrastructure layer for the broader UTXO ecosystem, enabling developers to build once and deploy across multiple compatible blockchain networks.
+
+### 12.5 Future Considerations
 
 The Metashrew architecture provides a solid foundation for future enhancements:
 
-1. **Additional Cryptocurrencies**: The generic adapter pattern enables support for other blockchain networks
-2. **Advanced Indexing**: The WASM module system allows for sophisticated indexing strategies
-3. **Distributed Deployment**: The modular design supports distributed indexing architectures
-4. **Performance Optimization**: Continued optimization of storage and execution layers
-5. **Enhanced Security**: Additional security measures and formal verification capabilities
+1. **Enhanced Multi-Chain Support**: Continued development of adapter patterns for emerging UTXO-based systems
+2. **Advanced Indexing Strategies**: The WASM module system allows for increasingly sophisticated indexing and metaprotocol implementations
+3. **Distributed Deployment**: The modular design supports distributed indexing architectures and cross-chain coordination
+4. **Performance Optimization**: Continued optimization of storage and execution layers for high-throughput applications
+5. **Formal Verification**: Additional security measures and formal verification capabilities for critical metaprotocol applications
 
-This specification provides a complete technical reference that maps directly to the source code, enabling developers, auditors, and researchers to understand and verify the implementation details of the Metashrew Bitcoin indexer framework.
+This specification provides a complete technical reference that maps directly to the source code, enabling developers, auditors, and researchers to understand and verify the implementation details of the Metashrew Bitcoin indexer framework and its broader applications across the UTXO ecosystem.
 
 ---
 

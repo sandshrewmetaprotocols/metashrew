@@ -1276,12 +1276,29 @@ Test indexer logic against a specific block without persisting state changes.
 **3. metashrew_stateroot**
 Get the cryptographic state root at a specific block height.
 
+**Parameters**: `["latest"|blockheight]` (optional)
+- Single parameter: Block height (number) or "latest" (string) for current height
+- If no parameters provided, defaults to latest height
+
+**Examples:**
 ```json
 {
   "method": "metashrew_stateroot",
-  "params": {
-    "height": "123456"                   // Block height or "latest"
-  }
+  "params": ["latest"]
+}
+```
+
+```json
+{
+  "method": "metashrew_stateroot",
+  "params": [850000]
+}
+```
+
+```json
+{
+  "method": "metashrew_stateroot",
+  "params": []
 }
 ```
 
@@ -1289,6 +1306,26 @@ Get the cryptographic state root at a specific block height.
 ```json
 {
   "result": "0x1234567890abcdef..."     // 32-byte state root hash
+}
+```
+
+**4. metashrew_height**
+Get the current indexed block height.
+
+**Parameters**: `[]` (no parameters)
+
+**Example:**
+```json
+{
+  "method": "metashrew_height",
+  "params": []
+}
+```
+
+**Response:**
+```json
+{
+  "result": 850000                      // Current indexed height as number
 }
 ```
 

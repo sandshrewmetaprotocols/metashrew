@@ -11,7 +11,108 @@
 
 Metashrew is a high-performance, modular Bitcoin indexer framework that enables developers to build custom blockchain indexers using WebAssembly (WASM) modules. The framework provides a complete infrastructure for Bitcoin blockchain synchronization, data indexing, and query processing while maintaining deterministic execution and state consistency through cryptographic commitments.
 
+**Beyond Simple Indexing:** Metashrew is designed as a foundation for building sophisticated metaprotocols on Bitcoin. It enables developers to create systems ranging from simple balance trackers to full smart contract metaprotocols that extend Bitcoin's consensus layer. The framework ensures that any WASM program run in a Metashrew system will construct an identical database on any platform, making the indexer a pure function of Bitcoin chaindata.
+
+**Metaprotocol Applications:** The framework supports building high-powered blockchain applications that connect to Bitcoin or rely on its state. In its most advanced usage, Metashrew can power systems as complex as smart contract metaprotocols built entirely on Bitcoin L1, where the view into the metaprotocol is always a deterministic transform of input chaindata at any given block height.
+
 This specification provides a comprehensive technical overview of the Metashrew architecture, implementation details, and complete source code mapping for developers, auditors, and researchers. All structures, traits, and design considerations are documented with direct references to the actual source code implementation.
+
+---
+
+## Motivation: Metashrew as a Metaprotocol Foundation
+
+### The Vision for Bitcoin Metaprotocols
+
+Bitcoin's base layer provides a robust, decentralized foundation for value transfer, but its scripting capabilities are intentionally limited. Metaprotocols built on Bitcoin extend these capabilities by interpreting Bitcoin transactions according to additional rules and state machines that exist "above" the base consensus layer.
+
+**Metashrew's Role:** Metashrew serves as the critical infrastructure layer that makes sophisticated Bitcoin metaprotocols practical and reliable. It provides the deterministic execution environment, historical state access, and cryptographic commitments necessary to build complex systems on Bitcoin.
+
+### From Simple Indexing to Full Metaprotocols
+
+**Simple Indexing Applications:**
+- **Balance Tracking**: Monitor Bitcoin addresses and track balance changes over time
+- **Transaction Analysis**: Index and categorize Bitcoin transactions for analytics
+- **Address Clustering**: Group related addresses based on transaction patterns
+
+**Intermediate Metaprotocol Applications:**
+- **Token Systems**: Implement fungible and non-fungible tokens using Bitcoin transactions
+- **Decentralized Exchanges**: Build order books and trading systems on Bitcoin
+- **Governance Systems**: Create voting and proposal mechanisms using Bitcoin as the base layer
+
+**Advanced Metaprotocol Applications:**
+- **Smart Contract Platforms**: Full Turing-complete execution environments on Bitcoin
+- **Layer 2 Protocols**: State channels, rollups, and other scaling solutions
+- **Cross-Chain Bridges**: Secure interoperability protocols between Bitcoin and other chains
+
+### The Deterministic Execution Guarantee
+
+**Core Principle:** Any identical WASM program run in a Metashrew system, on any platform, will construct the identical database. This guarantee is fundamental to metaprotocol reliability and enables:
+
+**Consensus Without Coordination:** Multiple parties can independently run the same metaprotocol indexer and arrive at identical state, enabling decentralized verification without requiring a separate consensus mechanism.
+
+**Historical Reproducibility:** The complete state of any metaprotocol can be reconstructed from Bitcoin chaindata alone, ensuring long-term verifiability and auditability.
+
+**Cross-Platform Consistency:** Metaprotocol applications work identically across different operating systems, hardware architectures, and deployment environments.
+
+### Pure Function Property
+
+**Mathematical Purity:** Metashrew indexers are designed as pure functions where:
+- **Input**: Bitcoin chaindata up to any given block height
+- **Output**: Complete metaprotocol state at that height
+- **Determinism**: Same input always produces same output
+- **No Side Effects**: No external dependencies or non-deterministic operations
+
+**Benefits of Purity:**
+- **Verifiability**: Anyone can verify metaprotocol state by re-running the indexer
+- **Composability**: Multiple metaprotocols can be combined and layered
+- **Debugging**: Issues can be reproduced exactly across different environments
+- **Optimization**: Pure functions enable aggressive caching and optimization strategies
+
+### Historical State Access
+
+**Time-Travel Queries:** Metashrew enables querying the state of any metaprotocol at any historical block height, providing:
+
+**Audit Trails:** Complete history of all state changes for compliance and analysis
+**Rollback Capability:** Ability to handle Bitcoin chain reorganizations correctly
+**Point-in-Time Analysis:** Research and analytics on historical metaprotocol behavior
+**Dispute Resolution:** Ability to prove the state of a metaprotocol at any past moment
+
+### Building Complex Systems on Bitcoin
+
+**Smart Contract Metaprotocols:** Metashrew enables building systems with smart contract-like capabilities entirely on Bitcoin L1:
+
+**State Machines:** Complex state transitions triggered by Bitcoin transactions
+**Conditional Logic**: Sophisticated rules for transaction validation and state updates
+**Inter-Contract Communication**: Multiple smart contracts that can interact with each other
+**Upgradeable Logic**: Ability to evolve metaprotocol rules over time through governance
+
+**Example: Decentralized Exchange Metaprotocol:**
+1. **Order Placement**: Bitcoin transactions encode buy/sell orders
+2. **Order Matching**: Metashrew indexer matches compatible orders
+3. **Settlement**: State updates reflect completed trades
+4. **Historical Queries**: View order books and trade history at any block height
+
+**Example: Token System Metaprotocol:**
+1. **Token Creation**: Special Bitcoin transactions define new token types
+2. **Token Transfers**: Bitcoin transactions encode token transfer instructions
+3. **Balance Tracking**: Metashrew maintains token balances for all addresses
+4. **Supply Management**: Track total supply, minting, and burning operations
+
+### The WASM Program Format
+
+**Constrained Environment:** Metashrew defines a very limited environment for WASM builds that ensures deterministic execution:
+
+**No External Dependencies:** WASM modules cannot access file systems, networks, or other external resources
+**Deterministic Operations**: All operations must produce identical results across platforms
+**Memory Isolation**: Each execution starts with fresh memory state
+**Resource Limits**: Bounded execution time and memory usage
+
+**Indexer as Transform:** The WASM program acts as a mathematical transform function:
+```
+f(chaindata, height) → metaprotocol_state
+```
+
+Where the same function applied to the same inputs always produces the same output, regardless of when or where it's executed.
 
 ---
 
@@ -217,35 +318,57 @@ Metashrew uses Wasmtime as the WebAssembly runtime with deterministic execution 
 
 #### 2.1.1 Wasmtime Configuration
 
-Metashrew configures Wasmtime with specific settings to ensure deterministic execution and security:
+Metashrew configures Wasmtime with specific settings to ensure deterministic execution and security. The actual configuration from [`MetashrewRuntime::load()`](crates/metashrew-runtime/src/runtime.rs:426):
 
-**Engine Configuration:**
+**Synchronous Engine Configuration:**
 ```rust
-let mut config = Config::new();
-config.wasm_simd(false);           // Disable SIMD for determinism
-config.wasm_threads(false);        // Disable threading
-config.wasm_multi_memory(false);   // Single memory space
-config.wasm_memory64(false);       // 32-bit memory addressing
-config.consume_fuel(true);         // Enable fuel consumption for limits
-config.epoch_interruption(true);   // Enable epoch-based interruption
+let mut config = wasmtime::Config::default();
+// Enable NaN canonicalization for deterministic floating point operations
+config.cranelift_nan_canonicalization(true);
+// Make relaxed SIMD deterministic (or disable it if not needed)
+config.relaxed_simd_deterministic(true);
+// Allocate memory at maximum size to avoid non-deterministic memory growth
+config.static_memory_maximum_size(0x100000000); // 4GB max memory
+config.static_memory_guard_size(0x10000); // 64KB guard
+// Disable copy-on-write to ensure consistent memory behavior
+config.memory_init_cow(false);
+```
+
+**Asynchronous Engine Configuration:**
+```rust
+let mut async_config = config.clone();
+async_config.consume_fuel(true);    // Enable fuel consumption for cooperative yielding
+async_config.async_support(true);   // Enable async execution for view functions
 ```
 
 **Memory Configuration:**
-- **Linear Memory**: Single 32-bit linear memory space per module
-- **Memory Limits**: Configurable maximum memory size (default: 64MB)
-- **Memory Growth**: Controlled memory growth with deterministic allocation
-- **Memory Reset**: Complete memory refresh between block executions
+- **Static Memory Allocation**: 4GB maximum memory pre-allocated to avoid growth
+- **Guard Pages**: 64KB guard pages for memory safety
+- **No Copy-on-Write**: Disabled to ensure consistent memory behavior
+- **Memory Reset**: Complete memory refresh between block executions via [`refresh_memory()`](crates/metashrew-runtime/src/runtime.rs:768)
 
-**Security Settings:**
-- **No File System Access**: WASM modules cannot access the file system
-- **No Network Access**: No network operations allowed from WASM
-- **Controlled Host Functions**: Only specific host functions are available
-- **Resource Limits**: Fuel consumption and epoch interruption prevent infinite loops
+**Resource Limits:**
+```rust
+// WASM execution state with maximum resource limits
+limits: StoreLimitsBuilder::new()
+    .memories(usize::MAX)
+    .tables(usize::MAX)
+    .instances(usize::MAX)
+    .build()
+```
 
-**Deterministic Execution:**
-- **Memory Refresh**: Linear memory is completely reset between executions
-- **No Non-Deterministic Instructions**: SIMD and threading disabled
-- **Consistent State**: All executions produce identical results given identical inputs
+**Deterministic Execution Guarantees:**
+- **NaN Canonicalization**: Ensures consistent floating point behavior across platforms
+- **Relaxed SIMD Determinism**: Makes SIMD operations deterministic
+- **Static Memory**: Pre-allocated memory prevents non-deterministic growth patterns
+- **Memory Isolation**: Fresh memory for each block execution
+- **No External Access**: WASM modules cannot access file systems, networks, or other external resources
+
+**Security and Isolation:**
+- **Host Function Control**: Only specific host functions are available through the linker
+- **Resource Limits**: Bounded execution time and memory usage
+- **Failure Tracking**: Host function failures are tracked and propagated
+- **Trap Handling**: Unknown imports are defined as traps for security
 
 ### 2.2 Host Function Interface
 
@@ -1114,14 +1237,15 @@ Content-Type: application/json
 **1. metashrew_view**
 Query indexed data by calling a view function in the WASM indexer.
 
+**Parameters:** `[function_name, input_data, height]`
+- `function_name` (string): Name of the view function to call
+- `input_data` (string): Hex-encoded input data with 0x prefix
+- `height` (string|number): Block height for historical queries or "latest" for current state
+
 ```json
 {
   "method": "metashrew_view",
-  "params": {
-    "function": "get_balance",           // View function name
-    "input": "0x1234567890abcdef",      // Hex-encoded input data
-    "height": "latest"                   // Block height or "latest"
-  }
+  "params": ["get_balance", "0x1234567890abcdef", "latest"]
 }
 ```
 
@@ -1135,17 +1259,19 @@ Query indexed data by calling a view function in the WASM indexer.
 **2. metashrew_preview**
 Test indexer logic against a specific block without persisting state changes.
 
+**Parameters:** `[block_data, function_name, input_data]`
+- `block_data` (string): Hex-encoded block data with 0x prefix (can be built from mempool)
+- `function_name` (string): Name of the view function to call
+- `input_data` (string): Hex-encoded input data with 0x prefix
+
 ```json
 {
   "method": "metashrew_preview",
-  "params": {
-    "block": "0x0100000000000000...",   // Hex-encoded block data
-    "function": "get_balance",           // View function name
-    "input": "0x1234567890abcdef",      // Hex-encoded input data
-    "height": "123456"                   // Block height context
-  }
+  "params": ["0x0100000000000000...", "get_balance", "0x1234567890abcdef"]
 }
 ```
+
+**Note:** Preview executes the block data first (without side effects), then runs the view function on the resulting state.
 
 **3. metashrew_stateroot**
 Get the cryptographic state root at a specific block height.

@@ -1635,6 +1635,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                             // Track the original key-value pair before annotation
                             ctx_guard.db.track_kv_update(k_owned.clone(), v_owned.clone());
+                            
+                            // Also store as simple key-value pair for direct access (like "/seen-genesis")
+                            // This enables IndexPointer.get() to work correctly
+                            println!("DEBUG: Storing simple key-value pair: '{}' -> {} bytes",
+                                String::from_utf8_lossy(&k_owned), v_owned.len());
+                            if let Err(e) = ctx_guard.db.put(&k_owned, v_owned.clone()) {
+                                println!("ERROR: Failed to store simple key-value pair: {}", e);
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
                         }
 
                         // Store in SMTHelper BST format for both current access and state root calculation
@@ -1712,6 +1722,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
+                            println!("DEBUG: __get() called for key: '{}'", String::from_utf8_lossy(&key_vec));
+                            
                             // PERFORMANCE FIX: Use OptimizedBST for O(1) current value access
                             // This replaces the expensive scan_prefix() that was the bottleneck
                             let db = match context_get.clone().lock() {
@@ -1725,8 +1737,45 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             // Use SMTHelper for consistency with flush operations
                             let smt_helper = SMTHelper::new(db);
                             
-                            // Use BST get_at_height for indexing - we want the value at current height
-                            match smt_helper.bst_get_at_height(&key_vec, height) {
+                            // First try simple key-value lookup (for keys like "/seen-genesis")
+                            let simple_key_result = match context_get.clone().lock() {
+                                Ok(ctx) => {
+                                    let result = ctx.db.get_immutable(&key_vec);
+                                    match &result {
+                                        Ok(Some(value)) => println!("DEBUG: Found simple key-value: '{}' -> {} bytes",
+                                            String::from_utf8_lossy(&key_vec), value.len()),
+                                        Ok(None) => println!("DEBUG: Simple key-value not found: '{}'",
+                                            String::from_utf8_lossy(&key_vec)),
+                                        Err(e) => println!("DEBUG: Error accessing simple key-value: {}", e),
+                                    }
+                                    result
+                                }
+                                Err(_) => {
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
+                            };
+                            
+                            let result = match simple_key_result {
+                                Ok(Some(value)) => Ok(Some(value)),
+                                Ok(None) => {
+                                    // Fall back to BST lookup at current height
+                                    match smt_helper.bst_get_at_height(&key_vec, height) {
+                                        Ok(Some(value)) => Ok(Some(value)),
+                                        Ok(None) => {
+                                            // Try to get the latest value for this key
+                                            smt_helper.bst_get_current(&key_vec)
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                                Err(e) => {
+                                    // Fall back to BST lookup
+                                    smt_helper.bst_get_at_height(&key_vec, height)
+                                }
+                            };
+                            
+                            match result {
                                 Ok(Some(lookup)) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1786,6 +1835,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
+                            println!("DEBUG: __get_len() called for key: '{}'", String::from_utf8_lossy(&key_vec));
+                            
                             // PERFORMANCE FIX: Use OptimizedBST for O(1) current value access
                             // This replaces the expensive scan_prefix() that was the bottleneck
                             let db = match context_get_len.clone().lock() {
@@ -1796,8 +1847,42 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             // Use SMTHelper for consistency with flush operations
                             let smt_helper = SMTHelper::new(db);
                             
-                            // Use BST get_at_height for indexing - we want the value at current height
-                            match smt_helper.bst_get_at_height(&key_vec, height) {
+                            // First try simple key-value lookup (for keys like "/seen-genesis")
+                            let simple_key_result = match context_get_len.clone().lock() {
+                                Ok(ctx) => {
+                                    let result = ctx.db.get_immutable(&key_vec);
+                                    match &result {
+                                        Ok(Some(value)) => println!("DEBUG: Found simple key-value length: '{}' -> {} bytes",
+                                            String::from_utf8_lossy(&key_vec), value.len()),
+                                        Ok(None) => println!("DEBUG: Simple key-value not found for length: '{}'",
+                                            String::from_utf8_lossy(&key_vec)),
+                                        Err(e) => println!("DEBUG: Error accessing simple key-value for length: {}", e),
+                                    }
+                                    result
+                                }
+                                Err(_) => return i32::MAX,
+                            };
+                            
+                            let result = match simple_key_result {
+                                Ok(Some(value)) => Ok(Some(value)),
+                                Ok(None) => {
+                                    // Fall back to BST lookup at current height
+                                    match smt_helper.bst_get_at_height(&key_vec, height) {
+                                        Ok(Some(value)) => Ok(Some(value)),
+                                        Ok(None) => {
+                                            // Try to get the latest value for this key
+                                            smt_helper.bst_get_current(&key_vec)
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                                Err(e) => {
+                                    // Fall back to BST lookup
+                                    smt_helper.bst_get_at_height(&key_vec, height)
+                                }
+                            };
+                            
+                            match result {
                                 Ok(Some(value)) => value.len() as i32,
                                 Ok(None) => 0, // Return 0 length for non-existent keys
                                 Err(_) => i32::MAX,

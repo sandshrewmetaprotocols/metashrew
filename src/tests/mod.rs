@@ -21,6 +21,8 @@ pub mod bst_verification_test;
 #[cfg(test)]
 pub mod comprehensive_e2e_test;
 #[cfg(test)]
+pub mod database_persistence_test;
+#[cfg(test)]
 pub mod historical_view_test;
 #[cfg(test)]
 pub mod integration_tests;

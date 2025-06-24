@@ -157,7 +157,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
 
         // Use the built-in atomic processing method from metashrew-runtime
         // This handles memory refresh automatically
-        match runtime.process_block_atomic(height, block_data, block_hash).await {
+        match runtime.process_block_atomic(height, &block_data.to_vec(), &block_hash.to_vec()).await {
             Ok(result) => {
                 // Convert from metashrew_runtime::AtomicBlockResult to rockshrew_sync::AtomicBlockResult
                 Ok(AtomicBlockResult {

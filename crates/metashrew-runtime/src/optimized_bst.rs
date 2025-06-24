@@ -89,17 +89,31 @@ impl<T: KeyValueStoreLike> OptimizedBST<T> {
     /// Get the value of a key at a specific height - uses binary search only when needed
     /// This should only be used for historical queries (view functions with specific heights)
     pub fn get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        // CRITICAL OPTIMIZATION: First check if this key has ANY current value
-        // If there's no current value, there's no point in searching historical data
-        let current_key = format!("{}{}", CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
-        if let None = self
-            .storage
-            .get_immutable(&current_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
-            trace!("No current value exists for key {} - skipping historical search (O(1) optimization)", hex::encode(key));
+        trace!("OptimizedBST: get_at_height for key {} at height {}", hex::encode(key), height);
+        
+        // For genesis block (height 0), we need to be more careful
+        // During indexing of the genesis block, keys might not exist yet
+        if height == 0 {
+            // First try direct lookup at height 0
+            let exact_key =
+                format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
+            if let Some(value) = self
+                .storage
+                .get_immutable(&exact_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+            {
+                trace!("Found exact value for key {} at genesis height 0", hex::encode(key));
+                return Ok(Some(value));
+            }
+            
+            // For genesis block, if no exact match, return None (key doesn't exist yet)
+            trace!("No value found for key {} at genesis height 0", hex::encode(key));
             return Ok(None);
         }
+
+        // Note: We removed the current value check optimization here because during indexing,
+        // the WASM module needs to be able to query keys that don't exist yet and get None/empty results.
+        // The optimization was preventing proper indexing behavior.
 
         // First try direct lookup at the exact height
         let exact_key =
@@ -141,12 +155,21 @@ impl<T: KeyValueStoreLike> OptimizedBST<T> {
             {
                 // Found a value at this height, but continue searching for a more recent one
                 best_height = Some(mid);
+                if mid == u32::MAX {
+                    break; // Prevent overflow
+                }
                 low = mid + 1;
             } else {
+                // Handle underflow when mid is 0
                 if mid == 0 {
                     break;
                 }
                 high = mid - 1;
+            }
+            
+            // Additional safety check to prevent infinite loops
+            if low > high {
+                break;
             }
         }
 

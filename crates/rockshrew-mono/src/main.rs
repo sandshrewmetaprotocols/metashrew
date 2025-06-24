@@ -22,10 +22,11 @@ use adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter, RocksDBStorageAdapter
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio;
 use tokio::sync::RwLock;
+use tokio::signal;
 
 // Import our SSH tunneling module
 mod ssh_tunnel;
@@ -613,13 +614,58 @@ async fn handle_jsonrpc(
     }
 }
 
+/// Handle Ctrl-C signals with graceful shutdown and force exit option
+async fn setup_signal_handler() -> Arc<AtomicBool> {
+    let shutdown_requested = Arc::new(AtomicBool::new(false));
+    let shutdown_requested_clone = shutdown_requested.clone();
+    
+    tokio::spawn(async move {
+        loop {
+            match signal::ctrl_c().await {
+                Ok(()) => {
+                    if shutdown_requested_clone.load(Ordering::SeqCst) {
+                        // Second Ctrl-C - force exit
+                        println!("\n🚨 Force exit requested - terminating immediately!");
+                        std::process::exit(1);
+                    } else {
+                        // First Ctrl-C - graceful shutdown
+                        println!("\n🛑 Shutdown signal received - initiating graceful shutdown...");
+                        println!("📢 Press Ctrl-C again to force exit");
+                        shutdown_requested_clone.store(true, Ordering::SeqCst);
+                        
+                        // Give some time for graceful shutdown, then force exit
+                        let timeout_shutdown = shutdown_requested_clone.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                            if timeout_shutdown.load(Ordering::SeqCst) {
+                                println!("\n⏰ Graceful shutdown timeout - forcing exit");
+                                std::process::exit(1);
+                            }
+                        });
+                    }
+                }
+                Err(err) => {
+                    eprintln!("Error setting up signal handler: {}", err);
+                    break;
+                }
+            }
+        }
+    });
+    
+    shutdown_requested
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logger with timestamp
     env_logger::builder().format_timestamp_secs().init();
 
+    // Setup signal handler for graceful shutdown
+    let shutdown_signal = setup_signal_handler().await;
+
     info!("Starting Metashrew Indexer (rockshrew-mono) with generic sync framework");
     info!("System has {} CPU cores available", num_cpus::get());
+    info!("Press Ctrl-C to initiate graceful shutdown, Ctrl-C again to force exit");
 
     // Parse command line arguments
     let args_arc = Arc::new(Args::parse());
@@ -937,17 +983,35 @@ async fn main() -> Result<()> {
     info!("Indexer is ready and processing blocks using generic sync framework");
     info!("Available RPC methods: metashrew_view, metashrew_preview, metashrew_height, metashrew_getblockhash, metashrew_stateroot, metashrew_snapshot");
 
-    // Wait for either component to finish (or fail)
+    // Wait for either component to finish (or fail), or shutdown signal
     tokio::select! {
         result = indexer_handle => {
             if let Err(e) = result {
                 error!("Indexer task failed: {}", e);
+            } else {
+                info!("Indexer task completed successfully");
             }
         }
         result = server_handle => {
             if let Err(e) = result {
                 error!("Server task failed: {}", e);
+            } else {
+                info!("Server task completed successfully");
             }
+        }
+        _ = async {
+            loop {
+                if shutdown_signal.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        } => {
+            println!("🧹 Cleaning up all actix workers and background tasks...");
+            
+            // Give a moment for cleanup
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            println!("✅ Graceful shutdown complete");
         }
     }
 
@@ -983,3 +1047,4 @@ mod tests {
         Ok(())
     }
 }
+

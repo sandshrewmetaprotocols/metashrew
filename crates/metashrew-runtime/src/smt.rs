@@ -1344,7 +1344,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         batch.put(&keys_at_height_key, b"");
 
         // Write the batch atomically
-        self.storage.write_batch(batch)
+        self.storage.write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         Ok(())

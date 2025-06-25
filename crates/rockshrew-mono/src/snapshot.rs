@@ -317,8 +317,8 @@ impl SnapshotManager {
         // Get all keys updated in this height range using the correct SMT constants
         let mut updated_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
 
-        // Use the correct constants from metashrew_runtime::smt
-        use metashrew_runtime::smt::{KEYS_AT_HEIGHT_PREFIX, BST_HEIGHT_PREFIX};
+        // Use the correct constants from metashrew_runtime::optimized_bst
+        use metashrew_runtime::optimized_bst::{KEYS_AT_HEIGHT_PREFIX, HISTORICAL_VALUE_PREFIX};
 
         for height in start_height..=end_height {
             // Create the prefix for keys tracked at this height
@@ -354,7 +354,7 @@ impl SnapshotManager {
             
             // Search backwards from end_height to find the most recent value
             for h in (0..=end_height).rev() {
-                let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(&key), h);
+                let height_key = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(&key), h);
                 if let Ok(Some(value)) = db.get(height_key.as_bytes()) {
                     found_value = Some(value.to_vec());
                     break;
@@ -718,14 +718,23 @@ impl SnapshotManager {
                 let value = diff_data.diff_data[i..i + value_len].to_vec();
                 i += value_len;
 
-                // Apply to database using BST approach
-                let bst_key = format!("{}{}:{}", metashrew_runtime::smt::BST_HEIGHT_PREFIX, hex::encode(&key), interval.end_height);
-                db.put(bst_key.as_bytes(), &value)?;
+                // Apply to database using optimized BST approach
+                // Store current value for O(1) access
+                let current_key = format!("{}{}", metashrew_runtime::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(&key));
+                db.put(current_key.as_bytes(), &value)?;
+                
+                // Store historical value
+                let historical_key = format!("{}{}:{}", metashrew_runtime::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(&key), interval.end_height);
+                db.put(historical_key.as_bytes(), &value)?;
+
+                // Store height index
+                let height_index_key = format!("{}{}:{}", metashrew_runtime::optimized_bst::HEIGHT_INDEX_PREFIX, interval.end_height, hex::encode(&key));
+                db.put(height_index_key.as_bytes(), &[0u8; 0])?;
 
                 // Also store in keys-at-height tracking
                 let keys_at_height_key = format!(
                     "{}{}:{}",
-                    metashrew_runtime::smt::KEYS_AT_HEIGHT_PREFIX,
+                    metashrew_runtime::optimized_bst::KEYS_AT_HEIGHT_PREFIX,
                     interval.end_height,
                     hex::encode(&key)
                 );

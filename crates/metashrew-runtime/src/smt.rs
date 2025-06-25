@@ -415,31 +415,52 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         Ok(new_root)
     }
 
-    /// Fast BST lookup using binary search on heights
+    /// Fast BST lookup using optimized BST approach
     fn bst_get_at_height_fast(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        // Use binary search for height lookup instead of linear scan
-        let mut low = 0;
-        let mut high = height;
-        let mut result = None;
+        // CRITICAL OPTIMIZATION: First check if this key has ANY current value
+        // If there's no current value, there's no point in searching historical data
+        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
+        if let None = self
+            .storage
+            .get_immutable(&current_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            return Ok(None);
+        }
 
-        while low <= high {
-            let mid = (low + high) / 2;
-            let height_key = format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), mid).into_bytes();
-            
-            match self.storage.get_immutable(&height_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-                Some(value) => {
-                    result = Some(value);
-                    low = mid + 1; // Look for higher heights
-                }
-                None => {
-                    if mid == 0 { break; }
-                    high = mid - 1; // Look for lower heights
+        // First try direct lookup at the exact height
+        let exact_key =
+            format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
+        if let Some(value) = self
+            .storage
+            .get_immutable(&exact_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            return Ok(Some(value));
+        }
+
+        // If not found at exact height, use prefix scan to find the most recent value
+        // at or before the requested height
+        let prefix = format!("{}{}:", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key));
+        let mut best_height: Option<u32> = None;
+        let mut best_value: Option<Vec<u8>> = None;
+
+        for (stored_key, stored_value) in self.storage.scan_prefix(prefix.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            let key_str = String::from_utf8_lossy(&stored_key);
+            if let Some(height_str) = key_str.strip_prefix(&prefix) {
+                if let Ok(stored_height) = height_str.parse::<u32>() {
+                    if stored_height <= height {
+                        if best_height.is_none() || stored_height > best_height.unwrap() {
+                            best_height = Some(stored_height);
+                            best_value = Some(stored_value);
+                        }
+                    }
                 }
             }
         }
 
-        Ok(result)
+        Ok(best_value)
     }
 
     /// Compute SMT root for multiple keys in batch
@@ -1300,58 +1321,91 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Store a key-value pair in the BST with height indexing
     pub fn bst_put(&mut self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
-        // Store the value with height annotation
-        let height_key =
-            format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
-        self.storage
-            .put(&height_key, value)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+        // Create a batch for all operations
+        let mut batch = self.storage.create_batch();
 
-        // Track that this key was updated at this height
-        self.track_key_at_height(key, height)?;
+        // 1. Store the current value for O(1) access
+        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
+        batch.put(&current_key, value);
+
+        // 2. Store the historical value for historical queries
+        let historical_key =
+            format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
+        batch.put(&historical_key, value);
+
+        // 3. Track that this key was updated at this height
+        let height_index_key =
+            format!("{}{}:{}", crate::optimized_bst::HEIGHT_INDEX_PREFIX, height, hex::encode(key)).into_bytes();
+        batch.put(&height_index_key, b"");
+
+        // 4. Track keys updated at this height for reorg handling
+        let keys_at_height_key =
+            format!("{}{}:{}", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
+        batch.put(&keys_at_height_key, b"");
+
+        // Write the batch atomically
+        self.storage.write_batch(batch)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         Ok(())
     }
 
-    /// Get the value of a key at a specific height using linear search
+    /// Get the value of a key at a specific height using optimized BST
     pub fn bst_get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        // Search backwards from the requested height to find the most recent value
-        for h in (0..=height).rev() {
-            let height_key =
-                format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), h).into_bytes();
-            if let Some(value) = self
-                .storage
-                .get_immutable(&height_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-            {
-                return Ok(Some(value));
+        // CRITICAL OPTIMIZATION: First check if this key has ANY current value
+        // If there's no current value, there's no point in searching historical data
+        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
+        if let None = self
+            .storage
+            .get_immutable(&current_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            return Ok(None);
+        }
+
+        // First try direct lookup at the exact height
+        let exact_key =
+            format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
+        if let Some(value) = self
+            .storage
+            .get_immutable(&exact_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            return Ok(Some(value));
+        }
+
+        // If not found at exact height, use prefix scan to find the most recent value
+        // at or before the requested height
+        let prefix = format!("{}{}:", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key));
+        let mut best_height: Option<u32> = None;
+        let mut best_value: Option<Vec<u8>> = None;
+
+        for (stored_key, stored_value) in self.storage.scan_prefix(prefix.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            let key_str = String::from_utf8_lossy(&stored_key);
+            if let Some(height_str) = key_str.strip_prefix(&prefix) {
+                if let Ok(stored_height) = height_str.parse::<u32>() {
+                    if stored_height <= height {
+                        if best_height.is_none() || stored_height > best_height.unwrap() {
+                            best_height = Some(stored_height);
+                            best_value = Some(stored_value);
+                        }
+                    }
+                }
             }
         }
 
-        Ok(None)
+        Ok(best_value)
     }
 
     /// Get the current (most recent) value of a key across all heights
     pub fn bst_get_current(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let heights = self.bst_get_heights_for_key(key)?;
-
-        if heights.is_empty() {
-            return Ok(None);
-        }
-
-        // Get the value at the highest height
-        let highest_height = *heights.last().unwrap();
-        let height_key = format!(
-            "{}{}:{}",
-            BST_HEIGHT_PREFIX,
-            hex::encode(key),
-            highest_height
-        )
-        .into_bytes();
+        // Use the optimized BST current value lookup for O(1) access
+        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
 
         match self
             .storage
-            .get_immutable(&height_key)
+            .get_immutable(&current_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
         {
             Some(value) => Ok(Some(value)),
@@ -1362,7 +1416,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     /// Get all heights at which a key was updated
     pub fn bst_get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
         let mut heights = Vec::new();
-        let prefix = format!("{}{}:", BST_HEIGHT_PREFIX, hex::encode(key));
+        let prefix = format!("{}{}:", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key));
 
         // Get all keys with this prefix and extract heights
         for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
@@ -1381,7 +1435,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     /// Track that a key was updated at a specific height
     pub fn track_key_at_height(&mut self, key: &[u8], height: u32) -> Result<()> {
         let keys_key =
-            format!("{}{}:{}", KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
+            format!("{}{}:{}", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
         self.storage
             .put(&keys_key, b"")
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?; // Empty value, we just need the key
@@ -1391,7 +1445,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     /// Get all keys that were updated at a specific height
     pub fn get_keys_at_height(&self, height: u32) -> Result<Vec<Vec<u8>>> {
         let mut keys = Vec::new();
-        let prefix = format!("{}{}:", KEYS_AT_HEIGHT_PREFIX, height);
+        let prefix = format!("{}{}:", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height);
 
         // Get all keys with this prefix
         for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
@@ -1414,13 +1468,13 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         for height in heights {
             if height > target_height {
                 let height_key =
-                    format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
+                    format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
                 self.storage
                     .delete(&height_key)
                     .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
                 // Also remove from keys-at-height tracking
-                let keys_key = format!("{}{}:{}", KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key))
+                let keys_key = format!("{}{}:{}", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key))
                     .into_bytes();
                 self.storage
                     .delete(&keys_key)
@@ -1435,7 +1489,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     pub fn bst_rollback_to_height(&mut self, target_height: u32) -> Result<()> {
         // Get all heights greater than target_height that have updates
         let mut heights_to_rollback = Vec::new();
-        let prefix = format!("{}:", KEYS_AT_HEIGHT_PREFIX);
+        let prefix = format!("{}:", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX);
 
         // Get all keys with this prefix and extract heights
         for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
@@ -1483,7 +1537,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
         for height in filtered_heights {
             let height_key =
-                format!("{}{}:{}", BST_HEIGHT_PREFIX, hex::encode(key), height).into_bytes();
+                format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
             if let Some(value) = self
                 .storage
                 .get_immutable(&height_key)

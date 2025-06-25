@@ -1023,7 +1023,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use memshrew_runtime::MemStoreAdapter;
-    use std::path::PathBuf;
+    use metashrew_runtime::KeyValueStoreLike;
 
     #[tokio::test]
     async fn test_generic_architecture() -> Result<()> {

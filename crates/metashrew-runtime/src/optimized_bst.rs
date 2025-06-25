@@ -27,6 +27,11 @@ impl<T: KeyValueStoreLike> OptimizedBST<T> {
         Self { storage }
     }
 
+    /// Get a reference to the underlying storage (for testing)
+    pub fn storage(&self) -> &T {
+        &self.storage
+    }
+
     /// Store a key-value pair at a specific height
     /// This is the main write operation used during indexing
     pub fn put(&mut self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
@@ -125,46 +130,31 @@ impl<T: KeyValueStoreLike> OptimizedBST<T> {
             height
         );
 
-        let mut low = 0u32;
-        let mut high = height;
+        // Instead of binary search, scan all historical entries for this key
+        // and find the highest height <= requested height
+        let prefix = format!("{}{}:", HISTORICAL_VALUE_PREFIX, hex::encode(key));
         let mut best_height: Option<u32> = None;
+        let mut best_value: Option<Vec<u8>> = None;
 
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            let mid_key =
-                format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), mid).into_bytes();
-
-            if let Some(_) = self
-                .storage
-                .get_immutable(&mid_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-            {
-                // Found a value at this height, but continue searching for a more recent one
-                best_height = Some(mid);
-                low = mid + 1;
-            } else {
-                if mid == 0 {
-                    break;
+        for (stored_key, stored_value) in self.storage.scan_prefix(prefix.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            let key_str = String::from_utf8_lossy(&stored_key);
+            if let Some(height_str) = key_str.strip_prefix(&prefix) {
+                if let Ok(stored_height) = height_str.parse::<u32>() {
+                    if stored_height <= height {
+                        if best_height.is_none() || stored_height > best_height.unwrap() {
+                            best_height = Some(stored_height);
+                            best_value = Some(stored_value);
+                        }
+                    }
                 }
-                high = mid - 1;
             }
         }
 
         if let Some(found_height) = best_height {
-            let found_key = format!(
-                "{}{}:{}",
-                HISTORICAL_VALUE_PREFIX,
-                hex::encode(key),
-                found_height
-            )
-            .into_bytes();
-            if let Some(value) = self
-                .storage
-                .get_immutable(&found_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-            {
+            if let Some(value) = best_value {
                 trace!(
-                    "Found value for key {} at height {} (binary search result)",
+                    "Found value for key {} at height {} (prefix scan result)",
                     hex::encode(key),
                     found_height
                 );

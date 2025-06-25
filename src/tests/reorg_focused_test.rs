@@ -82,7 +82,7 @@ impl SimpleIndexer {
         let adapter = &self.runtime.context.lock().unwrap().db;
         let smt_helper = SMTHelper::new(adapter.clone());
         let key = format!("smt:root:{}", height).into_bytes();
-        Ok(smt_helper.bst_get_at_height(&key, height)?)
+        Ok(smt_helper.get_at_height(&key, height)?)
     }
 
     /// Get all state roots up to a height
@@ -392,8 +392,8 @@ async fn test_exact_blocktracker_reorg_verification() -> Result<()> {
         let expected_bt = SimpleIndexer::compute_expected_blocktracker(&initial_chain, height);
         assert_eq!(
             actual_bt, expected_bt,
-            "Initial blocktracker at height {} should match computed expectation",
-            height
+            "Initial blocktracker at height {} should match computed expectation. left: {:?}, right: {:?}",
+            height, actual_bt, expected_bt
         );
         println!(
             "✓ Initial height {}: expected={:?}, actual={:?}",

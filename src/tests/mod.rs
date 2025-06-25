@@ -41,6 +41,8 @@ pub mod simple_snapshot_test;
 #[cfg(test)]
 pub mod smt_key_debug_test;
 #[cfg(test)]
+pub mod snapshot_diff_size_test;
+#[cfg(test)]
 pub mod snapshot_repo_test;
 #[cfg(test)]
 pub mod snapshot_retention_test;

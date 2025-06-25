@@ -30,7 +30,7 @@ fn test_state_root_calculation_debug() -> Result<()> {
 
     // Store the key-value pairs in BST
     for (key, value) in &test_data {
-        match smt_helper.bst_put(key, value, height) {
+        match smt_helper.put(key, value, height) {
             Ok(_) => println!(
                 "DEBUG: Successfully stored key: {:?}",
                 String::from_utf8_lossy(key)
@@ -128,46 +128,42 @@ fn test_bst_scanning_logic() -> Result<()> {
 
     // Store the key-value pairs in BST
     for (key, value) in &test_data {
-        smt_helper.bst_put(key, value, height)?;
+        smt_helper.put(key, value, height)?;
         println!("DEBUG: Stored key: {:?}", String::from_utf8_lossy(key));
     }
 
     // Test the BST scanning logic directly
     println!("DEBUG: Testing BST prefix scanning...");
 
-    let prefix = metashrew_runtime::smt::BST_HEIGHT_PREFIX.as_bytes();
-    println!(
-        "DEBUG: Scanning with prefix: {:?}",
-        String::from_utf8_lossy(prefix)
-    );
+    // In the new append-only approach, we scan for keys with "/length" suffix
+    let length_suffix = "/length";
+    println!("DEBUG: Scanning all database entries for append-only structure");
 
-    match adapter.scan_prefix(prefix) {
+    match adapter.scan_prefix(b"") {
         Ok(results) => {
-            println!("DEBUG: Found {} entries with BST prefix", results.len());
+            println!("DEBUG: Found {} entries in database", results.len());
             for (key, value) in &results {
                 let key_str = String::from_utf8_lossy(key);
                 println!(
-                    "DEBUG: BST entry: key={}, value_len={}",
+                    "DEBUG: Database entry: key={}, value_len={}",
                     key_str,
                     value.len()
                 );
 
-                // Parse the key to extract original key
-                if let Some(rest) = key_str.strip_prefix(metashrew_runtime::smt::BST_HEIGHT_PREFIX)
-                {
-                    if let Some(colon_pos) = rest.find(':') {
-                        let hex_key = &rest[..colon_pos];
-                        let height_str = &rest[colon_pos + 1..];
-                        println!(
-                            "DEBUG: Parsed - hex_key: {}, height: {}",
-                            hex_key, height_str
-                        );
-
-                        if let Ok(original_key) = hex::decode(hex_key) {
-                            println!(
-                                "DEBUG: Original key: {:?}",
-                                String::from_utf8_lossy(&original_key)
-                            );
+                // Look for append-only entries (key/0, key/1, etc.)
+                if key_str.contains('/') && !key_str.ends_with(length_suffix) {
+                    let parts: Vec<&str> = key_str.split('/').collect();
+                    if parts.len() == 2 {
+                        if let Ok(_index) = parts[1].parse::<u32>() {
+                            let value_str = String::from_utf8_lossy(value);
+                            if let Some(colon_pos) = value_str.find(':') {
+                                let height_str = &value_str[..colon_pos];
+                                let data_str = &value_str[colon_pos + 1..];
+                                println!(
+                                    "DEBUG: Append-only entry - key: {}, height: {}, data: {}",
+                                    parts[0], height_str, data_str
+                                );
+                            }
                         }
                     }
                 }

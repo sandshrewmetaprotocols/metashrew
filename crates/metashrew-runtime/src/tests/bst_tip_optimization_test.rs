@@ -145,9 +145,11 @@ fn test_bst_tip_optimization_current_access() -> Result<()> {
     let current_value = bst.get_current(key)?;
     assert_eq!(current_value, Some(value3.to_vec()));
 
-    // Verify that current value is stored with the correct prefix
-    let current_key = format!("{}{}", CURRENT_VALUE_PREFIX, hex::encode(key));
-    let direct_current = bst.storage().get_immutable(current_key.as_bytes())?;
+    // Verify that current value is stored with the correct prefix (raw bytes, not hex)
+    let mut current_key = Vec::new();
+    current_key.extend_from_slice(CURRENT_VALUE_PREFIX.as_bytes());
+    current_key.extend_from_slice(key);
+    let direct_current = bst.storage().get_immutable(&current_key)?;
     assert_eq!(direct_current, Some(value3.to_vec()));
 
     println!("✓ BST tip optimization: O(1) current access works correctly");
@@ -182,9 +184,13 @@ fn test_bst_tip_optimization_historical_access() -> Result<()> {
     // Test historical access before any updates
     assert_eq!(bst.get_at_height(key, 50)?, None);
 
-    // Verify that historical values are stored with the correct prefix
-    let hist_key_100 = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), 100);
-    let hist_value_100 = bst.storage().get_immutable(hist_key_100.as_bytes())?;
+    // Verify that historical values are stored with the correct prefix (raw bytes, not hex)
+    let mut hist_key_100 = Vec::new();
+    hist_key_100.extend_from_slice(HISTORICAL_VALUE_PREFIX.as_bytes());
+    hist_key_100.extend_from_slice(key);
+    hist_key_100.push(b':');
+    hist_key_100.extend_from_slice(b"100");
+    let hist_value_100 = bst.storage().get_immutable(&hist_key_100)?;
     assert_eq!(hist_value_100, Some(value1.to_vec()));
 
     println!("✓ BST tip optimization: Historical queries work correctly");
@@ -255,12 +261,19 @@ fn test_bst_tip_optimization_dual_storage() -> Result<()> {
     // Store a value
     bst.put(key, value, height)?;
 
-    // Verify both current and historical storage exist
-    let current_key = format!("{}{}", CURRENT_VALUE_PREFIX, hex::encode(key));
-    let historical_key = format!("{}{}:{}", HISTORICAL_VALUE_PREFIX, hex::encode(key), height);
+    // Verify both current and historical storage exist (using raw bytes, not hex)
+    let mut current_key = Vec::new();
+    current_key.extend_from_slice(CURRENT_VALUE_PREFIX.as_bytes());
+    current_key.extend_from_slice(key);
+    
+    let mut historical_key = Vec::new();
+    historical_key.extend_from_slice(HISTORICAL_VALUE_PREFIX.as_bytes());
+    historical_key.extend_from_slice(key);
+    historical_key.push(b':');
+    historical_key.extend_from_slice(height.to_string().as_bytes());
 
-    let current_stored = bst.storage().get_immutable(current_key.as_bytes())?;
-    let historical_stored = bst.storage().get_immutable(historical_key.as_bytes())?;
+    let current_stored = bst.storage().get_immutable(&current_key)?;
+    let historical_stored = bst.storage().get_immutable(&historical_key)?;
 
     assert_eq!(current_stored, Some(value.to_vec()));
     assert_eq!(historical_stored, Some(value.to_vec()));

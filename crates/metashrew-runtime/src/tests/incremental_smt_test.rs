@@ -155,18 +155,18 @@ fn test_incremental_smt_basic() -> Result<()> {
     assert_eq!(root_0, EMPTY_NODE_HASH);
 
     // Add first key-value pair
-    smt_helper.bst_put(b"key1", b"value1", 1)?;
+    smt_helper.put(b"key1", b"value1", 1)?;
     let root_1 = smt_helper.calculate_and_store_state_root(1)?;
     assert_ne!(root_1, EMPTY_NODE_HASH);
 
     // Add second key-value pair
-    smt_helper.bst_put(b"key2", b"value2", 2)?;
+    smt_helper.put(b"key2", b"value2", 2)?;
     let root_2 = smt_helper.calculate_and_store_state_root(2)?;
     assert_ne!(root_2, root_1);
     assert_ne!(root_2, EMPTY_NODE_HASH);
 
     // Update existing key
-    smt_helper.bst_put(b"key1", b"new_value1", 3)?;
+    smt_helper.put(b"key1", b"new_value1", 3)?;
     let root_3 = smt_helper.calculate_and_store_state_root(3)?;
     assert_ne!(root_3, root_2);
     assert_ne!(root_3, EMPTY_NODE_HASH);
@@ -190,7 +190,7 @@ fn test_incremental_smt_efficiency() -> Result<()> {
     for i in 0..num_keys {
         let key = format!("key_{:04}", i);
         let value = format!("value_{:04}", i);
-        smt_helper.bst_put(key.as_bytes(), value.as_bytes(), i + 1)?;
+        smt_helper.put(key.as_bytes(), value.as_bytes(), i + 1)?;
     }
 
     // Reset operation count before testing incremental update
@@ -198,7 +198,7 @@ fn test_incremental_smt_efficiency() -> Result<()> {
 
     // Add one more key and measure operations for incremental update
     let start = Instant::now();
-    smt_helper.bst_put(b"new_key", b"new_value", num_keys + 1)?;
+    smt_helper.put(b"new_key", b"new_value", num_keys + 1)?;
     let root = smt_helper.calculate_and_store_state_root(num_keys + 1)?;
     let incremental_duration = start.elapsed();
     let incremental_ops = smt_helper.storage.operation_count();
@@ -235,10 +235,10 @@ fn test_incremental_smt_deterministic() -> Result<()> {
     for (height, (key, value)) in test_data.iter().enumerate() {
         let height = height as u32 + 1;
         
-        smt_helper1.bst_put(key, value, height)?;
+        smt_helper1.put(key, value, height)?;
         let root1 = smt_helper1.calculate_and_store_state_root(height)?;
 
-        smt_helper2.bst_put(key, value, height)?;
+        smt_helper2.put(key, value, height)?;
         let root2 = smt_helper2.calculate_and_store_state_root(height)?;
 
         assert_eq!(root1, root2, "Roots should be identical at height {}", height);
@@ -254,9 +254,9 @@ fn test_incremental_smt_multiple_keys_per_block() -> Result<()> {
 
     // Simulate a block with multiple key updates
     let height = 1;
-    smt_helper.bst_put(b"key1", b"value1", height)?;
-    smt_helper.bst_put(b"key2", b"value2", height)?;
-    smt_helper.bst_put(b"key3", b"value3", height)?;
+    smt_helper.put(b"key1", b"value1", height)?;
+    smt_helper.put(b"key2", b"value2", height)?;
+    smt_helper.put(b"key3", b"value3", height)?;
 
     let root = smt_helper.calculate_and_store_state_root(height)?;
     assert_ne!(root, EMPTY_NODE_HASH);
@@ -270,8 +270,8 @@ fn test_incremental_smt_multiple_keys_per_block() -> Result<()> {
 
     // Add more keys in the next block
     let height = 2;
-    smt_helper.bst_put(b"key4", b"value4", height)?;
-    smt_helper.bst_put(b"key1", b"updated_value1", height)?; // Update existing
+    smt_helper.put(b"key4", b"value4", height)?;
+    smt_helper.put(b"key1", b"updated_value1", height)?; // Update existing
 
     let root2 = smt_helper.calculate_and_store_state_root(height)?;
     assert_ne!(root2, root);
@@ -292,7 +292,7 @@ fn test_smt_node_storage_and_retrieval() -> Result<()> {
     let mut smt_helper = SMTHelper::new(store);
 
     // Add a key and verify the SMT nodes are stored correctly
-    smt_helper.bst_put(b"test_key", b"test_value", 1)?;
+    smt_helper.put(b"test_key", b"test_value", 1)?;
     let root = smt_helper.calculate_and_store_state_root(1)?;
 
     // The root should be retrievable
@@ -300,7 +300,7 @@ fn test_smt_node_storage_and_retrieval() -> Result<()> {
     assert_eq!(root, retrieved_root);
 
     // Add another key to create internal nodes
-    smt_helper.bst_put(b"another_key", b"another_value", 2)?;
+    smt_helper.put(b"another_key", b"another_value", 2)?;
     let root2 = smt_helper.calculate_and_store_state_root(2)?;
 
     // Both roots should be retrievable

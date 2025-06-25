@@ -5,7 +5,7 @@ use anyhow::Result;
 // Core modules
 pub mod context;
 pub mod helpers;
-pub mod optimized_bst;
+pub mod key_utils;
 pub mod proto;
 pub mod runtime;
 pub mod smt;
@@ -22,7 +22,6 @@ pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
 
 // Re-export helper types
 pub use helpers::{BSTHelper, BSTStatistics};
-pub use optimized_bst::{OptimizedBST, OptimizedBSTStatistics};
 pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
 
 // Utility functions that are storage-backend agnostic

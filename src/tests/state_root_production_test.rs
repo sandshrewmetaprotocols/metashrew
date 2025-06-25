@@ -46,7 +46,7 @@ fn test_state_root_with_rocksdb_adapter() -> Result<()> {
 
     // Store the key-value pairs in BST
     for (key, value) in &test_data {
-        match smt_helper.bst_put(key, value, height) {
+        match smt_helper.put(key, value, height) {
             Ok(_) => println!(
                 "DEBUG: Successfully stored key: {:?}",
                 String::from_utf8_lossy(key)
@@ -158,7 +158,7 @@ fn test_state_root_sequential_heights() -> Result<()> {
         let value = format!("value_for_height_{}", height).into_bytes();
 
         // Store the key-value pair
-        smt_helper.bst_put(&key, &value, height)?;
+        smt_helper.put(&key, &value, height)?;
         println!("DEBUG: Stored key-value for height {}", height);
 
         // Calculate state root for this height

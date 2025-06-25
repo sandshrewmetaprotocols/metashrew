@@ -61,7 +61,7 @@
 //! - **Dependency injection**: Easy substitution of components
 //! - **Isolated testing**: Test individual components in isolation
 
-use crate::{BlockInfo, ChainTip, PreviewCall, SyncError, SyncResult, ViewCall, ViewResult};
+use crate::{BlockInfo, ChainTip, PreviewCall, SyncResult, ViewCall, ViewResult};
 use async_trait::async_trait;
 
 /// Trait for Bitcoin node adapters that provide blockchain data.

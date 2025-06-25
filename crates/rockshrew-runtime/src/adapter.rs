@@ -2,10 +2,25 @@
 
 use anyhow::Result;
 use metashrew_runtime::{
-    to_labeled_key, BatchLike, KVTrackerFn, KeyValueStoreLike, TIP_HEIGHT_KEY,
+    BatchLike, KVTrackerFn, KeyValueStoreLike, TIP_HEIGHT_KEY,
 };
 use rocksdb::{Options, WriteBatch, WriteBatchIterator, DB};
 use std::sync::{Arc, Mutex};
+
+/// Optimized labeled key creation that avoids unnecessary allocations
+#[inline]
+fn make_labeled_key_fast(key: &[u8]) -> Vec<u8> {
+    if metashrew_runtime::has_label() {
+        let label = metashrew_runtime::get_label();
+        let label_bytes = label.as_bytes();
+        let mut result = Vec::with_capacity(label_bytes.len() + key.len());
+        result.extend_from_slice(label_bytes);
+        result.extend_from_slice(key);
+        result
+    } else {
+        key.to_vec()
+    }
+}
 
 #[derive(Clone)]
 pub struct RocksDBRuntimeAdapter {
@@ -77,9 +92,10 @@ impl RocksDBRuntimeAdapter {
         let mut atomic_batch = WriteBatch::default();
 
         // Add the height update
-        let height_key = TIP_HEIGHT_KEY.as_bytes().to_vec();
-        let height_bytes = (self.height + 1).to_le_bytes().to_vec();
-        atomic_batch.put(&to_labeled_key(&height_key), &height_bytes);
+        let height_key = TIP_HEIGHT_KEY.as_bytes();
+        let height_bytes = (self.height + 1).to_le_bytes();
+        let labeled_height_key = make_labeled_key_fast(height_key);
+        atomic_batch.put(&labeled_height_key, &height_bytes);
 
         // Track operations and add them to the atomic batch
         let kv_tracker_clone = self.kv_tracker.clone();
@@ -108,11 +124,13 @@ impl BatchLike for RocksDBBatch {
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, k: K, v: V) {
-        self.0.put(to_labeled_key(&k.as_ref().to_vec()), v);
+        let labeled_key = make_labeled_key_fast(k.as_ref());
+        self.0.put(labeled_key, v);
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, k: K) {
-        self.0.delete(to_labeled_key(&k.as_ref().to_vec()));
+        let labeled_key = make_labeled_key_fast(k.as_ref());
+        self.0.delete(labeled_key);
     }
 }
 
@@ -124,18 +142,17 @@ pub struct BatchTracker<'a> {
 
 impl<'a> WriteBatchIterator for BatchTracker<'a> {
     fn put(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
+        // Forward to the inner batch first (more efficient)
+        self.inner_batch.put(key.as_ref(), value.as_ref());
+
         // Track the key-value update if a tracker is registered
+        // Only clone if we actually have a tracker to avoid unnecessary allocations
         if let Ok(guard) = self.kv_tracker.lock() {
             if let Some(tracker) = &*guard {
-                // Clone the key and value for tracking
-                let key_vec = key.to_vec();
-                let value_vec = value.to_vec();
-                tracker(key_vec, value_vec);
+                // Only clone when we actually need to track
+                tracker(key.to_vec(), value.to_vec());
             }
         }
-
-        // Forward to the inner batch
-        self.inner_batch.put(key.as_ref(), value.as_ref());
     }
 
     fn delete(&mut self, key: Box<[u8]>) {
@@ -161,30 +178,39 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.db
-            .get(to_labeled_key(&key.as_ref().to_vec()))
-            .map(|opt| opt.map(|v| v.to_vec()))
+        let labeled_key = make_labeled_key_fast(key.as_ref());
+        self.db.get(labeled_key).map(|opt| opt.map(|v| v.to_vec()))
     }
 
     fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        self.db
-            .get(to_labeled_key(&key.as_ref().to_vec()))
-            .map(|opt| opt.map(|v| v.to_vec()))
+        let labeled_key = make_labeled_key_fast(key.as_ref());
+        self.db.get(labeled_key).map(|opt| opt.map(|v| v.to_vec()))
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
-        self.db.delete(to_labeled_key(&key.as_ref().to_vec()))
+        let labeled_key = make_labeled_key_fast(key.as_ref());
+        self.db.delete(labeled_key)
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
-        let key_vec = key.as_ref().to_vec();
-        let value_vec = value.as_ref().to_vec();
+        let key_slice = key.as_ref();
+        let value_slice = value.as_ref();
 
         // Track the key-value update if a tracker is registered
-        self.track_kv_update(key_vec.clone(), value_vec.clone());
+        // Only clone if we actually have a tracker to avoid unnecessary allocations
+        let should_track = if let Ok(guard) = self.kv_tracker.lock() {
+            guard.is_some()
+        } else {
+            false
+        };
+        
+        if should_track {
+            self.track_kv_update(key_slice.to_vec(), value_slice.to_vec());
+        }
 
         // Perform the actual database update
-        self.db.put(to_labeled_key(&key_vec), value_vec)
+        let labeled_key = make_labeled_key_fast(key_slice);
+        self.db.put(labeled_key, value_slice)
     }
 
     fn scan_prefix<K: AsRef<[u8]>>(
@@ -192,7 +218,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         prefix: K,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
         let mut results = Vec::new();
-        let prefix_bytes = to_labeled_key(&prefix.as_ref().to_vec());
+        let prefix_bytes = make_labeled_key_fast(prefix.as_ref());
 
         let mut iter = self.db.raw_iterator();
         iter.seek(&prefix_bytes);
@@ -239,16 +265,16 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
 /// Query height from RocksDB
 pub async fn query_height(db: Arc<DB>, start_block: u32) -> Result<u32> {
-    let height_key = TIP_HEIGHT_KEY.as_bytes().to_vec();
-    let bytes = match db.get(&to_labeled_key(&height_key))? {
+    let height_key = TIP_HEIGHT_KEY.as_bytes();
+    let labeled_key = make_labeled_key_fast(height_key);
+    let bytes = match db.get(&labeled_key)? {
         Some(v) => v,
         None => {
             return Ok(start_block);
         }
     };
-    if bytes.len() == 0 {
+    if bytes.is_empty() {
         return Ok(start_block);
     }
-    let bytes_ref: &[u8] = &bytes;
-    Ok(u32::from_le_bytes(bytes_ref.try_into().unwrap()))
+    Ok(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
 }

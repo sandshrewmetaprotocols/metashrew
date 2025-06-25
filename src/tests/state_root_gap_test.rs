@@ -38,7 +38,7 @@ fn test_state_root_with_gaps() -> Result<()> {
         let key = format!("/test/key_height_{}", height).into_bytes();
         let value = format!("value_for_height_{}", height).into_bytes();
 
-        smt_helper.bst_put(&key, &value, height)?;
+        smt_helper.put(&key, &value, height)?;
         let state_root = smt_helper.calculate_and_store_state_root(height)?;
         println!(
             "DEBUG: Stored state root for height {}: {}",
@@ -59,7 +59,7 @@ fn test_state_root_with_gaps() -> Result<()> {
     let value = format!("value_for_height_{}", gap_height).into_bytes();
 
     // Store the key-value pair
-    smt_helper.bst_put(&key, &value, gap_height)?;
+    smt_helper.put(&key, &value, gap_height)?;
 
     // Try to calculate state root - this should fail because there's no state root for height 879999
     match smt_helper.calculate_and_store_state_root(gap_height) {
@@ -121,7 +121,7 @@ fn test_state_root_recovery_strategy() -> Result<()> {
     let value = format!("value_for_height_{}", height).into_bytes();
 
     // Store the key-value pair
-    smt_helper.bst_put(&key, &value, height)?;
+    smt_helper.put(&key, &value, height)?;
 
     // Instead of failing, let's try a recovery strategy:
     // Calculate state root starting from empty state (like genesis)
@@ -131,24 +131,22 @@ fn test_state_root_recovery_strategy() -> Result<()> {
     // For now, let's manually implement the recovery logic
 
     // Get all keys that exist in the database up to this height
-    let prefix = metashrew_runtime::smt::BST_HEIGHT_PREFIX.as_bytes();
+    // In the new append-only approach, we scan for keys with "/length" suffix
+    let length_suffix = "/length";
     let mut all_keys = std::collections::HashSet::new();
 
-    // Scan all BST entries to find unique keys
-    for (key, _) in smt_helper.storage.scan_prefix(prefix)?.into_iter() {
+    // Scan all entries to find unique keys
+    for (key, _) in smt_helper.storage.scan_prefix(b"")?.into_iter() {
         let key_str = String::from_utf8_lossy(&key);
-        if let Some(rest) = key_str.strip_prefix(metashrew_runtime::smt::BST_HEIGHT_PREFIX) {
-            // Format is: {hex_key}:{height}
-            if let Some(colon_pos) = rest.find(':') {
-                let hex_key = &rest[..colon_pos];
-                let height_str = &rest[colon_pos + 1..];
-                if let (Ok(original_key), Ok(key_height)) =
-                    (hex::decode(hex_key), height_str.parse::<u32>())
-                {
-                    if key_height <= height {
-                        all_keys.insert(original_key);
-                    }
-                }
+        if key_str.ends_with(length_suffix) {
+            // Extract the original key by removing the "/length" suffix
+            let original_key_str = &key_str[..key_str.len() - length_suffix.len()];
+            let original_key = original_key_str.as_bytes().to_vec();
+            
+            // Check if this key has any updates at or before the target height
+            let heights = smt_helper.get_heights_for_key(&original_key)?;
+            if heights.iter().any(|&h| h <= height) {
+                all_keys.insert(original_key);
             }
         }
     }
@@ -163,7 +161,7 @@ fn test_state_root_recovery_strategy() -> Result<()> {
     let mut current_state: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
         std::collections::BTreeMap::new();
     for key in all_keys {
-        if let Ok(Some(value)) = smt_helper.bst_get_at_height(&key, height) {
+        if let Ok(Some(value)) = smt_helper.get_at_height(&key, height) {
             current_state.insert(key.clone(), value);
         }
     }

@@ -554,8 +554,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         };
 
         // Create a new runtime with preview db using the synchronous engine
+        // Process the preview block at height + 1 to simulate adding it after the target height
+        let preview_height = height + 1;
         let mut runtime =
-            Self::new_with_db(preview_db, height, self.engine.clone(), self.module.clone())?;
+            Self::new_with_db(preview_db, preview_height, self.engine.clone(), self.module.clone())?;
         runtime.context.lock().map_err(lock_err)?.block = block.clone();
 
         // Execute block via _start to populate preview db
@@ -575,6 +577,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         }
 
         // Create new runtime just for the view using the updated preview DB
+        // Query at the preview height to see the state after processing the preview block
         let mut view_runtime = {
             let context = runtime.context.lock().map_err(lock_err)?;
             // Create a view runtime with the updated database
@@ -583,7 +586,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             let view_context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
                 MetashrewRuntimeContext<T>,
             >::new(
-                MetashrewRuntimeContext::new(context.db.clone(), height, vec![]),
+                MetashrewRuntimeContext::new(context.db.clone(), preview_height, vec![]),
             ));
 
             wasmstore.limiter(|state| &mut state.limits);
@@ -956,7 +959,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let smt_helper = SMTHelper::new(db);
 
         // Use BST to get the value at the specific height
-        match smt_helper.bst_get_at_height(key, height) {
+        match smt_helper.get_at_height(key, height) {
             Ok(Some(value)) => Ok(value),
             Ok(None) => Ok(Vec::new()),
             Err(e) => Err(anyhow!("BST query error: {}", e)),
@@ -987,7 +990,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         };
 
         let mut smt_helper = SMTHelper::new(db);
-        smt_helper.bst_put(key, value, height)?;
+        smt_helper.put(key, value, height)?;
 
         Ok(())
     }
@@ -1000,10 +1003,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         key: &Vec<u8>,
     ) -> Result<()> {
         // Create a key for the update list
-        let update_list_key = format!("updates:{}", hex::encode(update_key)).into_bytes();
+        let update_list_key = crate::key_utils::make_prefixed_key(b"updates:", update_key);
 
         // Add the key to the update list
-        batch.put(update_list_key, key.clone());
+        batch.put(&update_list_key, key.clone());
 
         Ok(())
     }
@@ -1166,32 +1169,21 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use optimized BST for historical queries in view functions
-                            let db = match context_get.clone().lock() {
-                                Ok(ctx) => ctx.db.clone(),
-                                Err(_) => {
-                                    caller.data_mut().had_failure = true;
-                                    return;
-                                }
-                            };
 
                             // Create OptimizedBST for efficient historical queries
-                            let optimized_bst = crate::optimized_bst::OptimizedBST::new(db);
-                            match optimized_bst.get_at_height(&key_vec, height) {
-                                Ok(Some(lookup)) => {
+                            match Self::bst_get_at_height(context_get.clone(), &key_vec, height) {
+                                Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
                                     {
                                         caller.data_mut().had_failure = true;
                                     }
                                 }
-                                Ok(None) => {
+                                Err(_) => {
                                     // Key not found, return empty
                                     if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
                                         caller.data_mut().had_failure = true;
                                     }
-                                }
-                                Err(_) => {
-                                    caller.data_mut().had_failure = true;
                                 }
                             }
                         }
@@ -1235,17 +1227,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use optimized BST for historical queries in view functions
-                            let db = match context_get_len.clone().lock() {
-                                Ok(ctx) => ctx.db.clone(),
-                                Err(_) => return i32::MAX,
-                            };
 
-                            // Create OptimizedBST for efficient historical queries
-                            let optimized_bst = crate::optimized_bst::OptimizedBST::new(db);
-                            match optimized_bst.get_at_height(&key_vec, height) {
-                                Ok(Some(value)) => value.len() as i32,
-                                Ok(None) => 0,
-                                Err(_) => i32::MAX,
+                            match Self::bst_get_at_height(context_get_len.clone(), &key_vec, height) {
+                                Ok(value) => value.len() as i32,
+                                Err(_) => 0,
                             }
                         }
                         Err(_) => i32::MAX,
@@ -1391,19 +1376,26 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         Ok(mut ctx) => {
                             ctx.state = 1;
                             
-                            // Use optimized BST for preview operations
-                            let mut optimized_bst = crate::optimized_bst::OptimizedBST::new(ctx.db.clone());
+                            // Use optimized BST for preview operations with batching
+                            let mut batch = ctx.db.create_batch();
+                            let mut smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
                             
-                            // Write directly to the database using optimized BST
+                            // Write all operations to a single batch for atomicity
                             for (k, v) in decoded.list.iter().tuples() {
                                 let k_owned = <Vec<u8> as Clone>::clone(k);
                                 let v_owned = <Vec<u8> as Clone>::clone(v);
 
-                                // Store using optimized BST (dual storage: current + historical)
-                                if let Err(_) = optimized_bst.put(&k_owned, &v_owned, height) {
+                                // Add to batch using optimized BST (dual storage: current + historical)
+                                if let Err(_) = smt_helper.put_batched(&mut batch, &k_owned, &v_owned, height) {
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
+                            }
+
+                            // Write the entire batch atomically
+                            if let Err(_) = ctx.db.write(batch) {
+                                caller.data_mut().had_failure = true;
+                                return;
                             }
                         }
                         Err(_) => {
@@ -1446,32 +1438,20 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use optimized BST for preview queries
-                            let db = match context_get.clone().lock() {
-                                Ok(ctx) => ctx.db.clone(),
-                                Err(_) => {
-                                    caller.data_mut().had_failure = true;
-                                    return;
-                                }
-                            };
 
-                            // Create OptimizedBST for efficient queries
-                            let optimized_bst = crate::optimized_bst::OptimizedBST::new(db);
-                            match optimized_bst.get_at_height(&key_vec, height) {
-                                Ok(Some(lookup)) => {
+                            match Self::bst_get_at_height(context_get.clone(), &key_vec, height) {
+                                Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
                                     {
                                         caller.data_mut().had_failure = true;
                                     }
                                 }
-                                Ok(None) => {
+                                Err(_) => {
                                     // Key not found, return empty
                                     if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
                                         caller.data_mut().had_failure = true;
                                     }
-                                }
-                                Err(_) => {
-                                    caller.data_mut().had_failure = true;
                                 }
                             }
                         }
@@ -1515,17 +1495,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use optimized BST for preview queries
-                            let db = match context_get_len.clone().lock() {
-                                Ok(ctx) => ctx.db.clone(),
-                                Err(_) => return i32::MAX,
-                            };
 
-                            // Create OptimizedBST for efficient queries
-                            let optimized_bst = crate::optimized_bst::OptimizedBST::new(db);
-                            match optimized_bst.get_at_height(&key_vec, height) {
-                                Ok(Some(value)) => value.len() as i32,
-                                Ok(None) => 0,
-                                Err(_) => i32::MAX,
+                            match Self::bst_get_at_height(context_get_len.clone(), &key_vec, height) {
+                                Ok(value) => value.len() as i32,
+                                Err(_) => 0,
                             }
                         }
                         Err(_) => i32::MAX,
@@ -1605,94 +1578,53 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     let mut batched_smt = crate::smt::BatchedSMTHelper::new(db);
 
                     // Collect all key-value pairs for batch processing
-                    let mut keys_for_state_root = Vec::new();
-                    
-                    // Apply all BST updates using optimized dual storage in a single batch
-                    let mut batch = batched_smt.storage.create_batch();
-                    
-                    for (k, v) in decoded.list.iter().tuples() {
-                        let k_owned = <Vec<u8> as Clone>::clone(k);
-                        let v_owned = <Vec<u8> as Clone>::clone(v);
+                    // This is the new, correct flow for handling state updates.
+                    // All key-value pairs are collected and passed to a single, atomic
+                    // function that handles both the SMT update and the historical BST storage.
+                    let key_values: Vec<(Vec<u8>, Vec<u8>)> = decoded
+                        .list
+                        .iter()
+                        .tuples()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
 
-                        // Track key-value updates using the trait method
-                        {
-                            let context_ref_clone = context_ref.clone();
-                            let mut ctx_guard = match context_ref_clone.lock() {
-                                Ok(guard) => guard,
-                                Err(_) => {
-                                    caller.data_mut().had_failure = true;
-                                    return;
-                                }
-                            };
-
-                            // Track the original key-value pair before annotation
-                            ctx_guard.db.track_kv_update(k_owned.clone(), v_owned.clone());
+                    // Track key-value updates for any external listeners (like snapshotting)
+                    {
+                        let context_ref_clone = context_ref.clone();
+                        let mut ctx_guard = match context_ref_clone.lock() {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        };
+                        for (k, v) in &key_values {
+                            ctx_guard.db.track_kv_update(k.clone(), v.clone());
                         }
-
-                        // OPTIMIZATION: Store both current and historical values
-                        // 1. Store current value for O(1) access during indexing
-                        let current_key = format!("{}{}",
-                            crate::optimized_bst::CURRENT_VALUE_PREFIX,
-                            hex::encode(&k_owned)
-                        );
-                        batch.put(current_key.into_bytes(), v_owned.clone());
-
-                        // 2. Store historical value for view functions
-                        let historical_key = format!("{}{}:{}",
-                            crate::optimized_bst::HISTORICAL_VALUE_PREFIX,
-                            hex::encode(&k_owned),
-                            height
-                        );
-                        batch.put(historical_key.into_bytes(), v_owned.clone());
-
-                        // 3. Track that this key was updated at this height for reorg handling
-                        let height_index_key = format!("{}{}:{}",
-                            crate::optimized_bst::HEIGHT_INDEX_PREFIX,
-                            height,
-                            hex::encode(&k_owned)
-                        );
-                        batch.put(height_index_key.into_bytes(), b"".to_vec());
-
-                        // 4. Track keys updated at this height for reorg handling
-                        let keys_at_height_key = format!("{}{}:{}",
-                            crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX,
-                            height,
-                            hex::encode(&k_owned)
-                        );
-                        batch.put(keys_at_height_key.into_bytes(), b"".to_vec());
-
-                        keys_for_state_root.push(k_owned);
                     }
-                    
-                    // Write optimized BST batch
-                    match batched_smt.storage.write(batch) {
-                        Ok(_) => {},
-                        Err(_) => {
+
+                    // The new `calculate_and_store_state_root_batched` will handle all database writes atomically.
+                    // It will be refactored to accept key-value pairs directly.
+                    match batched_smt.calculate_and_store_state_root_batched(height, &key_values) {
+                        Ok(state_root) => {
+                            log::info!(
+                                "indexed block {} with {} k/v pairs atomically, state root: {}",
+                                height,
+                                key_values.len(),
+                                hex::encode(state_root)
+                            );
+                        },
+                        Err(e) => {
+                            log::error!("failed to calculate state root for height {}: {:?}", height, e);
                             caller.data_mut().had_failure = true;
                             return;
                         }
                     }
 
+                    // Set completion state
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
                             ctx.state = 1;
-
-                            // Use optimized batched state root calculation
-                            match batched_smt.calculate_and_store_state_root_batched(height, &keys_for_state_root) {
-                                Ok(state_root) => {
-                                    log::info!(
-                                        "indexed block {} with {} k/v pairs, state root: {}",
-                                        height,
-                                        decoded.list.len() / 2,
-                                        hex::encode(state_root)
-                                    );
-                                },
-                                Err(e) => {
-                                    log::error!("failed to calculate state root for height {}: {:?}", height, e);
-                                    caller.data_mut().had_failure = true;
-                                    return;
-                                }
-                            }
                         }
                         Err(_) => {
                             caller.data_mut().had_failure = true;
@@ -1727,7 +1659,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // During indexing, get the current state using optimized BST tip access
+                            // During indexing, get the current state using append-only approach
                             let db = match context_get.clone().lock() {
                                 Ok(ctx) => ctx.db.clone(),
                                 Err(_) => {
@@ -1736,14 +1668,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 }
                             };
 
-                            // OPTIMIZATION: Use direct current value lookup for O(1) access
-                            // This avoids binary search through all heights for current state queries
-                            let current_key = format!("{}{}",
-                                crate::optimized_bst::CURRENT_VALUE_PREFIX,
-                                hex::encode(&key_vec)
-                            );
+                            // Use SMTHelper to get current value using append-only approach
+                            let smt_helper = crate::smt::SMTHelper::new(db);
                             
-                            match db.get_immutable(current_key.as_bytes()) {
+                            match smt_helper.get_current(&key_vec) {
                                 Ok(Some(lookup)) => {
                                     if let Err(_) = mem.write(&mut caller, value as usize, lookup.as_slice()) {
                                         caller.data_mut().had_failure = true;
@@ -1796,19 +1724,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // During indexing, get the current state using optimized BST tip access
+                            // During indexing, get the current state using append-only approach
                             let db = match context_get_len.clone().lock() {
                                 Ok(ctx) => ctx.db.clone(),
                                 Err(_) => return i32::MAX,
                             };
 
-                            // OPTIMIZATION: Use direct current value lookup for O(1) access
-                            let current_key = format!("{}{}",
-                                crate::optimized_bst::CURRENT_VALUE_PREFIX,
-                                hex::encode(&key_vec)
-                            );
+                            // Use SMTHelper to get current value using append-only approach
+                            let smt_helper = crate::smt::SMTHelper::new(db);
                             
-                            match db.get_immutable(current_key.as_bytes()) {
+                            match smt_helper.get_current(&key_vec) {
                                 Ok(Some(value)) => value.len() as i32,
                                 Ok(None) => 0,
                                 Err(_) => i32::MAX,

@@ -41,7 +41,7 @@ fn test_atomic_block_processing_requirement() -> Result<()> {
 
     // Step 1: Store key-value pairs (this represents WASM runtime processing)
     for (key, value) in &test_data {
-        smt_helper.bst_put(key, value, height)?;
+        smt_helper.put(key, value, height)?;
         println!(
             "DEBUG: Stored key-value pair: {:?} = {:?}",
             String::from_utf8_lossy(key),
@@ -116,7 +116,7 @@ fn test_start_block_state_root_initialization() -> Result<()> {
     let key = b"/test/first_key".to_vec();
     let value = b"first_value".to_vec();
 
-    smt_helper.bst_put(&key, &value, start_height)?;
+    smt_helper.put(&key, &value, start_height)?;
 
     // This should fail because there's no state root for height 879999
     match smt_helper.calculate_and_store_state_root(start_height) {

@@ -1,15 +1,17 @@
-//! Test to verify snapshot diff creation works correctly with BST tip optimization
+//! Test to verify snapshot diff creation works correctly with append-only approach
 //!
 //! This test validates that the snapshot system creates proper diff files
-//! when using the optimized BST storage format.
+//! when using the new append-only storage format.
 
-use crate::optimized_bst::{CURRENT_VALUE_PREFIX, HISTORICAL_VALUE_PREFIX, HEIGHT_INDEX_PREFIX};
 use crate::smt::SMTHelper;
 use crate::tests::incremental_smt_test::MemoryStore;
 use crate::traits::KeyValueStoreLike;
 use anyhow::Result;
 use std::collections::HashMap;
 use tempfile::TempDir;
+
+// Constants for the new append-only approach
+const LENGTH_SUFFIX: &str = "/length";
 
 /// Test that snapshot diff creation works with optimized BST format
 #[test]
@@ -23,24 +25,24 @@ fn test_snapshot_diff_creation() -> Result<()> {
     println!("📝 Simulating block processing with BST operations...");
 
     // Block 1: Initial state
-    smt.bst_put(b"key1", b"value1", 1)?;
-    smt.bst_put(b"key2", b"value2", 1)?;
+    smt.put(b"key1", b"value1", 1)?;
+    smt.put(b"key2", b"value2", 1)?;
 
     // Block 2: Update existing key and add new key
-    smt.bst_put(b"key1", b"value1_updated", 2)?;
-    smt.bst_put(b"key3", b"value3", 2)?;
+    smt.put(b"key1", b"value1_updated", 2)?;
+    smt.put(b"key3", b"value3", 2)?;
 
     // Block 3: More updates
-    smt.bst_put(b"key2", b"value2_updated", 3)?;
-    smt.bst_put(b"key4", b"value4", 3)?;
+    smt.put(b"key2", b"value2_updated", 3)?;
+    smt.put(b"key4", b"value4", 3)?;
 
     println!("✅ Simulated 3 blocks of processing");
 
     // Verify that BST operations are working by checking current values
-    let current_key1 = smt.bst_get_current(b"key1")?;
-    let current_key2 = smt.bst_get_current(b"key2")?;
-    let current_key3 = smt.bst_get_current(b"key3")?;
-    let current_key4 = smt.bst_get_current(b"key4")?;
+    let current_key1 = smt.get_current(b"key1")?;
+    let current_key2 = smt.get_current(b"key2")?;
+    let current_key3 = smt.get_current(b"key3")?;
+    let current_key4 = smt.get_current(b"key4")?;
 
     assert_eq!(current_key1, Some(b"value1_updated".to_vec()));
     assert_eq!(current_key2, Some(b"value2_updated".to_vec()));
@@ -50,8 +52,8 @@ fn test_snapshot_diff_creation() -> Result<()> {
     println!("✅ BST operations working correctly");
 
     // Verify historical queries work
-    let historical_key1_at_1 = smt.bst_get_at_height(b"key1", 1)?;
-    let historical_key1_at_2 = smt.bst_get_at_height(b"key1", 2)?;
+    let historical_key1_at_1 = smt.get_at_height(b"key1", 1)?;
+    let historical_key1_at_2 = smt.get_at_height(b"key1", 2)?;
     
     assert_eq!(historical_key1_at_1, Some(b"value1".to_vec()));
     assert_eq!(historical_key1_at_2, Some(b"value1_updated".to_vec()));
@@ -86,15 +88,19 @@ fn test_snapshot_diff_creation() -> Result<()> {
     println!("📋 Tracked {} database changes", changes.len());
     assert!(!changes.is_empty(), "Should have tracked database changes");
 
-    // Verify the changes contain the expected optimized BST keys
-    let has_current_keys = changes.iter().any(|(k, _)| k.starts_with(CURRENT_VALUE_PREFIX.as_bytes()));
-    let has_historical_keys = changes.iter().any(|(k, _)| k.starts_with(HISTORICAL_VALUE_PREFIX.as_bytes()));
-    let has_height_keys = changes.iter().any(|(k, _)| k.starts_with(HEIGHT_INDEX_PREFIX.as_bytes()));
+    // Verify the changes contain the expected append-only keys
+    let has_length_keys = changes.iter().any(|(k, _)| {
+        let key_str = String::from_utf8_lossy(k);
+        key_str.ends_with(LENGTH_SUFFIX)
+    });
+    let has_update_keys = changes.iter().any(|(k, _)| {
+        let key_str = String::from_utf8_lossy(k);
+        key_str.contains('/') && !key_str.ends_with(LENGTH_SUFFIX)
+    });
 
     println!("🔍 Debug: Change analysis:");
-    println!("  - Has current keys: {}", has_current_keys);
-    println!("  - Has historical keys: {}", has_historical_keys);
-    println!("  - Has height keys: {}", has_height_keys);
+    println!("  - Has length keys: {}", has_length_keys);
+    println!("  - Has update keys: {}", has_update_keys);
     
     // Print first few changes to see what we actually have
     println!("  - First few changes:");
@@ -102,13 +108,8 @@ fn test_snapshot_diff_creation() -> Result<()> {
         println!("    {}: {:?}", i, String::from_utf8_lossy(key));
     }
 
-    assert!(has_current_keys, "Changes should include current value keys");
-    // Note: SMTHelper might be using a different format than pure OptimizedBST
-    // Let's check what we actually have instead of asserting on historical keys
-    if !has_historical_keys {
-        println!("⚠️  Warning: No historical keys found with 'hist:' prefix");
-        println!("    This might be because SMTHelper uses a different format");
-    }
+    assert!(has_length_keys, "Changes should include length tracking keys");
+    assert!(has_update_keys, "Changes should include update keys");
 
     // Create a compressed diff file (simulating what snapshot.rs does)
     let diff_path = snapshot_dir.join("diff_1_to_3.bin.zst");
@@ -144,26 +145,20 @@ fn test_snapshot_diff_creation() -> Result<()> {
 fn get_all_storage_keys(storage: &MemoryStore) -> Result<Vec<Vec<u8>>> {
     let mut keys = Vec::new();
     
-    // Scan for current value keys
-    for (key, _) in storage.scan_prefix(CURRENT_VALUE_PREFIX.as_bytes())? {
-        keys.push(key);
-    }
-    
-    // Scan for historical value keys
-    for (key, _) in storage.scan_prefix(HISTORICAL_VALUE_PREFIX.as_bytes())? {
-        keys.push(key);
-    }
-    
-    // Scan for height index keys
-    for (key, _) in storage.scan_prefix(HEIGHT_INDEX_PREFIX.as_bytes())? {
-        keys.push(key);
+    // Scan for all keys (empty prefix returns everything)
+    for (key, _) in storage.scan_prefix(b"")? {
+        let key_str = String::from_utf8_lossy(&key);
+        // Only include append-only keys (those with "/" in them)
+        if key_str.contains('/') {
+            keys.push(key);
+        }
     }
     
     Ok(keys)
 }
 
 /// Simulate the track_db_changes function from snapshot.rs
-/// This mimics the logic that was updated to work with optimized BST format
+/// This mimics the logic that was updated to work with append-only format
 fn track_db_changes_simulation(
     storage: &MemoryStore,
     start_height: u32,
@@ -177,17 +172,18 @@ fn track_db_changes_simulation(
     // Filter for keys that were modified in the height range
     for key in all_keys {
         if let Some(value) = storage.get_immutable(&key)? {
-            // Check if this key is relevant to our height range
-            if key.starts_with(HISTORICAL_VALUE_PREFIX.as_bytes()) {
-                // Parse the height from the historical key format
-                if let Some(height) = extract_height_from_historical_key(&key) {
+            let key_str = String::from_utf8_lossy(&key);
+            
+            if key_str.ends_with(LENGTH_SUFFIX) {
+                // Always include length tracking keys
+                changes.push((key, value));
+            } else if key_str.contains('/') && !key_str.ends_with(LENGTH_SUFFIX) {
+                // This is an update key, check if it's in our height range
+                if let Some(height) = extract_height_from_update_value(&value) {
                     if height >= start_height && height <= end_height {
                         changes.push((key, value));
                     }
                 }
-            } else if key.starts_with(CURRENT_VALUE_PREFIX.as_bytes()) || key.starts_with(HEIGHT_INDEX_PREFIX.as_bytes()) {
-                // Always include current and height index keys
-                changes.push((key, value));
             }
         }
     }
@@ -195,20 +191,14 @@ fn track_db_changes_simulation(
     Ok(changes)
 }
 
-/// Extract height from a historical key
-fn extract_height_from_historical_key(key: &[u8]) -> Option<u32> {
-    if !key.starts_with(HISTORICAL_VALUE_PREFIX.as_bytes()) {
-        return None;
-    }
+/// Extract height from an update value in the new append-only format
+fn extract_height_from_update_value(value: &[u8]) -> Option<u32> {
+    let value_str = String::from_utf8_lossy(value);
     
-    // Skip the prefix
-    let key_without_prefix = &key[HISTORICAL_VALUE_PREFIX.len()..];
-    
-    // The format is: original_key + height_bytes
-    // For simplicity, assume the last 8 characters are the height (as string)
-    let key_str = String::from_utf8_lossy(key_without_prefix);
-    if let Some(height_str) = key_str.chars().rev().take(8).collect::<String>().chars().rev().collect::<String>().parse::<u32>().ok() {
-        Some(height_str)
+    // The format is "height:value"
+    if let Some(colon_pos) = value_str.find(':') {
+        let height_str = &value_str[..colon_pos];
+        height_str.parse::<u32>().ok()
     } else {
         None
     }
@@ -310,53 +300,45 @@ fn read_compressed_diff(path: &std::path::Path) -> Result<HashMap<Vec<u8>, Vec<u
     Ok(changes)
 }
 
-/// Test that verifies the optimized BST format is compatible with snapshot operations
+/// Test that verifies the append-only format is compatible with snapshot operations
 #[test]
-fn test_optimized_bst_snapshot_compatibility() -> Result<()> {
-    println!("🔄 Testing optimized BST snapshot compatibility");
+fn test_append_only_snapshot_compatibility() -> Result<()> {
+    println!("🔄 Testing append-only snapshot compatibility");
 
     let storage = MemoryStore::new();
     let mut smt = SMTHelper::new(storage.clone());
 
     // Create some test data
-    smt.bst_put(b"test_key", b"test_value", 1)?;
+    smt.put(b"test_key", b"test_value", 1)?;
 
     // Verify current value is accessible
-    let current_value = smt.bst_get_current(b"test_key")?;
+    let current_value = smt.get_current(b"test_key")?;
     assert_eq!(current_value, Some(b"test_value".to_vec()));
 
     // Verify historical value is accessible
-    let historical_value = smt.bst_get_at_height(b"test_key", 1)?;
+    let historical_value = smt.get_at_height(b"test_key", 1)?;
     assert_eq!(historical_value, Some(b"test_value".to_vec()));
 
     // Check that the storage format is correct
     let all_keys = get_all_storage_keys(&smt.storage)?;
     
-    // Should have current value key
-    let current_key = format!("{}{}", CURRENT_VALUE_PREFIX, hex::encode(b"test_key"));
-    let has_current = smt.storage.get_immutable(current_key.as_bytes())?.is_some();
-    assert!(has_current, "Should have current value key");
+    // Should have length key
+    let length_key = b"test_key/length";
+    let has_length = smt.storage.get_immutable(length_key)?.is_some();
+    assert!(has_length, "Should have length tracking key");
     
-    // Should have historical value key (SMTHelper uses different format than pure OptimizedBST)
-    // SMTHelper stores historical data differently, so let's check for what it actually stores
-    let historical_keys: Vec<_> = all_keys.iter()
-        .filter(|k| k.starts_with(HISTORICAL_VALUE_PREFIX.as_bytes()) && k.windows(8).any(|w| w == b"test_key"))
-        .collect();
+    // Should have update key
+    let update_key = b"test_key/0";
+    let has_update = smt.storage.get_immutable(update_key)?.is_some();
+    assert!(has_update, "Should have update key");
     
-    // Should have height index key
-    let height_index_keys: Vec<_> = all_keys.iter()
-        .filter(|k| k.starts_with(HEIGHT_INDEX_PREFIX.as_bytes()))
-        .collect();
-    assert!(!height_index_keys.is_empty(), "Should have height index key");
-    
-    // For SMTHelper, we expect height index keys but not necessarily hist: prefixed keys
-    if historical_keys.is_empty() {
-        println!("ℹ️  Note: SMTHelper uses height: prefix instead of hist: prefix for historical data");
-        println!("   This is expected behavior - the BST tip optimization is still working");
-    } else {
-        println!("✅ Found historical keys with hist: prefix");
+    // Verify the update value format
+    if let Some(update_value) = smt.storage.get_immutable(update_key)? {
+        let update_str = String::from_utf8_lossy(&update_value);
+        assert!(update_str.starts_with("1:"), "Update value should start with height");
+        assert!(update_str.ends_with("test_value"), "Update value should end with the actual value");
     }
 
-    println!("✅ Optimized BST format is compatible with snapshot operations");
+    println!("✅ Append-only format is compatible with snapshot operations");
     Ok(())
 }

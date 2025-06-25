@@ -4,7 +4,8 @@ use env_logger;
 use hex;
 use itertools::Itertools;
 use log::{debug, error, info};
-use metashrew_runtime::{set_label, MetashrewRuntime, RocksDBRuntimeAdapter};
+use metashrew_runtime::{set_label, MetashrewRuntime};
+use rockshrew_runtime::RocksDBRuntimeAdapter;
 use rand::Rng;
 use rocksdb::Options;
 use std::collections::HashMap;
@@ -16,24 +17,26 @@ use tokio;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
-// Import our tracking adapter
+// Import our tracking adapter and database analyzer
 mod tracking_adapter;
+mod db_analyzer;
 use tracking_adapter::TrackingAdapter;
+use db_analyzer::analyze_database;
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about = "Compare the output of two WASM modules in Metashrew", long_about = None)]
 struct Args {
     #[arg(long)]
-    daemon_rpc_url: String,
+    daemon_rpc_url: Option<String>,
 
     #[arg(long)]
-    indexer: String,
+    indexer: Option<String>,
 
     #[arg(long)]
-    compare: String,
+    compare: Option<String>,
 
     #[arg(long)]
-    db_path: String,
+    db_path: Option<String>,
 
     #[arg(long)]
     start_block: Option<u32>,
@@ -48,7 +51,7 @@ struct Args {
     exit_at: Option<u32>,
 
     #[arg(long)]
-    prefix: String,
+    prefix: Option<String>,
 
     // Pipeline configuration
     #[arg(long, default_value_t = 5)]
@@ -65,6 +68,13 @@ struct Args {
         help = "Maximum number of diffs to find before exiting"
     )]
     diff_limit: usize,
+
+    // Database analysis mode
+    #[arg(long, help = "Analyze database contents instead of running diff")]
+    analyze_db: bool,
+
+    #[arg(long, help = "Path to database to analyze (when using --analyze-db)")]
+    analyze_db_path: Option<String>,
 }
 
 static CURRENT_HEIGHT: AtomicU32 = AtomicU32::new(0);
@@ -817,23 +827,43 @@ async fn main() -> Result<()> {
     env_logger::init();
     let args = Args::parse();
 
+    // Check if we're in database analysis mode
+    if args.analyze_db {
+        let db_path = args.analyze_db_path.unwrap_or_else(|| "/data/.metashrew".to_string());
+        println!("🔍 Running database analysis on: {}", db_path);
+        
+        if let Err(e) = analyze_database(&db_path) {
+            eprintln!("❌ Database analysis failed: {}", e);
+            std::process::exit(1);
+        }
+        
+        return Ok(());
+    }
+
+    // Validate required arguments for diff mode
+    let daemon_rpc_url = args.daemon_rpc_url.ok_or_else(|| anyhow!("--daemon-rpc-url is required"))?;
+    let indexer = args.indexer.ok_or_else(|| anyhow!("--indexer is required"))?;
+    let compare = args.compare.ok_or_else(|| anyhow!("--compare is required"))?;
+    let db_path = args.db_path.ok_or_else(|| anyhow!("--db-path is required"))?;
+    let prefix = args.prefix.ok_or_else(|| anyhow!("--prefix is required"))?;
+
     // Set label if provided
     if let Some(ref label) = args.label {
         set_label(label.clone());
     }
 
     // Parse the prefix
-    let prefix = match args.prefix.strip_prefix("0x") {
+    let prefix_bytes = match prefix.strip_prefix("0x") {
         Some(hex_str) => hex::decode(hex_str).map_err(|e| anyhow!("Invalid hex prefix: {}", e))?,
-        None => hex::decode(&args.prefix).map_err(|e| anyhow!("Invalid hex prefix: {}", e))?,
+        None => hex::decode(&prefix).map_err(|e| anyhow!("Invalid hex prefix: {}", e))?,
     };
 
-    info!("Using prefix: {}", hex::encode(&prefix));
+    info!("Using prefix: {}", hex::encode(&prefix_bytes));
 
     // Create the db_path directory if it doesn't exist
-    let db_path = Path::new(&args.db_path);
-    if !db_path.exists() {
-        fs::create_dir_all(db_path)?;
+    let db_path_obj = Path::new(&db_path);
+    if !db_path_obj.exists() {
+        fs::create_dir_all(db_path_obj)?;
     }
 
     // Create the output directory if specified
@@ -846,8 +876,8 @@ async fn main() -> Result<()> {
     }
 
     // Create primary and compare directories
-    let primary_path = db_path.join("primary");
-    let compare_path = db_path.join("compare");
+    let primary_path = db_path_obj.join("primary");
+    let compare_path = db_path_obj.join("compare");
 
     if !primary_path.exists() {
         fs::create_dir_all(&primary_path)?;
@@ -866,12 +896,12 @@ async fn main() -> Result<()> {
     let compare_db = RocksDBRuntimeAdapter::open(compare_path.to_string_lossy().to_string(), opts)?;
 
     // Create tracking adapters
-    let primary_tracking_adapter = TrackingAdapter::new(primary_db, prefix.clone());
-    let compare_tracking_adapter = TrackingAdapter::new(compare_db, prefix.clone());
+    let primary_tracking_adapter = TrackingAdapter::new(primary_db, prefix_bytes.clone());
+    let compare_tracking_adapter = TrackingAdapter::new(compare_db, prefix_bytes.clone());
 
     // Load primary and compare WASM modules
-    let primary_indexer: PathBuf = args.indexer.clone().into();
-    let compare_indexer: PathBuf = args.compare.clone().into();
+    let primary_indexer: PathBuf = indexer.clone().into();
+    let compare_indexer: PathBuf = compare.clone().into();
 
     let primary_runtime = MetashrewRuntime::load(primary_indexer, primary_tracking_adapter)?;
 
@@ -882,7 +912,7 @@ async fn main() -> Result<()> {
 
     // Create and run the diff runtime
     let mut diff_runtime =
-        RockshrewDiffRuntime::new(primary_runtime, compare_runtime, args, start_block, prefix);
+        RockshrewDiffRuntime::new(primary_runtime, compare_runtime, args, start_block, prefix_bytes);
 
     diff_runtime.run_pipeline().await?;
 

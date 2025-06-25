@@ -142,7 +142,7 @@ fn test_batch_vs_individual_performance() -> Result<()> {
         for i in 0..num_keys {
             let key = format!("key_{}", i).into_bytes();
             let value = format!("value_{}", i).into_bytes();
-            smt_helper.bst_put(&key, &value, 0)?;
+            smt_helper.put(&key, &value, 0)?;
         }
 
         storage1.reset_operation_count();
@@ -161,7 +161,7 @@ fn test_batch_vs_individual_performance() -> Result<()> {
         for i in 0..num_keys {
             let key = format!("key_{}", i).into_bytes();
             let value = format!("value_{}", i).into_bytes();
-            smt_helper2.bst_put(&key, &value, 0)?;
+            smt_helper2.put(&key, &value, 0)?;
         }
 
         let updated_keys: Vec<Vec<u8>> = (0..num_keys)
@@ -213,7 +213,7 @@ fn test_batched_smt_helper_performance() -> Result<()> {
     for i in 0..num_keys {
         let key = format!("key_{}", i).into_bytes();
         let value = format!("value_{}", i).into_bytes();
-        regular_helper.bst_put(&key, &value, 0)?;
+        regular_helper.put(&key, &value, 0)?;
     }
 
     let updated_keys: Vec<Vec<u8>> = (0..num_keys)
@@ -223,7 +223,7 @@ fn test_batched_smt_helper_performance() -> Result<()> {
     storage.reset_operation_count();
     let start = Instant::now();
     
-    let _root = batched_helper.calculate_and_store_state_root_batched(0, &updated_keys)?;
+    let _root = regular_helper.calculate_and_store_state_root_batched(0, &updated_keys)?;
     
     let batched_time = start.elapsed();
     let batched_ops = storage.get_operation_count();
@@ -261,7 +261,7 @@ fn test_batch_operations_correctness() -> Result<()> {
 
     // Add to BST
     for (i, (key, value)) in test_keys.iter().zip(test_values.iter()).enumerate() {
-        smt_helper.bst_put(key, value, i as u32)?;
+        smt_helper.put(key, value, i as u32)?;
     }
 
     // Test batch calculation

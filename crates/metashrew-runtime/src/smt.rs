@@ -2,13 +2,14 @@
 //!
 //! This module provides a complete Sparse Merkle Tree (SMT) implementation optimized
 //! for Bitcoin indexing workloads. It combines traditional SMT operations with
-//! height-indexed Binary Search Trees (BST) for efficient historical state queries.
+//! an append-only database structure for efficient historical state queries.
 //!
 //! # Architecture Overview
 //!
 //! The implementation uses a hybrid approach:
 //! - **Sparse Merkle Tree**: Provides cryptographic state commitments and proofs
-//! - **Height-Indexed BST**: Enables efficient historical queries at any block height
+//! - **Append-Only Storage**: Enables efficient historical queries with human-readable keys
+//! - **Binary Search**: Optimizes historical lookups through flat update lists
 //! - **Batch Operations**: Optimizes performance for block processing workloads
 //!
 //! # Key Features
@@ -19,8 +20,9 @@
 //! - **Cryptographic security**: SHA-256 based hashing for integrity
 //!
 //! ## Historical Queries
-//! - **Height indexing**: Query state at any historical block height
-//! - **Efficient lookups**: Binary search optimization for height ranges
+//! - **Append-only storage**: All updates are preserved in chronological order
+//! - **Binary search**: Efficient lookups through flat update lists
+//! - **Human-readable keys**: Database keys are human-readable strings
 //! - **Rollback support**: Revert state to previous heights
 //!
 //! ## Performance Optimization
@@ -30,12 +32,12 @@
 //!
 //! # Database Schema
 //!
-//! The implementation uses several key prefixes for data organization:
+//! The new append-only implementation uses human-readable keys:
 //!
+//! - `key/length`: Number of updates for a key
+//! - `key/0`, `key/1`, `key/2`, etc.: Individual updates in format "height:value"
 //! - `smt:node:`: SMT internal and leaf nodes
 //! - `smt:root:`: State roots at specific heights
-//! - `bst:height:`: Height-indexed key-value pairs
-//! - `keys:height:`: Keys modified at specific heights
 //!
 //! # Usage Patterns
 //!
@@ -44,7 +46,7 @@
 //! let mut smt_helper = SMTHelper::new(storage);
 //!
 //! // Store key-value pairs with height indexing
-//! smt_helper.bst_put(key, value, height)?;
+//! smt_helper.put(key, value, height)?;
 //!
 //! // Calculate and store state root
 //! let state_root = smt_helper.calculate_and_store_state_root(height)?;
@@ -53,7 +55,7 @@
 //! ## Historical Queries
 //! ```rust
 //! // Query value at specific height
-//! let value = smt_helper.bst_get_at_height(key, height)?;
+//! let value = smt_helper.get_at_height(key, height)?;
 //!
 //! // Get state root at height
 //! let root = smt_helper.get_smt_root_at_height(height)?;
@@ -68,10 +70,11 @@
 //! )?;
 //! ```
 
+use crate::key_utils::{make_smt_node_key, PREFIXES};
 use crate::traits::{BatchLike, KeyValueStoreLike};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 /// Database key prefix for SMT internal and leaf nodes
 ///
@@ -82,31 +85,6 @@ pub const SMT_NODE_PREFIX: &str = "smt:node:";
 ///
 /// Format: `smt:root:{height}` where height is the block height
 pub const SMT_ROOT_PREFIX: &str = "smt:root:";
-
-/// Database key prefix for SMT leaf nodes (legacy, use SMT_NODE_PREFIX)
-///
-/// Format: `smt:leaf:{key_hash}` where key_hash is hex-encoded
-pub const SMT_LEAF_PREFIX: &str = "smt:leaf:";
-
-/// Database key prefix for height-indexed values (legacy SMT approach)
-///
-/// Format: `smt:height:{key}:{height}` where key is hex-encoded
-pub const HEIGHT_INDEX_PREFIX: &str = "smt:height:";
-
-/// Database key prefix for BST operations (legacy, use BST_HEIGHT_PREFIX)
-///
-/// Format: `bst:{key}` where key is hex-encoded
-pub const BST_PREFIX: &str = "bst:";
-
-/// Database key prefix for height-indexed BST key-value pairs
-///
-/// Format: `bst:height:{key}:{height}` where key is hex-encoded
-pub const BST_HEIGHT_PREFIX: &str = "bst:height:";
-
-/// Database key prefix for tracking keys modified at specific heights
-///
-/// Format: `keys:height:{height}:{key}` where key is hex-encoded
-pub const KEYS_AT_HEIGHT_PREFIX: &str = "keys:height:";
 
 /// Empty node hash representing uninitialized or empty SMT nodes
 ///
@@ -185,9 +163,9 @@ pub enum SMTNode {
 /// - **Tree traversal**: Navigate the tree structure for queries and updates
 /// - **State roots**: Calculate cryptographic commitments to state
 ///
-/// ## BST Operations
+/// ## Append-Only Operations
 /// - **Height indexing**: Store and query values at specific block heights
-/// - **Historical queries**: Retrieve state at any historical height
+/// - **Historical queries**: Retrieve state at any historical height using binary search
 /// - **Rollback support**: Revert state changes to previous heights
 ///
 /// ## Batch Processing
@@ -202,7 +180,7 @@ pub enum SMTNode {
 /// let mut smt = SMTHelper::new(storage);
 ///
 /// // Store a key-value pair at specific height
-/// smt.bst_put(b"key", b"value", height)?;
+/// smt.put(b"key", b"value", height)?;
 ///
 /// // Calculate state root for the height
 /// let root = smt.calculate_and_store_state_root(height)?;
@@ -211,10 +189,10 @@ pub enum SMTNode {
 /// ## Historical Queries
 /// ```rust
 /// // Get value at specific height
-/// let value = smt.bst_get_at_height(b"key", height)?;
+/// let value = smt.get_at_height(b"key", height)?;
 ///
 /// // Get all heights where key was modified
-/// let heights = smt.bst_get_heights_for_key(b"key")?;
+/// let heights = smt.get_heights_for_key(b"key")?;
 /// ```
 ///
 /// ## State Management
@@ -223,7 +201,7 @@ pub enum SMTNode {
 /// let current_root = smt.get_current_state_root()?;
 ///
 /// // Rollback to previous height
-/// smt.bst_rollback_to_height(target_height)?;
+/// smt.rollback_to_height(target_height)?;
 /// ```
 pub struct SMTHelper<T: KeyValueStoreLike> {
     /// Storage backend for persisting SMT nodes and data
@@ -328,8 +306,8 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         hash
     }
 
-    /// Get node from cache or storage
-    fn get_node_cached(&mut self, node_hash: &[u8; 32]) -> Result<Option<SMTNode>> {
+    /// Get node from cache or storage, with height awareness
+    fn get_node_cached(&mut self, node_hash: &[u8; 32], _height: u32) -> Result<Option<SMTNode>> {
         if node_hash == &EMPTY_NODE_HASH {
             return Ok(None);
         }
@@ -340,7 +318,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         }
 
         // Load from storage and cache
-        let node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(node_hash)).into_bytes();
+        let node_key = make_smt_node_key(PREFIXES.smt_node, node_hash);
         match self.storage.get_immutable(&node_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(node_data) => {
@@ -352,11 +330,11 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         }
     }
 
-    /// Optimized batch calculation of state root for multiple keys
+    /// Optimized batch calculation of state root for multiple keys with minimal storage
     pub fn calculate_and_store_state_root_batched(
         &mut self,
         height: u32,
-        updated_keys: &[Vec<u8>],
+        key_values: &[(Vec<u8>, Vec<u8>)],
     ) -> Result<[u8; 32]> {
         // Clear caches at start of block processing
         self.clear_caches();
@@ -370,9 +348,11 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             EMPTY_NODE_HASH
         };
 
-        if updated_keys.is_empty() {
+        if key_values.is_empty() {
+            let mut batch = self.storage.create_batch();
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-            self.storage.put(&root_key, &prev_root)
+            batch.put(root_key, prev_root.to_vec());
+            self.storage.write(batch)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
         }
@@ -380,28 +360,37 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         // Create a batch for all operations
         let mut batch = self.storage.create_batch();
         
-        // Pre-compute all key hashes
-        let key_hashes: Vec<_> = updated_keys.iter()
-            .map(|key| (key.clone(), self.get_key_hash(key)))
-            .collect();
+        // MINIMAL STORAGE: Only store ONE update per key/value change with height annotation
+        for (key, value) in key_values {
+            // Convert key to human-readable string
+            let key_str = String::from_utf8_lossy(key);
+            
+            // 1. Get current length of updates for this key
+            let length_key = format!("{}/length", key_str);
+            let current_length = match self.storage.get_immutable(length_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                Some(length_bytes) => {
+                    String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+                }
+                None => 0,
+            };
 
-        // Get all values in batch
-        let mut key_values = Vec::new();
-        for (key, _) in &key_hashes {
-            if let Some(value) = self.bst_get_at_height_fast(key, height)? {
-                key_values.push((key.clone(), value));
-            }
+            // 2. Store ONLY the new value with the next index (minimal append-only)
+            let update_key = format!("{}/{}", key_str, current_length);
+            // Use hex encoding for binary data to avoid UTF-8 issues
+            let value_hex = hex::encode(value);
+            let update_value = format!("{}:{}", height, value_hex);
+            batch.put(update_key.as_bytes(), update_value.as_bytes());
+
+            // 3. Update the length
+            let new_length = current_length + 1;
+            batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
         }
+        
+        // MINIMAL SMT: Only compute and store the final root, not intermediate nodes
+        let new_root = self.compute_minimal_smt_root(prev_root, key_values)?;
 
-        // Process all updates in a single pass
-        let new_root = self.compute_batched_smt_root(
-            prev_root,
-            &key_values,
-            height,
-            &mut batch,
-        )?;
-
-        // Store the new root in batch
+        // Store ONLY the new root (not intermediate SMT nodes)
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         batch.put(root_key, new_root.to_vec());
 
@@ -415,47 +404,62 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         Ok(new_root)
     }
 
-    /// Fast BST lookup using optimized BST approach
-    fn bst_get_at_height_fast(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        // CRITICAL OPTIMIZATION: First check if this key has ANY current value
-        // If there's no current value, there's no point in searching historical data
-        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
-        if let None = self
-            .storage
-            .get_immutable(&current_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
+    /// Fast lookup using the new append-only approach with binary search
+    pub fn get_at_height_fast(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
+        let key_str = String::from_utf8_lossy(key);
+        
+        // 1. Get the length of updates for this key
+        let length_key = format!("{}/length", key_str);
+        let length = match self.storage.get_immutable(length_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(length_bytes) => {
+                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            }
+            None => return Ok(None), // Key doesn't exist
+        };
+
+        if length == 0 {
             return Ok(None);
         }
 
-        // First try direct lookup at the exact height
-        let exact_key =
-            format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-        if let Some(value) = self
-            .storage
-            .get_immutable(&exact_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
-            return Ok(Some(value));
-        }
-
-        // If not found at exact height, use prefix scan to find the most recent value
-        // at or before the requested height
-        let prefix = format!("{}{}:", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key));
-        let mut best_height: Option<u32> = None;
+        // 2. Binary search through the updates to find the most recent one at or before the target height
+        let mut left = 0;
+        let mut right = length;
         let mut best_value: Option<Vec<u8>> = None;
 
-        for (stored_key, stored_value) in self.storage.scan_prefix(prefix.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            let key_str = String::from_utf8_lossy(&stored_key);
-            if let Some(height_str) = key_str.strip_prefix(&prefix) {
-                if let Ok(stored_height) = height_str.parse::<u32>() {
-                    if stored_height <= height {
-                        if best_height.is_none() || stored_height > best_height.unwrap() {
-                            best_height = Some(stored_height);
-                            best_value = Some(stored_value);
+        while left < right {
+            let mid = (left + right) / 2;
+            let update_key = format!("{}/{}", key_str, mid);
+            
+            match self.storage.get_immutable(update_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                Some(update_data) => {
+                    let update_str = String::from_utf8_lossy(&update_data);
+                    if let Some(colon_pos) = update_str.find(':') {
+                        let height_str = &update_str[..colon_pos];
+                        if let Ok(update_height) = height_str.parse::<u32>() {
+                            if update_height <= height {
+                                // This update is valid, save it and search for a more recent one
+                                let value_hex = &update_str[colon_pos + 1..];
+                                if let Ok(value_bytes) = hex::decode(value_hex) {
+                                    best_value = Some(value_bytes);
+                                } else {
+                                    return Err(anyhow!("Invalid hex encoding in stored value"));
+                                }
+                                left = mid + 1;
+                            } else {
+                                // This update is too recent, search earlier
+                                right = mid;
+                            }
+                        } else {
+                            return Err(anyhow!("Invalid height format in update"));
                         }
+                    } else {
+                        return Err(anyhow!("Invalid update format"));
                     }
+                }
+                None => {
+                    return Err(anyhow!("Missing update at index {}", mid));
                 }
             }
         }
@@ -463,8 +467,199 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         Ok(best_value)
     }
 
+    /// Compute minimal SMT root without storing intermediate nodes
+    pub fn compute_minimal_smt_root(
+        &mut self,
+        current_root: [u8; 32],
+        key_values: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<[u8; 32]> {
+        let mut working_root = current_root;
+
+        // Process all keys to compute final root hash without storing intermediate nodes
+        for (key, value) in key_values {
+            working_root = self.compute_root_hash_only(working_root, key, value)?;
+        }
+
+        Ok(working_root)
+    }
+
+    /// Compute only the root hash for a key-value update without storing nodes
+    fn compute_root_hash_only(
+        &mut self,
+        current_root: [u8; 32],
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<[u8; 32]> {
+        let key_hash = self.get_key_hash(key);
+        let value_hash = SMTHelper::<T>::hash_value(value);
+
+        // Create the new leaf node (in memory only)
+        let new_leaf = SMTNode::Leaf {
+            key: key.to_vec(),
+            value_index: value_hash,
+        };
+        let new_leaf_hash = SMTHelper::<T>::hash_node(&new_leaf);
+
+        // If tree is empty, new leaf becomes root
+        if current_root == EMPTY_NODE_HASH {
+            return Ok(new_leaf_hash);
+        }
+
+        // Compute the new root hash without storing intermediate nodes
+        self.compute_path_root_only(current_root, key_hash, new_leaf_hash)
+    }
+
+    /// Compute new root hash by traversing path without storing intermediate nodes
+    fn compute_path_root_only(
+        &mut self,
+        current_root: [u8; 32],
+        key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+    ) -> Result<[u8; 32]> {
+        let mut current_hash = current_root;
+        let mut depth = 0;
+        let mut path_nodes = Vec::new();
+
+        // Traverse down to find insertion point (read-only)
+        loop {
+            let node = match self.get_node_cached(&current_hash, 0)? {
+                Some(n) => n,
+                None => break,
+            };
+
+            match node {
+                SMTNode::Leaf { key: ref existing_key, .. } => {
+                    let existing_key_hash = self.get_key_hash(existing_key);
+                    
+                    if existing_key_hash == key_hash {
+                        path_nodes.push((depth, node, true)); // replacement
+                        break;
+                    } else {
+                        path_nodes.push((depth, node, false)); // split needed
+                        break;
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    path_nodes.push((depth, node, false));
+                    
+                    let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+                    current_hash = if bit == 0 { left_child } else { right_child };
+                    depth += 1;
+
+                    if depth >= 256 {
+                        return Err(anyhow!("Maximum SMT depth exceeded"));
+                    }
+                }
+            }
+        }
+
+        // Compute new root hash from bottom up (in memory only)
+        let mut new_child_hash = new_leaf_hash;
+
+        for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
+            match node {
+                SMTNode::Leaf { key: existing_key, value_index } => {
+                    if is_replacement {
+                        // Simple replacement
+                        new_child_hash = new_child_hash;
+                    } else {
+                        // Need to create separating internals (compute hash only)
+                        let existing_key_hash = self.get_key_hash(&existing_key);
+                        let existing_leaf_hash = SMTHelper::<T>::hash_node(&SMTNode::Leaf {
+                            key: existing_key,
+                            value_index,
+                        });
+
+                        new_child_hash = self.compute_separating_internals_hash_only(
+                            node_depth,
+                            existing_key_hash,
+                            existing_leaf_hash,
+                            key_hash,
+                            new_child_hash,
+                        )?;
+                    }
+                }
+                SMTNode::Internal { left_child, right_child } => {
+                    // Create new internal node hash
+                    let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
+                    let new_internal = if bit == 0 {
+                        SMTNode::Internal {
+                            left_child: new_child_hash,
+                            right_child,
+                        }
+                    } else {
+                        SMTNode::Internal {
+                            left_child,
+                            right_child: new_child_hash,
+                        }
+                    };
+
+                    new_child_hash = SMTHelper::<T>::hash_node(&new_internal);
+                }
+            }
+        }
+
+        Ok(new_child_hash)
+    }
+
+    /// Compute separating internal node hashes without storing them
+    fn compute_separating_internals_hash_only(
+        &mut self,
+        start_depth: usize,
+        existing_key_hash: [u8; 32],
+        existing_leaf_hash: [u8; 32],
+        new_key_hash: [u8; 32],
+        new_leaf_hash: [u8; 32],
+    ) -> Result<[u8; 32]> {
+        let mut depth = start_depth;
+
+        // Find divergence point
+        while depth < 256 {
+            let existing_bit = (existing_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+            let new_bit = (new_key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
+
+            if existing_bit != new_bit {
+                // Create internal node at divergence (hash only)
+                let (left_hash, right_hash) = if existing_bit == 0 {
+                    (existing_leaf_hash, new_leaf_hash)
+                } else {
+                    (new_leaf_hash, existing_leaf_hash)
+                };
+
+                let internal = SMTNode::Internal {
+                    left_child: left_hash,
+                    right_child: right_hash,
+                };
+                let mut current_hash = SMTHelper::<T>::hash_node(&internal);
+
+                // Create parent internals if needed (hash only)
+                for d in (start_depth..depth).rev() {
+                    let bit = (new_key_hash[d / 8] >> (7 - (d % 8))) & 1;
+                    let parent_internal = if bit == 0 {
+                        SMTNode::Internal {
+                            left_child: current_hash,
+                            right_child: EMPTY_NODE_HASH,
+                        }
+                    } else {
+                        SMTNode::Internal {
+                            left_child: EMPTY_NODE_HASH,
+                            right_child: current_hash,
+                        }
+                    };
+
+                    current_hash = SMTHelper::<T>::hash_node(&parent_internal);
+                }
+
+                return Ok(current_hash);
+            }
+            depth += 1;
+        }
+
+        Err(anyhow!("Keys are identical - cannot separate"))
+    }
+
     /// Compute SMT root for multiple keys in batch
-    fn compute_batched_smt_root(
+    pub fn compute_batched_smt_root(
         &mut self,
         current_root: [u8; 32],
         key_values: &[(Vec<u8>, Vec<u8>)],
@@ -493,7 +688,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         current_root: [u8; 32],
         key: &[u8],
         value: &[u8],
-        height: u32,
+        _height: u32,
         batch: &mut T::Batch,
     ) -> Result<[u8; 32]> {
         let key_hash = self.get_key_hash(key);
@@ -507,11 +702,11 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         let new_leaf_hash = SMTHelper::<T>::hash_node(&new_leaf);
 
         // Add to batch instead of immediate storage
-        let leaf_node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_leaf_hash)).into_bytes();
+        let leaf_node_key = make_smt_node_key(PREFIXES.smt_node, &new_leaf_hash);
         batch.put(leaf_node_key, SMTHelper::<T>::serialize_node(&new_leaf));
 
-        let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
-        batch.put(value_key, value.to_vec());
+        // SMT should NOT store values - values are stored in BST system
+        // The SMT only computes and stores tree structure and roots
 
         // Cache the new leaf node
         self.node_cache.insert(new_leaf_hash, new_leaf);
@@ -550,7 +745,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         // Traverse down using cached nodes
         loop {
-            let node = match self.get_node_cached(&current_hash)? {
+            let node = match self.get_node_cached(&current_hash, 0)? {
                 Some(n) => n,
                 None => break,
             };
@@ -608,7 +803,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                     }
                 }
                 SMTNode::Internal { left_child, right_child } => {
-                    let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
+                    let bit = (key_hash[node_depth / 8] >> (7 - (depth % 8))) & 1;
                     let new_internal = if bit == 0 {
                         SMTNode::Internal {
                             left_child: new_child_hash,
@@ -622,7 +817,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                     };
 
                     let new_internal_hash = SMTHelper::<T>::hash_node(&new_internal);
-                    let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_internal_hash)).into_bytes();
+                    let internal_key = make_smt_node_key(PREFIXES.smt_node, &new_internal_hash);
                     batch.put(internal_key, SMTHelper::<T>::serialize_node(&new_internal));
 
                     // Cache the new internal node
@@ -679,7 +874,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             right_child: right_hash,
         };
         let internal_hash = SMTHelper::<T>::hash_node(&internal);
-        let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(internal_hash)).into_bytes();
+        let internal_key = make_smt_node_key(PREFIXES.smt_node, &internal_hash);
         batch.put(internal_key, SMTHelper::<T>::serialize_node(&internal));
 
         // Cache the internal node
@@ -702,7 +897,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             };
 
             let parent_hash = SMTHelper::<T>::hash_node(&parent_internal);
-            let parent_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(parent_hash)).into_bytes();
+            let parent_key = make_smt_node_key(PREFIXES.smt_node, &parent_hash);
             batch.put(parent_key, SMTHelper::<T>::serialize_node(&parent_internal));
 
             // Cache the parent node
@@ -715,7 +910,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
     }
 
     /// Delegate to SMTHelper for compatibility
-    fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
+    pub fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
         // Use the storage directly instead of cloning
         let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, height).into_bytes();
         if let Some(root_data) = self.storage
@@ -1025,7 +1220,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             return Ok(None);
         }
 
-        let node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(node_hash)).into_bytes();
+        let node_key = make_smt_node_key(PREFIXES.smt_node, node_hash);
         match self
             .storage
             .get_immutable(&node_key)
@@ -1037,7 +1232,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Get a leaf node from the SMT
-    pub fn get_smt_leaf(&self, root: [u8; 32], key_hash: [u8; 32]) -> Result<Option<SMTNode>> {
+    pub fn get_smt_leaf(&self, root: [u8; 32], key_hash: [u8; 32], _height: u32) -> Result<Option<SMTNode>> {
         if root == EMPTY_NODE_HASH {
             return Ok(None);
         }
@@ -1089,6 +1284,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         &self,
         root: [u8; 32],
         key_hash: [u8; 32],
+        _height: u32,
     ) -> Result<Vec<(bool, SMTNode)>> {
         if root == EMPTY_NODE_HASH {
             return Ok(Vec::new());
@@ -1147,14 +1343,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let mut updates = Vec::new();
         let key_hash = Self::hash_key(key);
 
-        // 1. Store the value with height annotation
-        let value_key =
-            format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
+        // SMT should NOT store values - values are stored in BST system
+        // The SMT only computes and stores tree structure and roots
         let value_hash = Self::hash_value(value);
-        updates.push((value_key, value.to_vec()));
 
         // 2. Create or update the leaf node
-        let leaf_key = format!("{}:{}", SMT_LEAF_PREFIX, hex::encode(key_hash)).into_bytes();
+        let leaf_key = make_smt_node_key(PREFIXES.smt_node, &key_hash);
         let leaf_node = SMTNode::Leaf {
             key: key.to_vec(),
             value_index: value_hash,
@@ -1163,12 +1357,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         updates.push((leaf_key, leaf_node_serialized));
 
         // 3. Collect existing nodes along the path
-        let path_nodes = self.collect_path_nodes(current_root, key_hash)?;
+        let path_nodes = self.collect_path_nodes(current_root, key_hash, height)?;
 
         // If the tree is empty, create a new root pointing to the leaf
         if path_nodes.is_empty() {
             let leaf_hash = Self::hash_node(&leaf_node);
-            let node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(leaf_hash)).into_bytes();
+            let node_key = make_smt_node_key(PREFIXES.smt_node, &leaf_hash);
             updates.push((node_key, Self::serialize_node(&leaf_node)));
 
             // The new root is the leaf hash
@@ -1183,7 +1377,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let leaf_hash = Self::hash_node(&leaf_node);
 
         // Store the leaf node
-        let node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(leaf_hash)).into_bytes();
+        let node_key = make_smt_node_key(PREFIXES.smt_node, &leaf_hash);
         updates.push((node_key, Self::serialize_node(&leaf_node)));
         new_nodes.push((256, leaf_hash)); // Depth 256 (maximum) for leaf
 
@@ -1222,8 +1416,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                     };
 
                     let new_hash = Self::hash_node(&new_node);
-                    let node_key =
-                        format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_hash)).into_bytes();
+                    let node_key = make_smt_node_key(PREFIXES.smt_node, &new_hash);
                     updates.push((node_key, Self::serialize_node(&new_node)));
 
                     new_nodes.push((depth, new_hash));
@@ -1270,127 +1463,121 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Get a value at a specific height
+    /// SMT should use BST for value lookups, not store values itself
     pub fn get_value_at_height(
         &self,
         key: &[u8],
-        value_hash: [u8; 32],
+        _value_hash: [u8; 32],
         height: u32,
     ) -> Result<Option<Vec<u8>>> {
-        // Try to get the value at the exact height first
-        let exact_key =
-            format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
-        if let Some(value) = self
-            .storage
-            .get_immutable(&exact_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
-            return Ok(Some(value));
-        }
-
-        // If not found, find the closest height less than the requested height
-        let mut target_height = height;
-        while target_height > 0 {
-            target_height -= 1;
-            let value_key = format!(
-                "{}:{}:{}",
-                HEIGHT_INDEX_PREFIX,
-                hex::encode(key),
-                target_height
-            )
-            .into_bytes();
-            if let Some(value) = self
-                .storage
-                .get_immutable(&value_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-            {
-                return Ok(Some(value));
-            }
-        }
-
-        // If still not found, try to get by value hash
-        let value_key = format!("{}:{}", "value:", hex::encode(value_hash)).into_bytes();
-        match self
-            .storage
-            .get_immutable(&value_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
-            Some(value) => Ok(Some(value)),
-            None => Ok(None),
-        }
+        // SMT should delegate to the new append-only approach for value lookups
+        self.get_at_height(key, height)
     }
 
-    /// Store a key-value pair in the BST with height indexing
-    pub fn bst_put(&mut self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
-        // Create a batch for all operations
+    /// Store a key-value pair using the new append-only approach with human-readable keys
+    ///
+    /// This implements the new database structure:
+    /// - key/length: stores the number of updates for this key
+    /// - key/0, key/1, key/2, etc.: stores individual updates
+    /// - Uses binary search for historical access
+    pub fn put(&mut self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
         let mut batch = self.storage.create_batch();
-
-        // 1. Store the current value for O(1) access
-        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
-        batch.put(&current_key, value);
-
-        // 2. Store the historical value for historical queries
-        let historical_key =
-            format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-        batch.put(&historical_key, value);
-
-        // 3. Track that this key was updated at this height
-        let height_index_key =
-            format!("{}{}:{}", crate::optimized_bst::HEIGHT_INDEX_PREFIX, height, hex::encode(key)).into_bytes();
-        batch.put(&height_index_key, b"");
-
-        // 4. Track keys updated at this height for reorg handling
-        let keys_at_height_key =
-            format!("{}{}:{}", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
-        batch.put(&keys_at_height_key, b"");
-
-        // Write the batch atomically
+        self.put_to_batch(&mut batch, key, value, height)?;
         self.storage.write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+        Ok(())
+    }
+
+    /// Store a key-value pair using an existing batch
+    pub fn put_batched(&mut self, batch: &mut T::Batch, key: &[u8], value: &[u8], height: u32) -> Result<()> {
+        self.put_to_batch(batch, key, value, height)
+    }
+
+    /// Internal method to add put operations to a batch using the new append-only approach
+    pub fn put_to_batch(&self, batch: &mut T::Batch, key: &[u8], value: &[u8], height: u32) -> Result<()> {
+        // Convert key to human-readable string
+        let key_str = String::from_utf8_lossy(key);
+        
+        // 1. Get current length of updates for this key
+        let length_key = format!("{}/length", key_str);
+        let current_length = match self.storage.get_immutable(length_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(length_bytes) => {
+                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            }
+            None => 0,
+        };
+
+        // 2. Store the new value with the next index
+        let update_key = format!("{}/{}", key_str, current_length);
+        // Use hex encoding for binary data to avoid UTF-8 issues
+        let value_hex = hex::encode(value);
+        let update_value = format!("{}:{}", height, value_hex);
+        batch.put(update_key.as_bytes(), update_value.as_bytes());
+
+        // 3. Update the length
+        let new_length = current_length + 1;
+        batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
 
         Ok(())
     }
 
-    /// Get the value of a key at a specific height using optimized BST
-    pub fn bst_get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        // CRITICAL OPTIMIZATION: First check if this key has ANY current value
-        // If there's no current value, there's no point in searching historical data
-        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
-        if let None = self
-            .storage
-            .get_immutable(&current_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
+    /// Get the value of a key at a specific height using binary search through the flat list
+    pub fn get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
+        let key_str = String::from_utf8_lossy(key);
+        
+        // 1. Get the length of updates for this key
+        let length_key = format!("{}/length", key_str);
+        let length = match self.storage.get_immutable(length_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(length_bytes) => {
+                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            }
+            None => return Ok(None), // Key doesn't exist
+        };
+
+        if length == 0 {
             return Ok(None);
         }
 
-        // First try direct lookup at the exact height
-        let exact_key =
-            format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-        if let Some(value) = self
-            .storage
-            .get_immutable(&exact_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
-            return Ok(Some(value));
-        }
-
-        // If not found at exact height, use prefix scan to find the most recent value
-        // at or before the requested height
-        let prefix = format!("{}{}:", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key));
-        let mut best_height: Option<u32> = None;
+        // 2. Binary search through the updates to find the most recent one at or before the target height
+        let mut left = 0;
+        let mut right = length;
         let mut best_value: Option<Vec<u8>> = None;
 
-        for (stored_key, stored_value) in self.storage.scan_prefix(prefix.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            let key_str = String::from_utf8_lossy(&stored_key);
-            if let Some(height_str) = key_str.strip_prefix(&prefix) {
-                if let Ok(stored_height) = height_str.parse::<u32>() {
-                    if stored_height <= height {
-                        if best_height.is_none() || stored_height > best_height.unwrap() {
-                            best_height = Some(stored_height);
-                            best_value = Some(stored_value);
+        while left < right {
+            let mid = (left + right) / 2;
+            let update_key = format!("{}/{}", key_str, mid);
+            
+            match self.storage.get_immutable(update_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                Some(update_data) => {
+                    let update_str = String::from_utf8_lossy(&update_data);
+                    if let Some(colon_pos) = update_str.find(':') {
+                        let height_str = &update_str[..colon_pos];
+                        if let Ok(update_height) = height_str.parse::<u32>() {
+                            if update_height <= height {
+                                // This update is valid, save it and search for a more recent one
+                                let value_hex = &update_str[colon_pos + 1..];
+                                if let Ok(value_bytes) = hex::decode(value_hex) {
+                                    best_value = Some(value_bytes);
+                                    left = mid + 1;
+                                } else {
+                                    return Err(anyhow!("Invalid hex encoding in stored value"));
+                                }
+                            } else {
+                                // This update is too recent, search earlier
+                                right = mid;
+                            }
+                        } else {
+                            return Err(anyhow!("Invalid height format in update"));
                         }
+                    } else {
+                        return Err(anyhow!("Invalid update format"));
                     }
+                }
+                None => {
+                    return Err(anyhow!("Missing update at index {}", mid));
                 }
             }
         }
@@ -1399,31 +1586,71 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Get the current (most recent) value of a key across all heights
-    pub fn bst_get_current(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        // Use the optimized BST current value lookup for O(1) access
-        let current_key = format!("{}{}", crate::optimized_bst::CURRENT_VALUE_PREFIX, hex::encode(key)).into_bytes();
+    pub fn get_current(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        let key_str = String::from_utf8_lossy(key);
+        
+        // Get the length of updates for this key
+        let length_key = format!("{}/length", key_str);
+        let length = match self.storage.get_immutable(length_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(length_bytes) => {
+                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            }
+            None => return Ok(None), // Key doesn't exist
+        };
 
-        match self
-            .storage
-            .get_immutable(&current_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-        {
-            Some(value) => Ok(Some(value)),
+        if length == 0 {
+            return Ok(None);
+        }
+
+        // Get the most recent update (length - 1)
+        let update_key = format!("{}/{}", key_str, length - 1);
+        match self.storage.get_immutable(update_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(update_data) => {
+                let update_str = String::from_utf8_lossy(&update_data);
+                if let Some(colon_pos) = update_str.find(':') {
+                    let value_hex = &update_str[colon_pos + 1..];
+                    if let Ok(value_bytes) = hex::decode(value_hex) {
+                        Ok(Some(value_bytes))
+                    } else {
+                        Err(anyhow!("Invalid hex encoding in stored value"))
+                    }
+                } else {
+                    Err(anyhow!("Invalid update format"))
+                }
+            }
             None => Ok(None),
         }
     }
 
     /// Get all heights at which a key was updated
-    pub fn bst_get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
-        let mut heights = Vec::new();
-        let prefix = format!("{}{}:", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key));
+    pub fn get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
+        let key_str = String::from_utf8_lossy(key);
+        
+        // Get the length of updates for this key
+        let length_key = format!("{}/length", key_str);
+        let length = match self.storage.get_immutable(length_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(length_bytes) => {
+                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            }
+            None => return Ok(Vec::new()), // Key doesn't exist
+        };
 
-        // Get all keys with this prefix and extract heights
-        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
-            let key_str = String::from_utf8_lossy(&key);
-            if let Some(height_str) = key_str.strip_prefix(&prefix) {
-                if let Ok(height) = height_str.parse::<u32>() {
-                    heights.push(height);
+        let mut heights = Vec::new();
+        
+        // Iterate through all updates and extract heights
+        for i in 0..length {
+            let update_key = format!("{}/{}", key_str, i);
+            if let Some(update_data) = self.storage.get_immutable(update_key.as_bytes())
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                let update_str = String::from_utf8_lossy(&update_data);
+                if let Some(colon_pos) = update_str.find(':') {
+                    let height_str = &update_str[..colon_pos];
+                    if let Ok(height) = height_str.parse::<u32>() {
+                        heights.push(height);
+                    }
                 }
             }
         }
@@ -1432,26 +1659,23 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(heights)
     }
 
-    /// Track that a key was updated at a specific height
-    pub fn track_key_at_height(&mut self, key: &[u8], height: u32) -> Result<()> {
-        let keys_key =
-            format!("{}{}:{}", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key)).into_bytes();
-        self.storage
-            .put(&keys_key, b"")
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?; // Empty value, we just need the key
-        Ok(())
-    }
-
-    /// Get all keys that were updated at a specific height
+    /// Get all keys that were updated at a specific height using the new append-only approach
     pub fn get_keys_at_height(&self, height: u32) -> Result<Vec<Vec<u8>>> {
         let mut keys = Vec::new();
-        let prefix = format!("{}{}:", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height);
-
-        // Get all keys with this prefix
-        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
-            let key_str = String::from_utf8_lossy(&key);
-            if let Some(hex_key) = key_str.strip_prefix(&prefix) {
-                if let Ok(original_key) = hex::decode(hex_key) {
+        let length_suffix = "/length";
+        
+        // Scan for all keys with "/length" suffix to find all keys in the database
+        for (stored_key, _) in self.storage.scan_prefix(b"")
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            let key_str = String::from_utf8_lossy(&stored_key);
+            if key_str.ends_with(length_suffix) {
+                // Extract the original key by removing the "/length" suffix
+                let original_key_str = &key_str[..key_str.len() - length_suffix.len()];
+                let original_key = original_key_str.as_bytes().to_vec();
+                
+                // Check if this key was updated at the specified height
+                let heights = self.get_heights_for_key(&original_key)?;
+                if heights.contains(&height) {
                     keys.push(original_key);
                 }
             }
@@ -1460,74 +1684,115 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(keys)
     }
 
-    /// Rollback a key to its state before a specific height
-    pub fn bst_rollback_key(&mut self, key: &[u8], target_height: u32) -> Result<()> {
-        let heights = self.bst_get_heights_for_key(key)?;
-
-        // Remove all entries at heights greater than target_height
-        for height in heights {
-            if height > target_height {
-                let height_key =
-                    format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-                self.storage
-                    .delete(&height_key)
-                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-
-                // Also remove from keys-at-height tracking
-                let keys_key = format!("{}{}:{}", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX, height, hex::encode(key))
-                    .into_bytes();
-                self.storage
-                    .delete(&keys_key)
-                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-            }
-        }
-
+    /// Rollback a key to its state before a specific height using the new append-only approach
+    ///
+    /// WARNING: This method creates and writes a batch immediately for each call.
+    /// For better performance during block processing, use rollback_key_batched() instead.
+    pub fn rollback_key(&mut self, key: &[u8], target_height: u32) -> Result<()> {
+        let mut batch = self.storage.create_batch();
+        self.rollback_key_to_batch(&mut batch, key, target_height)?;
+        self.storage.write(batch)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         Ok(())
     }
 
-    /// Rollback all keys to their state before a specific height
-    pub fn bst_rollback_to_height(&mut self, target_height: u32) -> Result<()> {
-        // Get all heights greater than target_height that have updates
-        let mut heights_to_rollback = Vec::new();
-        let prefix = format!("{}:", crate::optimized_bst::KEYS_AT_HEIGHT_PREFIX);
+    /// Rollback a key to its state before a specific height using an existing batch
+    pub fn rollback_key_batched(&mut self, batch: &mut T::Batch, key: &[u8], target_height: u32) -> Result<()> {
+        self.rollback_key_to_batch(batch, key, target_height)
+    }
 
-        // Get all keys with this prefix and extract heights
-        for (key, _) in self.storage.scan_prefix(prefix.as_bytes())? {
-            let key_str = String::from_utf8_lossy(&key);
-            if let Some(rest) = key_str.strip_prefix(&prefix) {
-                if let Some(colon_pos) = rest.find(':') {
-                    let height_str = &rest[..colon_pos];
-                    if let Ok(height) = height_str.parse::<u32>() {
-                        if height > target_height {
-                            heights_to_rollback.push(height);
+    /// Internal method to add rollback operations to a batch using the new append-only approach
+    fn rollback_key_to_batch(&self, batch: &mut T::Batch, key: &[u8], target_height: u32) -> Result<()> {
+        let _heights = self.get_heights_for_key(key)?;
+
+        // For the new append-only approach, we need to remove updates after target_height
+        let key_str = String::from_utf8_lossy(key);
+        let length_key = format!("{}/length", key_str);
+        
+        if let Some(length_bytes) = self.storage.get_immutable(length_key.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            let length = String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0);
+            
+            let mut new_length = 0;
+            // Find the last valid update at or before target_height
+            for i in 0..length {
+                let update_key = format!("{}/{}", key_str, i);
+                if let Some(update_data) = self.storage.get_immutable(update_key.as_bytes())
+                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                    let update_str = String::from_utf8_lossy(&update_data);
+                    if let Some(colon_pos) = update_str.find(':') {
+                        let height_str = &update_str[..colon_pos];
+                        if let Ok(update_height) = height_str.parse::<u32>() {
+                            if update_height <= target_height {
+                                new_length = i + 1;
+                            } else {
+                                // Delete this update
+                                batch.delete(update_key.as_bytes());
+                            }
                         }
                     }
                 }
             }
-        }
-
-        // Remove duplicates and sort
-        heights_to_rollback.sort();
-        heights_to_rollback.dedup();
-
-        // Rollback each height
-        for height in heights_to_rollback {
-            let keys = self.get_keys_at_height(height)?;
-            for key in keys {
-                self.bst_rollback_key(&key, target_height)?;
-            }
+            
+            // Update the length
+            batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
         }
 
         Ok(())
     }
 
-    /// Iterate backwards through all values of a key from most recent
-    pub fn bst_iterate_backwards(
+    /// Rollback all keys to their state before a specific height using the new append-only approach
+    ///
+    /// WARNING: This method creates and writes a batch immediately for each call.
+    /// For better performance during block processing, use rollback_to_height_batched() instead.
+    pub fn rollback_to_height(&mut self, target_height: u32) -> Result<()> {
+        let mut batch = self.storage.create_batch();
+        self.rollback_to_height_to_batch(&mut batch, target_height)?;
+        self.storage.write(batch)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+        Ok(())
+    }
+
+    /// Rollback all keys to their state before a specific height using an existing batch
+    pub fn rollback_to_height_batched(&mut self, batch: &mut T::Batch, target_height: u32) -> Result<()> {
+        self.rollback_to_height_to_batch(batch, target_height)
+    }
+
+    /// Internal method to add rollback operations to a batch using the new append-only approach
+    fn rollback_to_height_to_batch(&self, batch: &mut T::Batch, target_height: u32) -> Result<()> {
+        // For the new append-only approach, we need to scan all keys and rollback each one
+        // This is more complex since we don't have a height index anymore
+        // We'll need to scan all keys that have a "/length" suffix
+        
+        let length_suffix = "/length";
+        let mut keys_to_rollback = Vec::new();
+        
+        // Scan for all keys with "/length" suffix to find all keys in the database
+        for (stored_key, _) in self.storage.scan_prefix(b"")
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            let key_str = String::from_utf8_lossy(&stored_key);
+            if key_str.ends_with(length_suffix) {
+                // Extract the original key by removing the "/length" suffix
+                let original_key = &key_str[..key_str.len() - length_suffix.len()];
+                keys_to_rollback.push(original_key.as_bytes().to_vec());
+            }
+        }
+        
+        // Rollback each key
+        for key in keys_to_rollback {
+            self.rollback_key_to_batch(batch, &key, target_height)?;
+        }
+
+        Ok(())
+    }
+
+    /// Iterate backwards through all values of a key from most recent using the new append-only approach
+    pub fn iterate_backwards(
         &self,
         key: &[u8],
         from_height: u32,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
-        let heights = self.bst_get_heights_for_key(key)?;
+        let heights = self.get_heights_for_key(key)?;
         let mut results = Vec::new();
 
         // Filter heights to only include those <= from_height and sort in descending order
@@ -1536,13 +1801,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         filtered_heights.sort_by(|a, b| b.cmp(a)); // Descending order
 
         for height in filtered_heights {
-            let height_key =
-                format!("{}{}:{}", crate::optimized_bst::HISTORICAL_VALUE_PREFIX, hex::encode(key), height).into_bytes();
-            if let Some(value) = self
-                .storage
-                .get_immutable(&height_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
-            {
+            if let Some(value) = self.get_at_height(key, height)? {
                 results.push((height, value));
             }
         }
@@ -1551,6 +1810,9 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Calculate and store the SMT state root for a specific height using incremental updates
+    ///
+    /// WARNING: This method creates and writes a batch immediately for each call.
+    /// For better performance during block processing, use calculate_and_store_state_root_batched() instead.
     pub fn calculate_and_store_state_root(&mut self, height: u32) -> Result<[u8; 32]> {
         let prev_root = if height > 0 {
             // For heights > 0, get the previous state root
@@ -1568,9 +1830,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
         if updated_keys.is_empty() {
             // No updates at this height, return previous root
+            let mut batch = self.storage.create_batch();
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-            self.storage
-                .put(&root_key, &prev_root)
+            batch.put(root_key, prev_root.to_vec());
+            self.storage.write(batch)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
         }
@@ -1579,9 +1842,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let new_root = self.compute_incremental_smt_root(prev_root, &updated_keys, height)?;
 
         // Store the new root
+        let mut batch = self.storage.create_batch();
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-        self.storage
-            .put(&root_key, &new_root)
+        batch.put(root_key, new_root.to_vec());
+        self.storage.write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         Ok(new_root)
@@ -1603,8 +1867,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         };
 
         if updated_keys.is_empty() {
+            let mut batch = self.storage.create_batch();
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-            self.storage.put(&root_key, &prev_root)
+            batch.put(root_key, prev_root.to_vec());
+            self.storage.write(batch)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
         }
@@ -1615,7 +1881,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Get all values in batch
         let mut key_values = Vec::new();
         for key in updated_keys {
-            if let Some(value) = self.bst_get_at_height(key, height)? {
+            if let Some(value) = self.get_at_height(key, height)? {
                 key_values.push((key.clone(), value));
             }
         }
@@ -1669,7 +1935,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         current_root: [u8; 32],
         key: &[u8],
         value: &[u8],
-        height: u32,
+        _height: u32,
         batch: &mut T::Batch,
     ) -> Result<[u8; 32]> {
         let key_hash = Self::hash_key(key);
@@ -1683,11 +1949,11 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let new_leaf_hash = Self::hash_node(&new_leaf);
 
         // Add to batch instead of immediate storage
-        let leaf_node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_leaf_hash)).into_bytes();
+        let leaf_node_key = make_smt_node_key(PREFIXES.smt_node, &new_leaf_hash);
         batch.put(leaf_node_key, Self::serialize_node(&new_leaf));
 
-        let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
-        batch.put(value_key, value.to_vec());
+        // SMT should NOT store values - values are stored in BST system
+        // The SMT only computes and stores tree structure and roots
 
         if current_root == EMPTY_NODE_HASH {
             return Ok(new_leaf_hash);
@@ -1795,7 +2061,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                     };
 
                     let new_internal_hash = Self::hash_node(&new_internal);
-                    let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_internal_hash)).into_bytes();
+                    let internal_key = make_smt_node_key(PREFIXES.smt_node, &new_internal_hash);
                     batch.put(internal_key, Self::serialize_node(&new_internal));
 
                     updates.push((node_depth, new_internal_hash));
@@ -1849,7 +2115,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             right_child: right_hash,
         };
         let internal_hash = Self::hash_node(&internal);
-        let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(internal_hash)).into_bytes();
+        let internal_key = make_smt_node_key(PREFIXES.smt_node, &internal_hash);
         batch.put(internal_key, Self::serialize_node(&internal));
 
         // Create parent internals if needed
@@ -1869,7 +2135,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             };
 
             let parent_hash = Self::hash_node(&parent_internal);
-            let parent_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(parent_hash)).into_bytes();
+            let parent_key = make_smt_node_key(PREFIXES.smt_node, &parent_hash);
             batch.put(parent_key, Self::serialize_node(&parent_internal));
 
             current_hash = parent_hash;
@@ -1890,7 +2156,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Process each updated key individually
         for key in updated_keys {
             // Get the current value for this key at this height
-            let value = match self.bst_get_at_height(key, height)? {
+            let value = match self.get_at_height(key, height)? {
                 Some(v) => v,
                 None => continue, // Skip if no value found
             };
@@ -1908,7 +2174,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         current_root: [u8; 32],
         key: &[u8],
         value: &[u8],
-        height: u32,
+        _height: u32,
     ) -> Result<[u8; 32]> {
         let key_hash = Self::hash_key(key);
         let value_hash = Self::hash_value(value);
@@ -1920,17 +2186,17 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         };
         let new_leaf_hash = Self::hash_node(&new_leaf);
 
+        // NOTE: This method is deprecated and should not be used in production.
+        // Individual database writes are inefficient. Use update_smt_for_key_batched() instead.
+        // For now, we'll create a temporary batch to maintain atomicity.
+        let mut batch = self.storage.create_batch();
+        
         // Store the leaf node
-        let leaf_node_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_leaf_hash)).into_bytes();
-        self.storage
-            .put(&leaf_node_key, &Self::serialize_node(&new_leaf))
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+        let leaf_node_key = make_smt_node_key(PREFIXES.smt_node, &new_leaf_hash);
+        batch.put(leaf_node_key, Self::serialize_node(&new_leaf));
 
-        // Store the value with height annotation
-        let value_key = format!("{}:{}:{}", HEIGHT_INDEX_PREFIX, hex::encode(key), height).into_bytes();
-        self.storage
-            .put(&value_key, value)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+        // SMT should NOT store values - values are stored in BST system
+        // The SMT only computes and stores tree structure and roots
 
         // If the tree is empty, the new leaf becomes the root
         if current_root == EMPTY_NODE_HASH {
@@ -1938,7 +2204,11 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         // Find the path to insert/update this key
-        let path_updates = self.compute_path_updates(current_root, key_hash, new_leaf_hash)?;
+        let path_updates = self.compute_path_updates(current_root, key_hash, new_leaf_hash, 0, &mut batch)?;
+
+        // Write the batch at the end
+        self.storage.write(batch)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         // Apply the path updates and return the new root
         if let Some((_, new_root_hash)) = path_updates.last() {
@@ -1954,6 +2224,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         current_root: [u8; 32],
         key_hash: [u8; 32],
         new_leaf_hash: [u8; 32],
+        height: u32,
+        batch: &mut T::Batch,
     ) -> Result<Vec<(usize, [u8; 32])>> {
         let mut updates = Vec::new();
         let mut current_hash = current_root;
@@ -2022,6 +2294,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                             existing_leaf_hash,
                             key_hash,
                             new_child_hash,
+                            height,
+                            batch,
                         )?;
                         updates.push((node_depth, new_child_hash));
                     }
@@ -2042,10 +2316,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                     };
 
                     let new_internal_hash = Self::hash_node(&new_internal);
-                    let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(new_internal_hash)).into_bytes();
-                    self.storage
-                        .put(&internal_key, &Self::serialize_node(&new_internal))
-                        .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+                    let internal_key = make_smt_node_key(PREFIXES.smt_node, &new_internal_hash);
+                    batch.put(internal_key, Self::serialize_node(&new_internal));
 
                     updates.push((node_depth, new_internal_hash));
                     new_child_hash = new_internal_hash;
@@ -2064,6 +2336,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         existing_leaf_hash: [u8; 32],
         new_key_hash: [u8; 32],
         new_leaf_hash: [u8; 32],
+        _height: u32,
+        batch: &mut T::Batch,
     ) -> Result<[u8; 32]> {
         let mut depth = start_depth;
         let mut left_hash = EMPTY_NODE_HASH;
@@ -2098,10 +2372,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             right_child: right_hash,
         };
         let internal_hash = Self::hash_node(&internal);
-        let internal_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(internal_hash)).into_bytes();
-        self.storage
-            .put(&internal_key, &Self::serialize_node(&internal))
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+        let internal_key = make_smt_node_key(PREFIXES.smt_node, &internal_hash);
+        batch.put(internal_key, Self::serialize_node(&internal));
 
         // If we need more internal nodes above this point, create them
         let mut current_hash = internal_hash;
@@ -2120,10 +2392,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             };
 
             let parent_hash = Self::hash_node(&parent_internal);
-            let parent_key = format!("{}:{}", SMT_NODE_PREFIX, hex::encode(parent_hash)).into_bytes();
-            self.storage
-                .put(&parent_key, &Self::serialize_node(&parent_internal))
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+            let parent_key = make_smt_node_key(PREFIXES.smt_node, &parent_hash);
+            batch.put(parent_key, Self::serialize_node(&parent_internal));
 
             current_hash = parent_hash;
         }
@@ -2131,35 +2401,6 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(current_hash)
     }
 
-    /// Compute SMT root from a complete state map
-    ///
-    /// WARNING: This method is deprecated and should only be used for testing or migration.
-    /// It enumerates the entire state which is inefficient for large databases.
-    /// Use compute_incremental_smt_root() instead for production workloads.
-    fn compute_smt_root_from_state(&self, state: &BTreeMap<Vec<u8>, Vec<u8>>) -> Result<[u8; 32]> {
-        if state.is_empty() {
-            return Ok(EMPTY_NODE_HASH);
-        }
-
-        // This is a simplified hash-based approach for compatibility
-        // A proper SMT would build the actual tree structure, but that would be
-        // even more expensive for large state maps
-        let mut hasher = Sha256::new();
-
-        // Add a salt to ensure we never get all zeros for non-empty state
-        hasher.update(b"metashrew_state_root_v1");
-
-        for (key, value) in state.iter() {
-            // Hash key length + key + value length + value for deterministic ordering
-            hasher.update(&(key.len() as u32).to_le_bytes());
-            hasher.update(key);
-            hasher.update(&(value.len() as u32).to_le_bytes());
-            hasher.update(value);
-        }
-
-        let result = hasher.finalize().into();
-        Ok(result)
-    }
 
     /// Get the current state root (most recent)
     pub fn get_current_state_root(&self) -> Result<[u8; 32]> {

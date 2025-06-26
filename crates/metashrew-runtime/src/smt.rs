@@ -69,7 +69,7 @@
 //! )?;
 //! ```
 
-use crate::key_utils::{make_smt_node_key, PREFIXES};
+use crate::key_utils::{make_smt_node_key, make_keys_touched_at_height_key, make_keys_touched_entry_key, PREFIXES};
 use crate::traits::{BatchLike, KeyValueStoreLike};
 use anyhow::{anyhow, Result};
 use sha2::{Digest, Sha256};
@@ -385,6 +385,16 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             let new_length = current_length + 1;
             batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
         }
+        
+        // STORE KEYS TOUCHED AT THIS HEIGHT for efficient rollback and snapshot operations
+        for (index, (key, _)) in key_values.iter().enumerate() {
+            let touched_key = make_keys_touched_entry_key(height, index as u32);
+            batch.put(touched_key, key.clone());
+        }
+        
+        // Store the count of keys touched at this height
+        let touched_count_key = make_keys_touched_at_height_key(height);
+        batch.put(touched_count_key, key_values.len().to_string().as_bytes());
         
         // MINIMAL SMT: Only compute and store the final root, not intermediate nodes
         let new_root = self.compute_minimal_smt_root(prev_root, key_values)?;
@@ -949,6 +959,58 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             "No state root found for height {} or any previous height",
             height
         ))
+    }
+
+    /// Get all keys that were touched at a specific height
+    pub fn get_keys_touched_at_height(&self, height: u32) -> Result<Vec<Vec<u8>>> {
+        let touched_count_key = make_keys_touched_at_height_key(height);
+        
+        // Get the count of keys touched at this height
+        let count = match self.storage.get_immutable(&touched_count_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(count_bytes) => {
+                String::from_utf8_lossy(&count_bytes).parse::<u32>().unwrap_or(0)
+            }
+            None => return Ok(Vec::new()), // No keys touched at this height
+        };
+
+        let mut keys = Vec::new();
+        
+        // Retrieve each key
+        for index in 0..count {
+            let touched_key = make_keys_touched_entry_key(height, index);
+            if let Some(key_bytes) = self.storage.get_immutable(&touched_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                keys.push(key_bytes);
+            }
+        }
+
+        Ok(keys)
+    }
+
+    /// Remove keys touched entries for a specific height (used during rollback)
+    pub fn remove_keys_touched_at_height(&self, batch: &mut T::Batch, height: u32) -> Result<()> {
+        let touched_count_key = make_keys_touched_at_height_key(height);
+        
+        // Get the count of keys touched at this height
+        let count = match self.storage.get_immutable(&touched_count_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            Some(count_bytes) => {
+                String::from_utf8_lossy(&count_bytes).parse::<u32>().unwrap_or(0)
+            }
+            None => return Ok(()), // No keys touched at this height
+        };
+
+        // Remove each key entry
+        for index in 0..count {
+            let touched_key = make_keys_touched_entry_key(height, index);
+            batch.delete(touched_key);
+        }
+
+        // Remove the count entry
+        batch.delete(touched_count_key);
+
+        Ok(())
     }
 }
 

@@ -72,7 +72,7 @@ use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::context::MetashrewRuntimeContext;
-use crate::smt::SMTHelper;
+use crate::smt::{SMTHelper, BatchedSMTHelper};
 use crate::traits::{BatchLike, KeyValueStoreLike};
 
 /// Internal key used to store the current blockchain tip height
@@ -302,21 +302,6 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     pub instance: wasmtime::Instance,
 }
 
-pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Result<Vec<u8>> {
-    let mut entry = v.clone();
-    let index_bits = try_into_vec(index.to_le_bytes())?;
-    entry.extend(index_bits);
-    Ok(entry)
-}
-
-pub fn db_make_length_key(key: &Vec<u8>) -> Result<Vec<u8>> {
-    db_make_list_key(key, u32::MAX)
-}
-
-pub fn db_make_updated_key(key: &Vec<u8>) -> Vec<u8> {
-    key.clone()
-}
-
 pub fn u32_to_vec(v: u32) -> Result<Vec<u8>> {
     try_into_vec(v.to_le_bytes())
 }
@@ -348,7 +333,6 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     }
 }
 
-// Legacy function removed - BST now handles height indexing directly
 
 pub fn to_signed_or_trap<'a, T: TryInto<i32>>(_caller: &mut Caller<'_, State>, v: T) -> i32 {
     return match <T as TryInto<i32>>::try_into(v) {
@@ -889,7 +873,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// Handle chain reorganization by rolling back to the specified height
     pub fn handle_reorg(&mut self) -> Result<()> {
         // Get the current context height and database tip height
-        let (context_height, db_tip_height) = {
+        let (context_height, db_tip_height, mut db) = {
             let guard = self.context.lock().map_err(lock_err)?;
             let db_tip = match guard
                 .db
@@ -905,7 +889,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 }
                 None => 0,
             };
-            (guard.height, db_tip)
+            (guard.height, db_tip, guard.db.clone())
         };
 
         // If context height is ahead of or equal to db tip, no reorg needed
@@ -920,11 +904,40 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context_height
         );
 
-        // For now, we'll use a simple approach - just log the reorg
-        // In a full implementation, we would need to:
-        // 1. Identify all keys modified between context_height and db_tip_height
-        // 2. Restore their values to the state at context_height
-        // 3. Update the tip height
+        // Use the new efficient rollback system with key tracking
+        let mut batch = db.create_batch();
+        let batched_smt = BatchedSMTHelper::new(db.clone());
+        let mut smt_helper = SMTHelper::new(db.clone());
+
+        // Rollback each height from db_tip_height down to context_height + 1
+        for height_to_rollback in (context_height + 1..=db_tip_height).rev() {
+            log::debug!("Rolling back height {}", height_to_rollback);
+
+            // Get all keys that were touched at this height
+            let keys_touched = batched_smt.get_keys_touched_at_height(height_to_rollback)?;
+            
+            log::debug!("Found {} keys to rollback at height {}", keys_touched.len(), height_to_rollback);
+
+            // Rollback each key to its state before this height
+            for key in &keys_touched {
+                smt_helper.rollback_key_batched(&mut batch, key, context_height)?;
+            }
+
+            // Remove the keys touched entries for this height
+            batched_smt.remove_keys_touched_at_height(&mut batch, height_to_rollback)?;
+
+            // Remove the SMT root for this height
+            let root_key = format!("{}:{}", crate::smt::SMT_ROOT_PREFIX, height_to_rollback).into_bytes();
+            batch.delete(root_key);
+        }
+
+        // Update the tip height to the target height
+        let tip_key = crate::to_labeled_key(&TIP_HEIGHT_KEY.as_bytes().to_vec());
+        batch.put(tip_key, context_height.to_le_bytes().to_vec());
+
+        // Write all rollback operations atomically
+        db.write(batch)
+            .map_err(|e| anyhow!("Failed to write rollback batch: {:?}", e))?;
 
         log::info!("Reorg completed: rolled back to height {}", context_height);
 
@@ -966,50 +979,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         }
     }
 
-    /// Create an empty update list for a specific block height
-    pub fn db_create_empty_update_list(batch: &mut T::Batch, height: u32) -> Result<()> {
-        // Create a key for the update list
-        let update_list_key = format!("updates:{}", height).into_bytes();
-
-        // Create an empty update list
-        batch.put(update_list_key, Vec::new());
-
-        Ok(())
-    }
-
-    /// Store a value in the BST structure (replaces legacy annotated approach)
-    pub fn db_store_in_bst(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        key: &Vec<u8>,
-        value: &Vec<u8>,
-        height: u32,
-    ) -> Result<()> {
-        let db = {
-            let guard = context.lock().map_err(lock_err)?;
-            guard.db.clone()
-        };
-
-        let mut smt_helper = SMTHelper::new(db);
-        smt_helper.put(key, value, height)?;
-
-        Ok(())
-    }
-
-    /// Append a key to an update list
-    pub fn db_append(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        batch: &mut T::Batch,
-        update_key: &Vec<u8>,
-        key: &Vec<u8>,
-    ) -> Result<()> {
-        // Create a key for the update list
-        let update_list_key = crate::key_utils::make_prefixed_key(b"updates:", update_key);
-
-        // Add the key to the update list
-        batch.put(&update_list_key, key.clone());
-
-        Ok(())
-    }
 
     pub fn setup_linker(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
@@ -1748,26 +1717,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
 
-    /// Get all keys that were touched at a specific block height
-    pub fn get_keys_touched_at_height(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        _height: u32,
-    ) -> Result<Vec<Vec<u8>>> {
-        // For now, return an empty list
-        // In a full implementation, we would scan the database for keys modified at this height
-        Ok(Vec::new())
-    }
-
-    /// Iterate backwards through all values of a key from most recent update
-    pub fn iterate_key_backwards(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        _key: &Vec<u8>,
-        _from_height: u32,
-    ) -> Result<Vec<(u32, Vec<u8>)>> {
-        // For now, return an empty list
-        // In a full implementation, we would scan historical values for this key
-        Ok(Vec::new())
-    }
 
     /// Get the current state root (merkle root of entire state)
     pub fn get_current_state_root(
@@ -1796,26 +1745,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         smt_helper.get_smt_root_at_height(height)
     }
 
-    /// Perform a complete rollback to a specific height
-    pub fn rollback_to_height(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        target_height: u32,
-    ) -> Result<()> {
-        // For now, just log the rollback
-        // In a full implementation, we would need to restore database state
-        log::info!("Rolling back to height {}", target_height);
-        Ok(())
-    }
-
-    /// Get all heights at which a key was updated
-    pub fn get_key_update_heights(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        _key: &Vec<u8>,
-    ) -> Result<Vec<u32>> {
-        // For now, return an empty list
-        // In a full implementation, we would scan for all heights where this key was modified
-        Ok(Vec::new())
-    }
 
     /// Calculate the state root for the current state
     /// This is used by the atomic block processing to get the state root after execution

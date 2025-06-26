@@ -87,13 +87,31 @@ pub fn make_prefixed_key(prefix: &[u8], data: &[u8]) -> Vec<u8> {
     result
 }
 
-/// Optimized key builder for update list keys
-/// Stores keys as raw bytes without hex encoding to prevent database explosion
+
+/// Create a key for storing the list of keys touched at a specific height
+/// Format: "touched:{height}"
 #[inline]
-pub fn make_update_key(key: &[u8]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(8 + key.len()); // "updates:" = 8 bytes
-    result.extend_from_slice(b"updates:");
-    result.extend_from_slice(key);
+pub fn make_keys_touched_at_height_key(height: u32) -> Vec<u8> {
+    let height_str = height.to_string();
+    let mut result = Vec::with_capacity(PREFIXES.keys_touched_at_height.len() + height_str.len());
+    result.extend_from_slice(PREFIXES.keys_touched_at_height);
+    result.extend_from_slice(height_str.as_bytes());
+    result
+}
+
+/// Create a key for storing individual key entries in the touched keys list
+/// Format: "touched:{height}:{index}"
+#[inline]
+pub fn make_keys_touched_entry_key(height: u32, index: u32) -> Vec<u8> {
+    let height_str = height.to_string();
+    let index_str = index.to_string();
+    let mut result = Vec::with_capacity(
+        PREFIXES.keys_touched_at_height.len() + height_str.len() + 1 + index_str.len()
+    );
+    result.extend_from_slice(PREFIXES.keys_touched_at_height);
+    result.extend_from_slice(height_str.as_bytes());
+    result.push(b':');
+    result.extend_from_slice(index_str.as_bytes());
     result
 }
 
@@ -103,6 +121,7 @@ pub struct KeyPrefixes {
     pub historical_value: &'static [u8],
     pub height_index: &'static [u8],
     pub keys_at_height: &'static [u8],
+    pub keys_touched_at_height: &'static [u8],
     pub smt_node: &'static [u8],
     pub smt_root: &'static [u8],
 }
@@ -114,6 +133,7 @@ impl KeyPrefixes {
             historical_value: b"hist:",
             height_index: b"height:",
             keys_at_height: b"keys:",
+            keys_touched_at_height: b"touched:",
             smt_node: b"smt:node:",
             smt_root: b"smt:root:",
         }

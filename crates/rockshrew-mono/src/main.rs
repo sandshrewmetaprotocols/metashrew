@@ -122,8 +122,8 @@ struct Args {
     snapshot_directory: Option<PathBuf>,
     #[arg(
         long,
-        help = "Interval in blocks to create snapshots (e.g., 1000)",
-        default_value_t = 1000
+        help = "Interval in blocks to create snapshots (e.g., 100). REDUCED from 1000 to prevent memory accumulation hang.",
+        default_value_t = 100
     )]
     snapshot_interval: u32,
     #[arg(long, help = "URL to a remote snapshot repository to sync from")]

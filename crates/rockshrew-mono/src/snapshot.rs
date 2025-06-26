@@ -59,9 +59,18 @@ pub struct SnapshotManager {
     pub key_change_heights: HashMap<Vec<u8>, u32>,
     /// Current block height being processed
     pub current_processing_height: u32,
+    /// CRITICAL FIX: Maximum number of tracked changes to prevent memory accumulation
+    pub max_tracked_changes: usize,
+    /// Memory check interval to prevent hanging
+    pub memory_check_interval: u32,
 }
 
 impl SnapshotManager {
+    /// Maximum number of tracked changes before forcing a clear (prevents memory accumulation)
+    const MAX_TRACKED_CHANGES: usize = 1_000_000; // 1M entries = ~100-200MB max
+    /// Check memory usage every N blocks
+    const MEMORY_CHECK_INTERVAL: u32 = 50;
+    
     pub fn new(config: SnapshotConfig) -> Self {
         Self {
             config,
@@ -72,6 +81,8 @@ impl SnapshotManager {
             raw_operations: Vec::new(),
             key_change_heights: HashMap::new(),
             current_processing_height: 0,
+            max_tracked_changes: Self::MAX_TRACKED_CHANGES,
+            memory_check_interval: Self::MEMORY_CHECK_INTERVAL,
         }
     }
 
@@ -194,6 +205,15 @@ impl SnapshotManager {
     /// This is called during WASM module execution to capture actual updates
     pub fn track_key_change(&mut self, key: Vec<u8>, value: Vec<u8>) {
         if self.config.enabled {
+            // CRITICAL FIX: Check memory limits before adding more data
+            if self.key_changes.len() >= self.max_tracked_changes {
+                warn!(
+                    "Snapshot memory limit reached ({} tracked changes), clearing to prevent hang",
+                    self.key_changes.len()
+                );
+                self.clear_tracked_changes();
+            }
+            
             // Record the raw operation for debugging
             self.raw_operations.push((key.clone(), value.clone()));
             
@@ -287,6 +307,26 @@ impl SnapshotManager {
     /// Set the current processing height (called before processing each block)
     pub fn set_current_height(&mut self, height: u32) {
         self.current_processing_height = height;
+        
+        // CRITICAL FIX: Periodic memory management to prevent hanging
+        if height % self.memory_check_interval == 0 {
+            let memory_usage = self.estimate_memory_usage();
+            let tracked_count = self.key_changes.len();
+            
+            info!(
+                "Snapshot memory check at height {}: {} tracked changes, ~{:.1} MB",
+                height, tracked_count, memory_usage as f64 / (1024.0 * 1024.0)
+            );
+            
+            // Clear if memory usage is too high (500MB limit)
+            if memory_usage > 500_000_000 {
+                warn!(
+                    "High memory usage detected: {:.1} MB, clearing tracked changes to prevent hang",
+                    memory_usage as f64 / (1024.0 * 1024.0)
+                );
+                self.clear_tracked_changes();
+            }
+        }
     }
 
     /// Clear tracked changes (called after snapshot creation)
@@ -294,6 +334,28 @@ impl SnapshotManager {
         self.key_changes.clear();
         self.raw_operations.clear();
         self.key_change_heights.clear();
+    }
+
+    /// Estimate memory usage of tracked changes to prevent accumulation
+    fn estimate_memory_usage(&self) -> usize {
+        let mut total = 0;
+        
+        // Estimate key_changes HashMap memory
+        for (key, value) in &self.key_changes {
+            total += key.len() + value.len() + 64; // Include HashMap overhead
+        }
+        
+        // Estimate raw_operations Vec memory
+        for (key, value) in &self.raw_operations {
+            total += key.len() + value.len() + 32; // Include Vec overhead
+        }
+        
+        // Estimate key_change_heights HashMap memory
+        for (key, _height) in &self.key_change_heights {
+            total += key.len() + 4 + 32; // key + u32 + HashMap overhead
+        }
+        
+        total
     }
 
     /// Check if we should create a snapshot at the given height

@@ -267,6 +267,14 @@ pub trait RuntimeAdapter: Send + Sync {
 
     /// Get runtime statistics
     async fn get_stats(&self) -> SyncResult<RuntimeStats>;
+
+    /// Track runtime updates for snapshot creation (optional, used in snapshot mode)
+    /// This method should be called after successful block processing to capture
+    /// key-value changes for snapshot diff generation
+    async fn track_runtime_updates(&self, _height: u32) -> SyncResult<()> {
+        // Default implementation does nothing - only MetashrewRuntimeAdapter implements this
+        Ok(())
+    }
 }
 
 /// Result of atomic block processing containing all operations to be committed

@@ -20,13 +20,24 @@ use crate::snapshot::{RepoIndex, SnapshotConfig, SnapshotManager};
 pub struct RockshrewSnapshotProvider {
     manager: Arc<RwLock<SnapshotManager>>,
     storage: Arc<RwLock<RocksDBStorageAdapter>>,
+    runtime_adapter: Option<Arc<RwLock<crate::adapters::MetashrewRuntimeAdapter>>>,
 }
 
 impl RockshrewSnapshotProvider {
     #[allow(dead_code)]
     pub fn new(config: SnapshotConfig, storage: Arc<RwLock<RocksDBStorageAdapter>>) -> Self {
         let manager = Arc::new(RwLock::new(SnapshotManager::new(config)));
-        Self { manager, storage }
+        Self {
+            manager,
+            storage,
+            runtime_adapter: None,
+        }
+    }
+
+    /// Set the runtime adapter to get tracked changes from
+    #[allow(dead_code)]
+    pub fn set_runtime_adapter(&mut self, runtime_adapter: Arc<RwLock<crate::adapters::MetashrewRuntimeAdapter>>) {
+        self.runtime_adapter = Some(runtime_adapter);
     }
 
     #[allow(dead_code)]
@@ -59,35 +70,88 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
     async fn create_snapshot(&mut self, height: u32) -> SyncResult<GenericMetadata> {
         info!("Creating snapshot at height {}", height);
 
-        // Get state root from storage
+        // Get state root from storage, with fallback to direct database access
         let state_root = {
             let storage = self.storage.read().await;
-            storage.get_state_root(height).await?.ok_or_else(|| {
-                SyncError::Runtime(format!("No state root found for height {}", height))
-            })?
+            match storage.get_state_root(height).await? {
+                Some(root) => root,
+                None => {
+                    // Fallback: try to get state root directly from database
+                    let db = storage.get_db_handle().await?;
+                    let root_key = format!("smt:root:{}", height).into_bytes();
+                    db.get(&root_key)
+                        .map_err(|e| SyncError::Runtime(format!("Database error: {}", e)))?
+                        .ok_or_else(|| {
+                            SyncError::Runtime(format!("No state root found for height {} (tried both storage adapter and direct DB access)", height))
+                        })?
+                }
+            }
         };
 
-        // Get the database handle to track changes
-        let db = {
-            let storage = self.storage.read().await;
-            storage.get_db_handle().await.map_err(|e| {
-                SyncError::Runtime(format!("Failed to get database handle: {}", e))
-            })?
-        };
-
-        // Track database changes for this snapshot interval
-        let (_start_height, actual_size) = {
+        // Get tracked changes from the runtime adapter if available
+        let actual_size = if let Some(runtime_adapter) = &self.runtime_adapter {
+            // Get the snapshot manager with tracked changes from the runtime adapter
+            if let Some(runtime_manager_arc) = runtime_adapter.read().await.get_snapshot_manager().await {
+                let mut manager = self.manager.write().await;
+                let start_height = manager.last_snapshot_height;
+                
+                info!("Creating snapshot for interval {}-{}", start_height, height);
+                
+                // Access the runtime manager through the Arc<RwLock<>>
+                let runtime_manager = runtime_manager_arc.read().await;
+                info!("Using {} tracked key-value changes from runtime adapter", runtime_manager.key_changes.len());
+                
+                // Get tracking stats for debugging
+                let (logical_updates, raw_operations, logical_size, raw_size) = runtime_manager.get_tracking_stats();
+                info!("Snapshot tracking stats: {} logical updates ({} bytes), {} raw operations ({} bytes)",
+                      logical_updates, logical_size, raw_operations, raw_size);
+                
+                // Copy the tracked changes from the runtime manager to our manager
+                manager.key_changes = runtime_manager.key_changes.clone();
+                manager.raw_operations = runtime_manager.raw_operations.clone();
+                manager.key_change_heights = runtime_manager.key_change_heights.clone();
+                manager.last_snapshot_height = start_height;
+                
+                // Release the runtime manager lock before creating snapshot
+                drop(runtime_manager);
+                
+                // Create the snapshot with the tracked changes
+                manager
+                    .create_snapshot(height, &state_root)
+                    .await
+                    .map_err(|e| SyncError::Runtime(format!("Failed to create snapshot: {}", e)))?;
+                
+                // Calculate the actual size of the snapshot data
+                let mut total_size = 0u64;
+                for (key, value) in &manager.key_changes {
+                    total_size += 8; // 4 bytes for key length + 4 bytes for value length
+                    total_size += key.len() as u64;
+                    total_size += value.len() as u64;
+                }
+                
+                info!("Calculated snapshot data size: {} bytes from {} key-value pairs", total_size, manager.key_changes.len());
+                total_size
+            } else {
+                info!("No snapshot manager found in runtime adapter, creating empty snapshot");
+                let mut manager = self.manager.write().await;
+                manager
+                    .create_snapshot(height, &state_root)
+                    .await
+                    .map_err(|e| SyncError::Runtime(format!("Failed to create snapshot: {}", e)))?;
+                0
+            }
+        } else {
+            // Fallback to the old behavior if no runtime adapter is set
             let mut manager = self.manager.write().await;
             let start_height = manager.last_snapshot_height;
             
-            info!("Tracking database changes for snapshot interval {}-{}", start_height, height);
+            info!("Creating snapshot for interval {}-{} (no runtime adapter)", start_height, height);
+            info!("Using {} tracked key-value changes", manager.key_changes.len());
             
-            // Track all database changes that happened in this interval
-            manager.track_db_changes(&db, start_height, height).await.map_err(|e| {
-                SyncError::Runtime(format!("Failed to track database changes: {}", e))
-            })?;
-            
-            info!("Tracked {} key-value changes for snapshot", manager.key_changes.len());
+            // Get tracking stats for debugging
+            let (logical_updates, raw_operations, logical_size, raw_size) = manager.get_tracking_stats();
+            info!("Snapshot tracking stats: {} logical updates ({} bytes), {} raw operations ({} bytes)",
+                  logical_updates, logical_size, raw_operations, raw_size);
             
             // Create the snapshot with the tracked changes
             manager
@@ -103,7 +167,7 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
                 total_size += value.len() as u64;
             }
             
-            (start_height, total_size)
+            total_size
         };
 
         // Get block hash from storage

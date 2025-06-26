@@ -429,11 +429,28 @@ impl StorageAdapter for RocksDBStorageAdapter {
 pub struct MetashrewRuntimeAdapter {
     runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>,
     db: Arc<DB>,
+    snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
 }
 
 impl MetashrewRuntimeAdapter {
     pub fn new(runtime: Arc<RwLock<MetashrewRuntime<RocksDBRuntimeAdapter>>>, db: Arc<DB>) -> Self {
-        Self { runtime, db }
+        Self {
+            runtime,
+            db,
+            snapshot_manager: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Set the snapshot manager for tracking key-value updates
+    pub async fn set_snapshot_manager(&self, manager: Arc<RwLock<crate::snapshot::SnapshotManager>>) {
+        let mut snapshot_manager = self.snapshot_manager.write().await;
+        *snapshot_manager = Some(manager);
+    }
+
+    /// Get a reference to the snapshot manager
+    pub async fn get_snapshot_manager(&self) -> Option<Arc<RwLock<crate::snapshot::SnapshotManager>>> {
+        let snapshot_manager = self.snapshot_manager.read().await;
+        snapshot_manager.as_ref().cloned()
     }
 
 }
@@ -447,57 +464,128 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             block_data.len()
         );
 
-        // Get a lock on the runtime
-        let mut runtime = self.runtime.write().await;
-
-        // Get the block data size for logging
-        let block_size = block_data.len();
-
-        // Set block data
-        {
-            let mut context = runtime
-                .context
-                .lock()
-                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
-            context.block = block_data.to_vec();
-            context.height = height;
-            context.db.set_height(height);
-        } // Release context lock
-
-        // The "already processed" check is now handled inside the metashrew-runtime's __flush function
-        // This ensures consistency between test and production environments
-        info!(
-            "Processing block {} - WASM runtime will handle duplicate detection",
-            height
-        );
-
-        // Execute the runtime - memory refresh is now handled automatically by metashrew-runtime
-        debug!("About to call runtime.run() for block {}", height);
-        match runtime.run() {
-            Ok(_) => {
-                info!(
-                    "successfully executed WASM for block {} (size: {} bytes)",
-                    height, block_size
-                );
-
-                // State root calculation is now handled inside the WASM runtime's __flush function
-                // This ensures the state root is calculated with access to all the key-value pairs
-                // that were just flushed, providing consistency with the test suite
-                debug!(
-                    "State root calculation handled by WASM runtime for height {}",
-                    height
-                );
-                Ok(())
+        // Set up real-time KV tracking BEFORE processing the block
+        if let Some(manager_arc) = self.get_snapshot_manager().await {
+            // Set the current processing height for incremental snapshots
+            {
+                let mut manager = manager_arc.write().await;
+                manager.set_current_height(height);
             }
-            Err(run_err) => {
-                error!(
-                    "Failed to process block {}: {}",
-                    height, run_err
-                );
-                Err(SyncError::Runtime(format!(
-                    "Runtime execution failed: {}",
-                    run_err
-                )))
+            
+            let mut runtime = self.runtime.write().await;
+            
+            // Set up the KV tracker on the actual RocksDB adapter used by WASM
+            {
+                let mut context = runtime
+                    .context
+                    .lock()
+                    .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+                
+                // Create a closure that captures the shared snapshot manager for real-time tracking
+                let manager_arc_clone = manager_arc.clone();
+                let tracker_fn: metashrew_runtime::KVTrackerFn = Box::new(move |key: Vec<u8>, value: Vec<u8>| {
+                    // This will be called during batch writes in __flush
+                    // Use tokio::task::block_in_place to handle async in sync context
+                    tokio::task::block_in_place(|| {
+                        tokio::runtime::Handle::current().block_on(async {
+                            if let Ok(mut manager) = manager_arc_clone.try_write() {
+                                manager.track_key_change(key, value);
+                            }
+                        })
+                    });
+                });
+                
+                // Set the tracker on the RocksDB adapter that WASM actually uses
+                context.db.set_kv_tracker(Some(tracker_fn));
+                
+                // Set block data and height
+                context.block = block_data.to_vec();
+                context.height = height;
+                context.db.set_height(height);
+            } // Release context lock
+
+            info!(
+                "Processing block {} with real-time KV tracking enabled",
+                height
+            );
+
+            // Execute the runtime - the KV tracker will capture all batch writes during __flush
+            debug!("About to call runtime.run() for block {}", height);
+            match runtime.run() {
+                Ok(_) => {
+                    info!(
+                        "successfully executed WASM for block {} (size: {} bytes)",
+                        height, block_data.len()
+                    );
+
+                    // Clear the KV tracker to avoid memory leaks
+                    {
+                        let mut context = runtime
+                            .context
+                            .lock()
+                            .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+                        context.db.set_kv_tracker(None);
+                    }
+
+                    debug!(
+                        "Real-time KV tracking completed for height {}",
+                        height
+                    );
+                    Ok(())
+                }
+                Err(run_err) => {
+                    // Clear the KV tracker even on error
+                    {
+                        let mut context = runtime
+                            .context
+                            .lock()
+                            .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+                        context.db.set_kv_tracker(None);
+                    }
+                    
+                    error!(
+                        "Failed to process block {}: {}",
+                        height, run_err
+                    );
+                    Err(SyncError::Runtime(format!(
+                        "Runtime execution failed: {}",
+                        run_err
+                    )))
+                }
+            }
+        } else {
+            // Fallback to old behavior if no snapshot manager
+            let mut runtime = self.runtime.write().await;
+            
+            // Set block data
+            {
+                let mut context = runtime
+                    .context
+                    .lock()
+                    .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+                context.block = block_data.to_vec();
+                context.height = height;
+                context.db.set_height(height);
+            }
+
+            match runtime.run() {
+                Ok(_) => {
+                    info!(
+                        "successfully executed WASM for block {} (size: {} bytes) - no snapshot tracking",
+                        height, block_data.len()
+                    );
+                    Ok(())
+                }
+                Err(run_err) => {
+                    error!(
+                        "Failed to process block {}: {}",
+                        height, run_err
+                    );
+                    Err(SyncError::Runtime(format!(
+                        "Runtime execution failed: {}",
+                        run_err
+                    )))
+                }
             }
         }
     }

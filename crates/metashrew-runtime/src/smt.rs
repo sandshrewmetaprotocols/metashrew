@@ -22,7 +22,6 @@
 //! ## Historical Queries
 //! - **Append-only storage**: All updates are preserved in chronological order
 //! - **Binary search**: Efficient lookups through flat update lists
-//! - **Human-readable keys**: Database keys are human-readable strings
 //! - **Rollback support**: Revert state to previous heights
 //!
 //! ## Performance Optimization
@@ -705,7 +704,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         let leaf_node_key = make_smt_node_key(PREFIXES.smt_node, &new_leaf_hash);
         batch.put(leaf_node_key, SMTHelper::<T>::serialize_node(&new_leaf));
 
-        // SMT should NOT store values - values are stored in BST system
+        // SMT should NOT store values - values are stored in append-only system
         // The SMT only computes and stores tree structure and roots
 
         // Cache the new leaf node
@@ -1343,7 +1342,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let mut updates = Vec::new();
         let key_hash = Self::hash_key(key);
 
-        // SMT should NOT store values - values are stored in BST system
+        // SMT should NOT store values - values are stored in append-only system
         // The SMT only computes and stores tree structure and roots
         let value_hash = Self::hash_value(value);
 
@@ -1952,7 +1951,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let leaf_node_key = make_smt_node_key(PREFIXES.smt_node, &new_leaf_hash);
         batch.put(leaf_node_key, Self::serialize_node(&new_leaf));
 
-        // SMT should NOT store values - values are stored in BST system
+        // SMT should NOT store values - values are stored in append-only system
         // The SMT only computes and stores tree structure and roots
 
         if current_root == EMPTY_NODE_HASH {
@@ -2195,7 +2194,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let leaf_node_key = make_smt_node_key(PREFIXES.smt_node, &new_leaf_hash);
         batch.put(leaf_node_key, Self::serialize_node(&new_leaf));
 
-        // SMT should NOT store values - values are stored in BST system
+        // SMT should NOT store values - values are stored in append-only system
         // The SMT only computes and stores tree structure and roots
 
         // If the tree is empty, the new leaf becomes the root

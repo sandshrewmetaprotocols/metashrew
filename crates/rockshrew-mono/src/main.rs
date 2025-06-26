@@ -1,3 +1,42 @@
+//! # Rockshrew-Mono: Combined Bitcoin Indexer and View Layer
+//!
+//! ## ARCHITECTURE OVERVIEW
+//!
+//! This is a monolithic Bitcoin indexer that combines both indexing and view layer functionality
+//! into a single binary. It uses an **append-only database architecture** for reliable Bitcoin
+//! blockchain indexing with full historical state access.
+//!
+//! ## APPEND-ONLY DATABASE DESIGN
+//!
+//! **IMPORTANT**: This system NO LONGER uses BST (Binary Search Tree) indexing. All BST code
+//! has been removed as it was a flawed design. We now use a pure append-only approach:
+//!
+//! ### Key-Value Structure:
+//! - `"key/length"`: Total number of updates for a key since indexing began
+//! - `"key/0"`, `"key/1"`, `"key/2"`, etc.: Individual update entries
+//! - Values stored as: `"height:hex_encoded_value"`
+//!
+//! ### Benefits:
+//! - **Reorg Safety**: No data loss during blockchain reorganizations
+//! - **Historical Access**: Binary search through updates for any block height
+//! - **Debugging**: Human-readable keys and height-prefixed values
+//! - **Consistency**: Deterministic state at any point in blockchain history
+//!
+//! ## CRATE HIERARCHY & CODE ORGANIZATION
+//!
+//! Code should be factored to the lowest common denominator in this hierarchy:
+//!
+//! ```
+//! rockshrew-mono
+//! ├── rockshrew-sync    (sync framework, adapters)
+//! ├── rockshrew-runtime (RocksDB integration)
+//! ├── metashrew-runtime (core WASM runtime, append-only SMT)
+//! └── metashrew-core    (WASM bindings, fundamental types)
+//! ```
+//!
+//! **Rule**: Always implement behavior in the lowest possible crate to maximize reusability.
+//! Most core logic should live in `metashrew-runtime` and `metashrew-core`.
+
 use actix_cors::Cors;
 use actix_web::error;
 use actix_web::{post, web, App, HttpResponse, HttpServer, Responder, Result as ActixResult};
@@ -5,19 +44,21 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use env_logger;
 use hex;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use metashrew_runtime::set_label;
 use metashrew_runtime::MetashrewRuntime;
 use num_cpus;
 use rocksdb::Options;
 use rockshrew_runtime::RocksDBRuntimeAdapter;
 
-// Import our SMT helper module
+// SMT helper module for state root calculations (append-only design)
 mod smt_helper;
 
-// Import our adapters module
+// Adapter implementations for the generic sync framework
 mod adapters;
 use adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter, RocksDBStorageAdapter};
+
+
 
 use serde::{Deserialize, Serialize};
 use serde_json::{self, Value};
@@ -847,33 +888,79 @@ async fn main() -> Result<()> {
     let storage_adapter = RocksDBStorageAdapter::new(db.clone());
     let runtime_adapter = MetashrewRuntimeAdapter::new(runtime.clone(), db.clone());
 
+    // APPEND-ONLY SNAPSHOT TRACKING SETUP
+    //
+    // Set up snapshot manager for tracking key-value updates in the append-only database.
+    // This works in ALL sync modes (Normal, Snapshot, Repo) to enable change tracking.
+    //
+    // The snapshot manager tracks changes by scanning for append-only update keys:
+    // - Looks for keys like "key/0", "key/1", "key/2" (update indices)
+    // - Parses values in "height:hex_value" format
+    // - Tracks only updates that match the current block height being processed
+    //
+    // This enables incremental snapshot creation and change detection without
+    // requiring the old BST approach (which has been completely removed).
+    let snapshot_config = SnapshotConfig {
+        interval: args.snapshot_interval,
+        directory: args.snapshot_directory.clone().unwrap_or_else(|| PathBuf::from("snapshots")),
+        enabled: true,
+    };
+    
+    let mut snapshot_manager = SnapshotManager::new(snapshot_config.clone());
+    
+    // Initialize snapshot tracking infrastructure
+    if let Err(e) = snapshot_manager.initialize().await {
+        warn!("Failed to initialize snapshot manager for append-only tracking: {}", e);
+        // Continue without snapshot tracking - this is optional functionality
+    } else {
+        // Associate the WASM indexer with snapshots for metadata
+        if let Err(e) = snapshot_manager.set_current_wasm(indexer_path.clone()) {
+            warn!("Failed to set WASM metadata for snapshots: {}", e);
+        }
+        
+        // Set baseline height for snapshot tracking
+        snapshot_manager.last_snapshot_height = start_block;
+        
+        // CRITICAL: Connect to the ACTUAL runtime adapter used by the sync engine
+        // (Not the JSON-RPC adapter - that's a separate instance)
+        // Wrap the snapshot manager in Arc<RwLock<>> for shared state
+        let snapshot_manager_arc = Arc::new(RwLock::new(snapshot_manager));
+        runtime_adapter.set_snapshot_manager(snapshot_manager_arc).await;
+        info!("Append-only snapshot tracking enabled for sync engine");
+    }
+
     // Keep direct references to adapters for JSON-RPC server
     let storage_adapter_ref = Arc::new(RwLock::new(RocksDBStorageAdapter::new(db.clone())));
-    let runtime_adapter_ref = Arc::new(RwLock::new(MetashrewRuntimeAdapter::new(runtime.clone(), db.clone())));
+    // CRITICAL FIX: Use the SAME runtime adapter instance that has the tracked data
+    let runtime_adapter_ref = Arc::new(RwLock::new(runtime_adapter));
     let current_height = Arc::new(AtomicU32::new(start_block));
+
+    // Create a NEW runtime adapter for the sync engine since we moved the original
+    let sync_runtime_adapter = MetashrewRuntimeAdapter::new(runtime.clone(), db.clone());
+    
+    // Transfer the snapshot manager to the sync engine's runtime adapter
+    if let Some(snapshot_manager_arc) = runtime_adapter_ref.read().await.get_snapshot_manager().await {
+        sync_runtime_adapter.set_snapshot_manager(snapshot_manager_arc).await;
+    }
 
     // Always use snapshot-enabled sync engine (it supports all modes including Normal)
     let sync_engine = SnapshotMetashrewSync::new(
         bitcoin_adapter,
         storage_adapter,
-        runtime_adapter,
+        sync_runtime_adapter,
         sync_config,
         sync_mode.clone(),
     );
 
     // Set up snapshot providers and consumers based on sync mode
     match &sync_mode {
-        SyncMode::Snapshot(config) => {
+        SyncMode::Snapshot(_config) => {
             info!("Setting up snapshot provider for snapshot creation mode");
             
-            // Create snapshot config for the existing SnapshotManager
-            let snapshot_config = SnapshotConfig {
-                interval: config.snapshot_interval,
-                directory: args.snapshot_directory.clone().unwrap_or_else(|| PathBuf::from("snapshots")),
-                enabled: true,
-            };
+            let mut provider = RockshrewSnapshotProvider::new(snapshot_config, storage_adapter_ref.clone());
             
-            let provider = RockshrewSnapshotProvider::new(snapshot_config, storage_adapter_ref.clone());
+            // CRITICAL FIX: Connect to the SAME runtime adapter that has the tracked data
+            provider.set_runtime_adapter(runtime_adapter_ref.clone());
             
             // Initialize the snapshot directory structure with current height
             if let Err(e) = provider.initialize(start_block).await {
@@ -889,21 +976,21 @@ async fn main() -> Result<()> {
             
             sync_engine.set_snapshot_provider(Box::new(provider)).await;
         }
-        SyncMode::Repo(_config) => {
+        SyncMode::Repo(_) => {
             info!("Setting up snapshot consumer for repository mode");
             
             // Create snapshot config for the existing SnapshotManager
-            let snapshot_config = SnapshotConfig {
+            let consumer_config = SnapshotConfig {
                 interval: 1000, // Default interval for consumer
                 directory: PathBuf::from("temp_snapshots"),
                 enabled: true,
             };
             
-            let consumer = RockshrewSnapshotConsumer::new(snapshot_config, storage_adapter_ref.clone());
+            let consumer = RockshrewSnapshotConsumer::new(consumer_config, storage_adapter_ref.clone());
             sync_engine.set_snapshot_consumer(Box::new(consumer)).await;
         }
         SyncMode::Normal => {
-            info!("Using normal sync mode - no snapshot components needed");
+            info!("Using normal sync mode with key-value tracking enabled");
         }
         SyncMode::SnapshotServer(_config) => {
             info!("Snapshot server mode not yet implemented");

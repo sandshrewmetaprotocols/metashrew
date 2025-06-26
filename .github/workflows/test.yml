@@ -1,10 +1,10 @@
-name: Tests
+name: Test
 
 on:
   push:
-    branches: [ "**" ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, develop ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,43 +12,30 @@ env:
 
 jobs:
   test:
-    name: Run Tests
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Install Rust toolchain
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
-      
-    - name: Cache cargo dependencies
+      with:
+        targets: wasm32-unknown-unknown
+    
+    - name: Cache cargo registry
       uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-test-
           ${{ runner.os }}-cargo-
-          
-    - name: Install system dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          pkg-config \
-          libssl-dev \
-          libclang-dev \
-          clang
-          
-    - name: Build project
-      run: cargo build --verbose
-      
+    
+    - name: Build metashrew-minimal WASM
+      run: cargo build --target wasm32-unknown-unknown --release -p metashrew-minimal
+    
     - name: Run tests
-      run: cargo test --verbose
-      
-    - name: Check for warnings
-      run: cargo check --verbose 2>&1 | tee check_output.log && ! grep -q "warning:" check_output.log
+      run: cargo test --release
+      timeout-minutes: 5

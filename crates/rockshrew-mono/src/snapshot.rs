@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use log::{error, info};
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -46,12 +46,19 @@ pub struct RepoIndex {
 }
 
 /// Manages snapshot creation and repository structure
+#[derive(Clone)]
 pub struct SnapshotManager {
     pub config: SnapshotConfig,
     pub current_wasm: Option<PathBuf>,
     pub current_wasm_hash: Option<String>,
     pub last_snapshot_height: u32,
     pub key_changes: HashMap<Vec<u8>, Vec<u8>>,
+    /// Track all raw database operations for debugging
+    pub raw_operations: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Track the height when each key was last changed (for incremental snapshots)
+    pub key_change_heights: HashMap<Vec<u8>, u32>,
+    /// Current block height being processed
+    pub current_processing_height: u32,
 }
 
 impl SnapshotManager {
@@ -62,6 +69,9 @@ impl SnapshotManager {
             current_wasm_hash: None,
             last_snapshot_height: 0, // Will be updated in initialize_with_db
             key_changes: HashMap::new(),
+            raw_operations: Vec::new(),
+            key_change_heights: HashMap::new(),
+            current_processing_height: 0,
         }
     }
 
@@ -167,7 +177,7 @@ impl SnapshotManager {
 
         // Copy WASM file to snapshot directory
         let wasm_dir = self.config.directory.join("wasm");
-        let dest_path = wasm_dir.join(format!("{}_{}.wasm", filename, hash[..8].to_string()));
+        let dest_path = wasm_dir.join(format!("{}_{}.wasm", filename, if hash.len() >= 8 { &hash[..8] } else { &hash }));
 
         if !dest_path.exists() {
             std::fs::copy(&wasm_path, &dest_path)?;
@@ -181,11 +191,109 @@ impl SnapshotManager {
     }
 
     /// Track a key-value change for the current snapshot interval
-    #[allow(dead_code)]
+    /// This is called during WASM module execution to capture actual updates
     pub fn track_key_change(&mut self, key: Vec<u8>, value: Vec<u8>) {
         if self.config.enabled {
-            self.key_changes.insert(key, value);
+            // Record the raw operation for debugging
+            self.raw_operations.push((key.clone(), value.clone()));
+            
+            // For real-time tracking from WASM, we need to handle both:
+            // 1. Raw logical key-value pairs (from WASM __flush)
+            // 2. Append-only database keys (from post-processing)
+            
+            let key_str = String::from_utf8_lossy(&key);
+            
+            // Check if this is an append-only database key that needs extraction
+            if key_str.contains('/') && !key_str.ends_with("/length") {
+                // This is likely an append-only key, try to extract logical k/v
+                if let Some((logical_key, logical_value)) = self.extract_logical_kv(&key, &value) {
+                    self.key_changes.insert(logical_key.clone(), logical_value);
+                    // Track when this key was last changed for incremental snapshots
+                    self.key_change_heights.insert(logical_key, self.current_processing_height);
+                }
+            } else {
+                // This is likely a raw logical key-value pair from WASM
+                // Skip internal keys but include everything else
+                if !key_str.starts_with("__INTERNAL") && !key_str.starts_with("smt:node:") {
+                    self.key_changes.insert(key.clone(), value);
+                    // Track when this key was last changed for incremental snapshots
+                    self.key_change_heights.insert(key, self.current_processing_height);
+                }
+            }
         }
+    }
+
+    
+
+    /// Extract logical key-value pairs from append-only database format
+    /// This determines what gets included in snapshot diffs
+    fn extract_logical_kv(&self, key: &[u8], value: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+        let key_str = String::from_utf8_lossy(key);
+        
+        // Handle SMT root keys: include as-is for state verification
+        if key_str.starts_with("smt:root:") {
+            return Some((key.to_vec(), value.to_vec()));
+        }
+        
+        // Skip other SMT internal keys (nodes, etc.)
+        if key_str.starts_with("smt:") {
+            return None;
+        }
+        
+        // Skip internal system keys
+        if key_str.starts_with("__INTERNAL/") {
+            return None;
+        }
+        
+        // Skip length tracking keys (these are metadata for the append-only structure)
+        if key_str.ends_with("/length") {
+            return None;
+        }
+        
+        // For append-only update keys like "key/0", "key/1", etc., we want the base key
+        // The value should already be the decoded hex value (not "height:hex" format)
+        if key_str.contains('/') {
+            if let Some(slash_pos) = key_str.rfind('/') {
+                let suffix = &key_str[slash_pos + 1..];
+                
+                // Verify this is a numeric update index
+                if suffix.chars().all(|c| c.is_ascii_digit()) {
+                    // Extract the base key (everything before the "/index")
+                    let base_key = key_str[..slash_pos].as_bytes().to_vec();
+                    return Some((base_key, value.to_vec()));
+                }
+            }
+        }
+        
+        // For any other keys, include them as-is
+        // This ensures we don't miss any important data
+        Some((key.to_vec(), value.to_vec()))
+    }
+
+    /// Get statistics about tracking activity
+    pub fn get_tracking_stats(&self) -> (usize, usize, usize, usize) {
+        let logical_updates = self.key_changes.len();
+        let raw_operations = self.raw_operations.len();
+        let total_logical_size = self.key_changes.iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum();
+        let total_raw_size = self.raw_operations.iter()
+            .map(|(k, v)| k.len() + v.len())
+            .sum();
+        
+        (logical_updates, raw_operations, total_logical_size, total_raw_size)
+    }
+
+    /// Set the current processing height (called before processing each block)
+    pub fn set_current_height(&mut self, height: u32) {
+        self.current_processing_height = height;
+    }
+
+    /// Clear tracked changes (called after snapshot creation)
+    pub fn clear_tracked_changes(&mut self) {
+        self.key_changes.clear();
+        self.raw_operations.clear();
+        self.key_change_heights.clear();
     }
 
     /// Check if we should create a snapshot at the given height
@@ -207,10 +315,33 @@ impl SnapshotManager {
         let start_height = self.last_snapshot_height;
         let end_height = height;
 
+        // Filter key changes to only include those that changed since the last snapshot
+        let incremental_changes: HashMap<Vec<u8>, Vec<u8>> = self.key_changes.iter()
+            .filter_map(|(key, value)| {
+                // Only include keys that were changed after the last snapshot height
+                if let Some(&change_height) = self.key_change_heights.get(key) {
+                    if change_height > self.last_snapshot_height {
+                        Some((key.clone(), value.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    // If we don't have height tracking for this key, include it to be safe
+                    Some((key.clone(), value.clone()))
+                }
+            })
+            .collect();
+
         info!(
-            "Creating snapshot for height range {}-{}",
-            start_height, end_height
+            "Creating incremental snapshot for height range {}-{} with {} changes (filtered from {} total tracked)",
+            start_height, end_height, incremental_changes.len(), self.key_changes.len()
         );
+
+        // If we have no incremental changes, this might be normal for some intervals
+        if incremental_changes.is_empty() {
+            info!("No incremental changes for snapshot interval {}-{}", start_height, end_height);
+            info!("This will result in an empty snapshot diff file (normal for intervals with no changes)");
+        }
 
         // Create interval directory
         let interval_dir = self
@@ -225,16 +356,21 @@ impl SnapshotManager {
         let mut diff_data = Vec::new();
 
         // Format: [key_len(4 bytes)][key][value_len(4 bytes)][value]
-        for (key, value) in &self.key_changes {
+        for (key, value) in &incremental_changes {
             diff_data.extend_from_slice(&(key.len() as u32).to_le_bytes());
             diff_data.extend_from_slice(key);
             diff_data.extend_from_slice(&(value.len() as u32).to_le_bytes());
             diff_data.extend_from_slice(value);
         }
 
+        info!("Incremental snapshot diff data size: {} bytes (before compression)", diff_data.len());
+
         // Compress with zstd
         let compressed = zstd::encode_all(&diff_data[..], 3)?;
+        let compressed_size = compressed.len();
         async_fs::write(&diff_path, compressed).await?;
+        
+        info!("Incremental snapshot diff compressed size: {} bytes", compressed_size);
 
         // Create stateroot.json file
         let state_root_hex = hex::encode(state_root);
@@ -271,7 +407,7 @@ impl SnapshotManager {
             end_height,
             state_root: state_root_hex,
             diff_file: format!("intervals/{}-{}/diff.bin.zst", start_height, end_height),
-            wasm_file: format!("wasm/{}_{}.wasm", wasm_filename, wasm_hash[..8].to_string()),
+            wasm_file: format!("wasm/{}_{}.wasm", wasm_filename, if wasm_hash.len() >= 8 { &wasm_hash[..8] } else { &wasm_hash }),
             wasm_hash,
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -291,90 +427,22 @@ impl SnapshotManager {
 
         // Reset for next interval
         self.last_snapshot_height = end_height;
-        self.key_changes.clear();
+        
+        // For incremental snapshots, we need to remove the keys that were just snapshotted
+        // This prevents them from accumulating across intervals
+        for key in incremental_changes.keys() {
+            // Remove from both tracking structures
+            self.key_change_heights.remove(key);
+            self.key_changes.remove(key);
+        }
+        
+        // Clear raw operations as they're only used for debugging
+        self.raw_operations.clear();
 
-        info!("Created snapshot for height {}", height);
+        info!("Created incremental snapshot for height {} with {} changes", height, incremental_changes.len());
         Ok(())
     }
 
-    /// Track database changes for a specific height range using BST approach
-    #[allow(dead_code)]
-    pub async fn track_db_changes(
-        &mut self,
-        db: &rocksdb::DB,
-        start_height: u32,
-        end_height: u32,
-    ) -> Result<()> {
-        if !self.config.enabled {
-            return Ok(());
-        }
-
-        info!(
-            "Tracking database changes for height range {}-{}",
-            start_height, end_height
-        );
-
-        // Get all keys updated in this height range using the correct SMT constants
-        let mut updated_keys: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-
-        // Use the correct constants from metashrew_runtime::key_utils
-        use metashrew_runtime::key_utils::PREFIXES;
-
-        for height in start_height..=end_height {
-            // Create the prefix for keys tracked at this height
-            let mut prefix = Vec::new();
-            prefix.extend_from_slice(PREFIXES.keys_at_height);
-            prefix.extend_from_slice(height.to_string().as_bytes());
-            prefix.push(b':');
-
-            // Iterate over all keys with this prefix
-            let iter = db.prefix_iterator(&prefix);
-            for item in iter {
-                match item {
-                    Ok((key, _)) => {
-                        // Extract the original key from the keys-at-height tracking key
-                        if key.starts_with(&prefix) {
-                            let original_key = key[prefix.len()..].to_vec();
-                            updated_keys.insert(original_key);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Error iterating over keys at height {}: {}", height, e);
-                    }
-                }
-            }
-        }
-
-        info!("Found {} unique keys updated in height range {}-{}", updated_keys.len(), start_height, end_height);
-
-        // Get the latest value for each key at the end height
-        for key in updated_keys {
-            // Find the most recent value for this key up to end_height
-            let mut found_value = None;
-            
-            // Search backwards from end_height to find the most recent value
-            for h in (0..=end_height).rev() {
-                let height_key = metashrew_runtime::key_utils::make_historical_key(PREFIXES.historical_value, &key, h);
-                if let Ok(Some(value)) = db.get(&height_key) {
-                    found_value = Some(value.to_vec());
-                    break;
-                }
-            }
-            
-            if let Some(value) = found_value {
-                self.key_changes.insert(key, value);
-            } else {
-                info!("No value found for tracked key: {}", hex::encode(&key));
-            }
-        }
-
-        info!(
-            "Tracked {} key-value changes for snapshot",
-            self.key_changes.len()
-        );
-
-        Ok(())
-    }
 
     /// Sync from a remote repository using parallel processing
     pub async fn sync_from_repo(

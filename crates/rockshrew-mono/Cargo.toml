@@ -34,4 +34,5 @@ zstd = "0.13.0"  # Added for snapshot compression
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3.8"
 memshrew-runtime = { path = "../memshrew" }

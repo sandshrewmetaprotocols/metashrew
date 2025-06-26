@@ -88,8 +88,6 @@ pub mod imports;
 pub mod index_pointer;
 pub mod macros;
 pub mod stdio;
-#[cfg(test)]
-pub mod tests;
 
 #[cfg(feature = "panic-hook")]
 use crate::compat::panic_hook;

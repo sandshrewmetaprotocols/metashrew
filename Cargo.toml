@@ -25,18 +25,26 @@ anyhow = "1.0.86"
 tokio = { version = "1.43.0", features = ["full"] }
 futures = "0.3.30"
 async-trait = "0.1"
+log = "0.4.22"
+env_logger = "0.11"
 
 # Metashrew dependencies
 metashrew-runtime = { path = "crates/metashrew-runtime" }
 metashrew-support = { path = "crates/metashrew-support" }
 memshrew-runtime = { path = "crates/memshrew" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
-rockshrew-sync = { path = "crates/rockshrew-sync", features = ["mock"] }
+rockshrew-sync = { path = "crates/rockshrew-sync", features = ["test-utils"] }
+rockshrew-mono = { path = "crates/rockshrew-mono" }
 
 # Database dependencies
 rocksdb = "0.21.0"
 tempfile = "3.8"
 sha2 = "0.10"
+
+# Serialization dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zstd = "0.13"
 
 # Bitcoin dependencies
 bitcoin = "0.32.6"

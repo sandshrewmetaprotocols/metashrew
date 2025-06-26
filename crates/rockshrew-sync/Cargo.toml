@@ -19,7 +19,7 @@ rocksdb = "0.21.0"
 
 [features]
 default = []
-mock = []
+test-utils = []
 
 [dev-dependencies]
 tokio-test = "0.4"

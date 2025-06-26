@@ -100,10 +100,10 @@ pub mod sync;
 pub mod traits;
 pub mod types;
 
-#[cfg(any(test, feature = "mock"))]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 
-#[cfg(any(test, feature = "mock"))]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock_snapshot;
 
 pub use adapters::*;
@@ -114,8 +114,8 @@ pub use sync::*;
 pub use traits::*;
 pub use types::*;
 
-#[cfg(any(test, feature = "mock"))]
+#[cfg(any(test, feature = "test-utils"))]
 pub use mock::*;
 
-#[cfg(any(test, feature = "mock"))]
+#[cfg(any(test, feature = "test-utils"))]
 pub use mock_snapshot::*;

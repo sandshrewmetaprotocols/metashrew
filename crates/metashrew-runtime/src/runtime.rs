@@ -74,6 +74,7 @@ use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 use crate::context::MetashrewRuntimeContext;
 use crate::smt::{SMTHelper, BatchedSMTHelper};
 use crate::traits::{BatchLike, KeyValueStoreLike};
+use crate::zk_proof::{ZKProofGenerator, ZKExecutionProof};
 
 /// Internal key used to store the current blockchain tip height
 ///
@@ -300,6 +301,18 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     /// Contains the loaded and linked WASM instance with all
     /// host functions bound and ready to execute.
     pub instance: wasmtime::Instance,
+    
+    /// Zero-knowledge proof generator for state transition verification
+    ///
+    /// Generates cryptographic proofs that WASM execution was performed
+    /// correctly and produced the expected state transitions.
+    pub zk_proof_generator: ZKProofGenerator,
+    
+    /// Original WASM module bytes for ZK proof generation
+    ///
+    /// Stored to enable ZK proof generation that proves the correct
+    /// WASM module was executed.
+    pub wasm_module_bytes: Vec<u8>,
 }
 
 pub fn u32_to_vec(v: u32) -> Result<Vec<u8>> {
@@ -408,6 +421,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// )?;
     /// ```
     pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
+        // Read WASM module bytes for ZK proof generation
+        let wasm_module_bytes = std::fs::read(&indexer)
+            .with_context(|| format!("Failed to read WASM module from {:?}", indexer))?;
+
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -438,6 +455,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         >::new(
             MetashrewRuntimeContext::new(store, 0, vec![]),
         ));
+        
+        // Initialize ZK proof generator (enabled by default for testing)
+        let zk_proof_generator = ZKProofGenerator::new(true);
+        
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -460,6 +481,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            zk_proof_generator,
+            wasm_module_bytes,
         })
     }
 
@@ -594,6 +617,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 linker,
                 context: view_context,
                 instance,
+                zk_proof_generator: ZKProofGenerator::new(false), // Disabled for preview view
+                wasm_module_bytes: Vec::new(), // Empty for preview view
             }
         };
 
@@ -1224,6 +1249,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         >::new(
             MetashrewRuntimeContext::new(db, height, vec![]),
         ));
+        
+        // Initialize ZK proof generator for preview operations
+        let zk_proof_generator = ZKProofGenerator::new(false); // Disabled for preview
+        let wasm_module_bytes = Vec::new(); // Empty for preview
+        
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -1246,6 +1276,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            zk_proof_generator,
+            wasm_module_bytes,
         })
     }
 
@@ -1262,6 +1294,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         >::new(
             MetashrewRuntimeContext::new(db, height, vec![]),
         ));
+        
+        // Initialize ZK proof generator for async view operations
+        let zk_proof_generator = ZKProofGenerator::new(false); // Disabled for view
+        let wasm_module_bytes = Vec::new(); // Empty for view
+        
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -1285,6 +1322,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            zk_proof_generator,
+            wasm_module_bytes,
         })
     }
 
@@ -1878,6 +1917,58 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
         // Execute the block processing - run() now handles memory refresh automatically
         self.run()
+    }
+
+    /// Process a block with ZK proof generation
+    pub async fn process_block_with_zk_proof(&mut self, height: u32, block_data: &[u8]) -> Result<Option<ZKExecutionProof>> {
+        // Get previous state root for ZK proof
+        let prev_state_root = if height > 0 {
+            match Self::get_state_root_at_height(self.context.clone(), height - 1) {
+                Ok(root) => root,
+                Err(_) => [0u8; 32], // Genesis case
+            }
+        } else {
+            [0u8; 32] // Genesis case
+        };
+
+        // Start ZK execution trace
+        self.zk_proof_generator.start_trace(
+            height,
+            block_data,
+            prev_state_root,
+            &self.wasm_module_bytes,
+        )?;
+
+        // Set the block data and height in context
+        {
+            let mut guard = self.context.lock().map_err(lock_err)?;
+            guard.block = block_data.to_vec();
+            guard.height = height;
+            guard.state = 0;
+        }
+
+        // Execute the block processing
+        self.run()?;
+
+        // Get the new state root after execution
+        let new_state_root = Self::get_state_root_at_height(self.context.clone(), height)?;
+
+        // Complete ZK proof generation
+        let zk_proof = self.zk_proof_generator.complete_trace_and_generate_proof(
+            new_state_root,
+            &self.wasm_module_bytes,
+        )?;
+
+        if let Some(ref proof) = zk_proof {
+            log::info!(
+                "Generated ZK proof for block {} (height {}): {} bytes",
+                hex::encode(&proof.block_hash),
+                height,
+                proof.proof_data.len()
+            );
+        }
+
+        Ok(zk_proof)
     }
 
     /// Get the state root for a specific height

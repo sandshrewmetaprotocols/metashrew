@@ -10,6 +10,10 @@ pub mod proto;
 pub mod runtime;
 pub mod smt;
 pub mod traits;
+pub mod zk_proof;
+
+#[cfg(test)]
+pub mod tests;
 
 
 // Re-export core types and traits
@@ -20,6 +24,9 @@ pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
 // Re-export helper types
 pub use helpers::{BSTHelper, BSTStatistics};
 pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
+
+// Re-export ZK proof types
+pub use zk_proof::{ZKExecutionProof, ZKProofGenerator, ZKVerifier, ZKSnapshotMetadata, ExecutionTrace};
 
 // Utility functions that are storage-backend agnostic
 static mut _LABEL: Option<String> = None;

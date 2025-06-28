@@ -484,14 +484,26 @@ async fn handle_jsonrpc(
             })),
         }
     } else if body.method == "metashrew_height" {
-        // Use direct atomic access to avoid lock contention
-        let current_height = state.current_height.load(Ordering::SeqCst);
-        let height = current_height.saturating_sub(1); // Same logic as sync engine
-        Ok(HttpResponse::Ok().json(serde_json::json!({
-            "id": body.id,
-            "result": height,
-            "jsonrpc": "2.0"
-        })))
+        // Use storage adapter to get the actual indexed height from database
+        // This ensures we return the real indexed height, not the sync engine's internal tracking
+        match state.storage.read().await.get_indexed_height().await {
+            Ok(indexed_height) => {
+                Ok(HttpResponse::Ok().json(serde_json::json!({
+                    "id": body.id,
+                    "result": indexed_height,
+                    "jsonrpc": "2.0"
+                })))
+            }
+            Err(err) => Ok(HttpResponse::Ok().json(JsonRpcError {
+                id: body.id,
+                error: JsonRpcErrorObject {
+                    code: -32000,
+                    message: format!("Failed to get indexed height: {}", err),
+                    data: None,
+                },
+                jsonrpc: "2.0".to_string(),
+            }))
+        }
     } else if body.method == "metashrew_getblockhash" {
         if body.params.len() != 1 {
             return Ok(HttpResponse::Ok().json(JsonRpcError {

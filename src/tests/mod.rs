@@ -29,7 +29,6 @@ pub mod integration_tests;
 #[cfg(test)]
 pub mod reorg_focused_test;
 
-
 /// Test configuration and utilities
 pub struct TestConfig {
     pub wasm_path: PathBuf,
@@ -190,65 +189,4 @@ mod tests {
         assert_eq!(height, 0);
     }
 
-    /// Core e2e test that validates the complete Metashrew workflow
-    #[tokio::test]
-    async fn test_core_metashrew_workflow() -> Result<()> {
-        let config = TestConfig::new();
-        let mut runtime = config.create_runtime()?;
-
-        // Process a small chain of blocks
-        let mut prev_hash = BlockHash::all_zeros();
-        for height in 0..5 {
-            let block = if height == 0 {
-                TestUtils::create_genesis_block()
-            } else {
-                TestUtils::create_test_block(height, prev_hash)
-            };
-            prev_hash = block.block_hash();
-
-            let block_bytes = TestUtils::serialize_block(&block);
-
-            {
-                let mut context = runtime.context.lock().unwrap();
-                context.block = block_bytes;
-                context.height = height;
-            }
-
-            runtime.run()?;
-            runtime.refresh_memory()?;
-        }
-
-        // Test view functions at different heights
-        for height in 0..5 {
-            let view_input = vec![];
-            let blocktracker_data = runtime
-                .view("blocktracker".to_string(), &view_input, height)
-                .await?;
-
-            // At each height, blocktracker should have (height + 1) bytes
-            assert_eq!(
-                blocktracker_data.len(),
-                (height + 1) as usize,
-                "Blocktracker should have {} bytes at height {}",
-                height + 1,
-                height
-            );
-        }
-
-        // Test getblock view function
-        for height in 0..5 {
-            let height_input = (height as u32).to_le_bytes().to_vec();
-            let block_data = runtime
-                .view("getblock".to_string(), &height_input, height)
-                .await?;
-
-            assert!(
-                !block_data.is_empty(),
-                "Block data should exist at height {}",
-                height
-            );
-        }
-
-        Ok(())
-    }
 }

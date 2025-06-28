@@ -168,7 +168,9 @@ where
         let start_height = if indexed_height == 0 {
             self.config.start_block
         } else {
-            indexed_height
+            // indexed_height represents the last block that was successfully processed,
+            // so we need to start processing at the next block (indexed_height + 1)
+            indexed_height + 1
         };
 
         // Handle start block state root initialization
@@ -766,8 +768,10 @@ where
     }
 
     async fn metashrew_height(&self) -> SyncResult<u32> {
-        let current_height = self.current_height.load(Ordering::SeqCst);
-        Ok(current_height.saturating_sub(1))
+        // Use storage adapter to get the actual indexed height from database
+        // This ensures consistency with the database state rather than sync engine's internal tracking
+        let storage = self.storage.read().await;
+        storage.get_indexed_height().await
     }
 
     async fn metashrew_getblockhash(&self, height: u32) -> SyncResult<String> {

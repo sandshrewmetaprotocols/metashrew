@@ -888,45 +888,60 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
     /// Handle chain reorganization by rolling back to the specified height
     pub fn handle_reorg(&mut self) -> Result<()> {
-        // Get the current context height and database tip height
         let (context_height, db_tip_height) = {
             let guard = self.context.lock().map_err(lock_err)?;
-            let db_tip = match guard
-                .db
-                .get_immutable(&crate::to_labeled_key(&TIP_HEIGHT_KEY.as_bytes().to_vec()))
-                .map_err(|e| anyhow!("Database error: {:?}", e))?
-            {
-                Some(bytes) => {
-                    if bytes.len() >= 4 {
-                        u32::from_le_bytes(bytes[..4].try_into().unwrap())
-                    } else {
-                        0
-                    }
+            let db_tip = match guard.db.get_immutable(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
+                Ok(Some(bytes)) if bytes.len() >= 4 => {
+                    u32::from_le_bytes(bytes[..4].try_into().unwrap())
                 }
-                None => 0,
+                _ => 0,
             };
             (guard.height, db_tip)
         };
 
-        // If context height is ahead of or equal to db tip, no reorg needed
-        if context_height >= db_tip_height {
-            return Ok(());
+        if context_height > db_tip_height + 1 {
+            return Err(anyhow!(
+                "Block height {} is too far ahead of tip {}",
+                context_height,
+                db_tip_height
+            ));
         }
 
-        // We need to rollback from db_tip_height to context_height
-        log::info!(
-            "Handling reorg: rolling back from height {} to {}",
-            db_tip_height,
-            context_height
-        );
+        if context_height <= db_tip_height {
+            if context_height == 0 {
+                log::warn!("Reorg at height 0 is not a standard rollback.");
+                return Ok(());
+            }
+            let target_height = context_height - 1;
+            log::info!(
+                "Reorg detected: rolling back from {} to {}",
+                db_tip_height,
+                target_height
+            );
 
-        // For now, we'll use a simple approach - just log the reorg
-        // In a full implementation, we would need to:
-        // 1. Identify all keys modified between context_height and db_tip_height
-        // 2. Restore their values to the state at context_height
-        // 3. Update the tip height
+            let mut db = self.context.lock().map_err(lock_err)?.db.clone();
+            let mut smt_helper = SMTHelper::new(db.clone());
+            let mut batch = db.create_batch();
 
-        log::info!("Reorg completed: rolled back to height {}", context_height);
+            // Delete orphaned SMT roots
+            for h in (context_height..=db_tip_height).rev() {
+                let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, h).into_bytes();
+                batch.delete(&root_key);
+            }
+
+            // Rollback state to the target height
+            smt_helper.rollback_to_height_batched(&mut batch, target_height)?;
+
+            // Update the tip height
+            batch.put(
+                &TIP_HEIGHT_KEY.as_bytes().to_vec(),
+                &target_height.to_le_bytes(),
+            );
+
+            db.write(batch)
+                .map_err(|e| anyhow!("Failed to write reorg batch: {}", e))?;
+            log::info!("Reorg to height {} complete", target_height);
+        }
 
         Ok(())
     }
@@ -1659,32 +1674,36 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // During indexing, get the current state using append-only approach
-                            let db = match context_get.clone().lock() {
-                                Ok(ctx) => ctx.db.clone(),
+                            // During indexing, get the state as it was at the *previous* block
+                            // to correctly build upon the previous state, especially during reorgs.
+                            let height = match context_get.clone().lock() {
+                                Ok(ctx) => ctx.height,
                                 Err(_) => {
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
                             };
 
-                            // Use SMTHelper to get current value using append-only approach
-                            let smt_helper = crate::smt::SMTHelper::new(db);
-                            
-                            match smt_helper.get_current(&key_vec) {
-                                Ok(Some(lookup)) => {
-                                    if let Err(_) = mem.write(&mut caller, value as usize, lookup.as_slice()) {
-                                        caller.data_mut().had_failure = true;
-                                    }
-                                }
-                                Ok(None) => {
-                                    // Key not found, return empty
-                                    if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
+                            // The state for the current block (at `height`) depends on the
+                            // state produced by the parent block (at `height - 1`).
+                            // If height is 0, there is no parent, so we read at height 0 (which will be empty).
+                            let target_height = if height > 0 { height - 1 } else { 0 };
+
+                            // Use bst_get_at_height to get the value from the previous canonical state.
+                            // This function correctly traverses the SMT to find the value at a specific height.
+                            match Self::bst_get_at_height(context_get.clone(), &key_vec, target_height) {
+                                Ok(lookup) => {
+                                    if let Err(_) =
+                                        mem.write(&mut caller, value as usize, lookup.as_slice())
+                                    {
                                         caller.data_mut().had_failure = true;
                                     }
                                 }
                                 Err(_) => {
-                                    caller.data_mut().had_failure = true;
+                                    // Key not found, return empty
+                                    if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
+                                        caller.data_mut().had_failure = true;
+                                    }
                                 }
                             }
                         }
@@ -1724,19 +1743,21 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            // During indexing, get the current state using append-only approach
-                            let db = match context_get_len.clone().lock() {
-                                Ok(ctx) => ctx.db.clone(),
+                            // During indexing, get the state as it was at the *previous* block.
+                            let (_db, height) = match context_get_len.clone().lock() {
+                                Ok(ctx) => (ctx.db.clone(), ctx.height),
                                 Err(_) => return i32::MAX,
                             };
 
-                            // Use SMTHelper to get current value using append-only approach
-                            let smt_helper = crate::smt::SMTHelper::new(db);
-                            
-                            match smt_helper.get_current(&key_vec) {
-                                Ok(Some(value)) => value.len() as i32,
-                                Ok(None) => 0,
-                                Err(_) => i32::MAX,
+                            let target_height = if height > 0 { height - 1 } else { 0 };
+
+                            match Self::bst_get_at_height(
+                                context_get_len.clone(),
+                                &key_vec,
+                                target_height,
+                            ) {
+                                Ok(value) => value.len() as i32,
+                                Err(_) => 0,
                             }
                         }
                         Err(_) => i32::MAX,

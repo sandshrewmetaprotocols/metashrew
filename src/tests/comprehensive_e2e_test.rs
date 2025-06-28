@@ -5,46 +5,30 @@
 //! - BST structures and historical queries
 //! - View function correctness at historical points
 
-use super::block_builder::create_test_block;
+use super::{TestConfig, TestUtils};
 use anyhow::Result;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
-use memshrew_runtime::{MemStoreAdapter, MemStoreRuntime};
-use metashrew_support::utils;
-use std::path::PathBuf;
 
 /// Simple comprehensive test that validates BST functionality
 #[tokio::test]
 async fn test_comprehensive_bst_functionality() -> Result<()> {
     // Create runtime with metashrew-minimal WASM
-    let wasm_path = PathBuf::from("./target/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
-    let mem_adapter = MemStoreAdapter::new();
-    let mut runtime = MemStoreRuntime::load(wasm_path, mem_adapter)?;
+    let config = TestConfig::new();
+    let mut runtime = config.create_runtime()?;
 
     // Process 5 blocks
-    let mut blocks = Vec::new();
     let mut prev_hash = BlockHash::all_zeros();
 
     for height in 0..5 {
-        let block = create_test_block(
-            height,
-            prev_hash,
-            format!("test_block_{}", height).as_bytes(),
-        );
+        let block = TestUtils::create_test_block(height, prev_hash);
         prev_hash = block.block_hash();
-        blocks.push(block);
-    }
-
-    // Process each block
-    for (height, block) in blocks.iter().enumerate() {
-        let block_bytes = utils::consensus_encode(block)?;
-
+        let block_bytes = TestUtils::serialize_block(&block);
         {
             let mut context = runtime.context.lock().unwrap();
             context.block = block_bytes;
             context.height = height as u32;
         }
-
         runtime.run()?;
         runtime.refresh_memory()?;
     }
@@ -92,29 +76,21 @@ async fn test_comprehensive_bst_functionality() -> Result<()> {
 /// Test BST historical consistency
 #[tokio::test]
 async fn test_bst_historical_consistency() -> Result<()> {
-    let wasm_path = PathBuf::from("./target/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
-    let mem_adapter = MemStoreAdapter::new();
-    let mut runtime = MemStoreRuntime::load(wasm_path, mem_adapter)?;
+    let config = TestConfig::new();
+    let mut runtime = config.create_runtime()?;
 
     // Process 3 blocks
     let mut prev_hash = BlockHash::all_zeros();
 
     for height in 0..3 {
-        let block = create_test_block(
-            height,
-            prev_hash,
-            format!("consistency_test_{}", height).as_bytes(),
-        );
+        let block = TestUtils::create_test_block(height, prev_hash);
         prev_hash = block.block_hash();
-
-        let block_bytes = utils::consensus_encode(&block)?;
-
+        let block_bytes = TestUtils::serialize_block(&block);
         {
             let mut context = runtime.context.lock().unwrap();
             context.block = block_bytes;
             context.height = height;
         }
-
         runtime.run()?;
         runtime.refresh_memory()?;
     }

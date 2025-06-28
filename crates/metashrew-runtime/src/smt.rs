@@ -393,6 +393,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         batch.put(root_key, new_root.to_vec());
 
+        // Update tip height
+        batch.put(
+            &crate::runtime::TIP_HEIGHT_KEY.as_bytes().to_vec(),
+            &height.to_le_bytes(),
+        );
+
         // Write entire batch at once
         self.storage.write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;

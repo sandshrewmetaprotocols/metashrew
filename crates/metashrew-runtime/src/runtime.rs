@@ -858,8 +858,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
             .context("Failed to get _start function")?;
 
-        // Handle any chain reorganizations before processing the block
-        self.handle_reorg()?;
+        // Note: Chain reorganization detection is now handled at the sync framework level
+        // using proper block hash comparison, not at the runtime level
 
         let execution_result = match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
@@ -887,6 +887,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     }
 
     /// Handle chain reorganization by rolling back to the specified height
+    ///
+    /// **DEPRECATED**: This method is no longer used as reorg detection has been moved
+    /// to the sync framework level where it can properly compare block hashes from the
+    /// Bitcoin node. The sync framework uses proper reorg detection by comparing stored
+    /// block hashes with actual block hashes from bitcoind RPC.
+    ///
+    /// This method is kept for backward compatibility but should not be called.
+    #[deprecated(note = "Reorg detection moved to sync framework level")]
     pub fn handle_reorg(&mut self) -> Result<()> {
         let (context_height, db_tip_height) = {
             let guard = self.context.lock().map_err(lock_err)?;
@@ -907,7 +915,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             ));
         }
 
-        if context_height <= db_tip_height {
+        // Only trigger reorg if context height is strictly less than db tip height
+        // If they're equal, we're reprocessing the same block (normal on restart)
+        if context_height < db_tip_height {
             if context_height == 0 {
                 log::warn!("Reorg at height 0 is not a standard rollback.");
                 return Ok(());
@@ -1888,8 +1898,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             guard.state = 0;
         }
 
-        // Handle any chain reorganizations before processing the block
-        self.handle_reorg()?;
+        // Note: Chain reorganization detection is now handled at the sync framework level
+        // using proper block hash comparison, not at the runtime level
 
         // Execute the WASM module
         let start = self

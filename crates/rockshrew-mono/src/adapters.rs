@@ -121,33 +121,63 @@ impl BitcoinRpcAdapter {
 #[async_trait]
 impl BitcoinNodeAdapter for BitcoinRpcAdapter {
     async fn get_tip_height(&self) -> SyncResult<u32> {
+        debug!("Attempting to get tip height from Bitcoin node");
+        
+        let request_body = serde_json::to_string(&JsonRpcRequest {
+            id: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|e| SyncError::BitcoinNode(format!("Time error: {}", e)))?
+                .as_secs()
+                .try_into()
+                .map_err(|e| {
+                    SyncError::BitcoinNode(format!("Time conversion error: {}", e))
+                })?,
+            jsonrpc: String::from("2.0"),
+            method: String::from("getblockcount"),
+            params: vec![],
+        })
+        .map_err(|e| SyncError::BitcoinNode(format!("JSON serialization error: {}", e)))?;
+        
+        debug!("Sending getblockcount request: {}", request_body);
+        
         let tunneled_response = self
-            .post(
-                serde_json::to_string(&JsonRpcRequest {
-                    id: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|e| SyncError::BitcoinNode(format!("Time error: {}", e)))?
-                        .as_secs()
-                        .try_into()
-                        .map_err(|e| {
-                            SyncError::BitcoinNode(format!("Time conversion error: {}", e))
-                        })?,
-                    jsonrpc: String::from("2.0"),
-                    method: String::from("getblockcount"),
-                    params: vec![],
-                })
-                .map_err(|e| SyncError::BitcoinNode(format!("JSON serialization error: {}", e)))?,
-            )
+            .post(request_body)
             .await
-            .map_err(|e| SyncError::BitcoinNode(format!("RPC request failed: {}", e)))?;
+            .map_err(|e| {
+                error!("Bitcoin RPC request failed: {}", e);
+                SyncError::BitcoinNode(format!("RPC request failed: {}", e))
+            })?;
+
+        debug!("Received response with status: {}", tunneled_response.status());
+        
+        // Check if we got an error status
+        if !tunneled_response.response.status().is_success() {
+            let status = tunneled_response.response.status();
+            error!("Bitcoin RPC returned error status: {}", status);
+            return Err(SyncError::BitcoinNode(format!("HTTP error: {}", status)));
+        }
 
         let result: BlockCountResponse = tunneled_response
             .json()
             .await
-            .map_err(|e| SyncError::BitcoinNode(format!("JSON parsing error: {}", e)))?;
+            .map_err(|e| {
+                error!("Failed to parse Bitcoin RPC response as JSON: {}", e);
+                SyncError::BitcoinNode(format!("JSON parsing error: {}", e))
+            })?;
+            
+        debug!("Parsed response: {:?}", result);
+        
+        if let Some(error) = result.error {
+            error!("Bitcoin RPC returned error: {:?}", error);
+            return Err(SyncError::BitcoinNode(format!("RPC error: {:?}", error)));
+        }
+        
         let count = result.result.ok_or_else(|| {
+            error!("Bitcoin RPC response missing result field");
             SyncError::BitcoinNode("missing result from JSON-RPC response".to_string())
         })?;
+        
+        info!("Successfully got tip height: {}", count);
         Ok(count)
     }
 

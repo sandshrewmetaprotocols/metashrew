@@ -226,7 +226,7 @@ impl error::ResponseError for IndexerError {
 }
 
 // Block count response structure
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[allow(dead_code)]
 pub struct BlockCountResponse {
     pub id: u32,

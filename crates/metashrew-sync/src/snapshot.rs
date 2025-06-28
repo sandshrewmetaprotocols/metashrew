@@ -43,7 +43,7 @@
 //!
 //! ### Creating Snapshots
 //! ```rust
-//! use rockshrew_sync::snapshot::*;
+//! use metashrew_sync::snapshot::*;
 //!
 //! // Configure snapshot creation
 //! let config = SnapshotConfig {
@@ -65,7 +65,7 @@
 //!
 //! ### Consuming Snapshots
 //! ```rust
-//! use rockshrew_sync::snapshot::*;
+//! use metashrew_sync::snapshot::*;
 //!
 //! // Configure repository mode
 //! let config = RepoConfig {
@@ -90,7 +90,7 @@
 //!
 //! ### Serving Snapshots
 //! ```rust
-//! use rockshrew_sync::snapshot::*;
+//! use metashrew_sync::snapshot::*;
 //!
 //! // Create snapshot server
 //! let mut server = MySnapshotServer::new();

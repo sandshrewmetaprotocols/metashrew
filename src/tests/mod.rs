@@ -24,6 +24,9 @@ pub mod block_builder;
 pub mod comprehensive_e2e_test;
 
 #[cfg(test)]
+pub mod in_memory_adapters;
+
+#[cfg(test)]
 pub mod integration_tests;
 
 #[cfg(test)]
@@ -43,6 +46,11 @@ impl TestConfig {
     /// Create a new runtime instance for testing
     pub fn create_runtime(&self) -> Result<MemStoreRuntime> {
         let adapter = MemStoreAdapter::new();
+        MemStoreRuntime::load(self.wasm_path.clone(), adapter)
+    }
+
+    /// Create a new runtime instance from an existing adapter
+    pub fn create_runtime_from_adapter(&self, adapter: MemStoreAdapter) -> Result<MemStoreRuntime> {
         MemStoreRuntime::load(self.wasm_path.clone(), adapter)
     }
 }

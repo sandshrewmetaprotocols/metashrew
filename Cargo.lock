@@ -2578,8 +2578,10 @@ name = "memshrew-runtime"
 version = "9.0.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "log",
  "metashrew-runtime",
+ "rockshrew-sync",
  "tempfile",
 ]
 
@@ -2648,6 +2650,23 @@ dependencies = [
  "protobuf-codegen 3.7.2",
  "protoc-bin-vendored",
  "protoc-rust",
+]
+
+[[package]]
+name = "metashrew-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitcoin 0.32.6",
+ "hex",
+ "log",
+ "num_cpus",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -3642,6 +3661,7 @@ dependencies = [
  "log",
  "memshrew-runtime",
  "metashrew-runtime",
+ "metashrew-sync",
  "num_cpus",
  "rocksdb",
  "serde",

@@ -303,7 +303,7 @@ impl StorageAdapter for RocksDBStorageAdapter {
         }
     }
 
-    async fn set_indexed_height(&self, height: u32) -> SyncResult<()> {
+    async fn set_indexed_height(&mut self, height: u32) -> SyncResult<()> {
         let height_key = b"__INTERNAL/height".to_vec();
         let height_bytes = height.to_le_bytes();
         self.db
@@ -311,7 +311,7 @@ impl StorageAdapter for RocksDBStorageAdapter {
             .map_err(|e| SyncError::Storage(format!("Failed to store height: {}", e)))
     }
 
-    async fn store_block_hash(&self, height: u32, hash: &[u8]) -> SyncResult<()> {
+    async fn store_block_hash(&mut self, height: u32, hash: &[u8]) -> SyncResult<()> {
         // Use the same key format as the constant in main.rs
         let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
         debug!(
@@ -359,7 +359,7 @@ impl StorageAdapter for RocksDBStorageAdapter {
         }
     }
 
-    async fn store_state_root(&self, height: u32, root: &[u8]) -> SyncResult<()> {
+    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
         // Use the generic SMT implementation with RocksDBRuntimeAdapter
         let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
         let mut smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
@@ -383,7 +383,7 @@ impl StorageAdapter for RocksDBStorageAdapter {
         }
     }
 
-    async fn rollback_to_height(&self, height: u32) -> SyncResult<()> {
+    async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         info!("Starting rollback to height {}", height);
 
         // Get the current indexed height

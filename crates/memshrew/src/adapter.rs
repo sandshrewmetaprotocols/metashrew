@@ -202,6 +202,47 @@ impl KeyValueStoreLike for MemStoreAdapter {
         self.deep_copy()
     }
 }
+use rockshrew_sync::{StorageAdapter, StorageStats, SyncResult};
+use async_trait::async_trait;
+
+#[async_trait]
+impl StorageAdapter for MemStoreAdapter {
+    async fn get_indexed_height(&self) -> SyncResult<u32> {
+        Ok(self.get_height())
+    }
+    async fn set_indexed_height(&mut self, height: u32) -> SyncResult<()> {
+        self.set_height(height);
+        Ok(())
+    }
+    async fn store_block_hash(&mut self, height: u32, hash: &[u8]) -> SyncResult<()> {
+        self.put(format!("block_hash_{}", height).as_bytes(), hash).unwrap();
+        Ok(())
+    }
+    async fn get_block_hash(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
+        Ok(self.get_immutable(format!("block_hash_{}", height).as_bytes()).unwrap())
+    }
+    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
+        self.put(format!("state_root_{}", height).as_bytes(), root).unwrap();
+        Ok(())
+    }
+    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
+        Ok(self.get_immutable(format!("state_root_{}", height).as_bytes()).unwrap())
+    }
+    async fn rollback_to_height(&mut self, _height: u32) -> SyncResult<()> {
+        // In-memory rollback is a no-op for this test implementation
+        Ok(())
+    }
+    async fn is_available(&self) -> bool {
+        true
+    }
+    async fn get_stats(&self) -> SyncResult<StorageStats> {
+        Ok(StorageStats {
+            total_entries: self.len(),
+            indexed_height: self.get_height(),
+            storage_size_bytes: Some(0),
+        })
+    }
+}
 
 /// Query height from in-memory store
 pub async fn query_height(adapter: &MemStoreAdapter, start_block: u32) -> anyhow::Result<u32> {

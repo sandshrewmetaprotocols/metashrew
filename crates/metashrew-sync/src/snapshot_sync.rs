@@ -182,7 +182,7 @@ where
 
                 // Update storage
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(best_snapshot.height).await?;
                     storage
                         .store_block_hash(best_snapshot.height, &best_snapshot.block_hash)
@@ -225,7 +225,7 @@ where
 
         // Update storage
         {
-            let storage = self.storage.write().await;
+            let mut storage = self.storage.write().await;
             storage.set_indexed_height(height).await?;
             storage.store_block_hash(height, &block_hash).await?;
             storage.store_state_root(height, &state_root).await?;
@@ -556,7 +556,7 @@ where
                         warn!("Reorg detected at height {}", check_height);
 
                         // Rollback storage
-                        let storage = self.storage.write().await;
+                        let mut storage = self.storage.write().await;
                         storage.rollback_to_height(check_height).await?;
                         drop(storage);
 

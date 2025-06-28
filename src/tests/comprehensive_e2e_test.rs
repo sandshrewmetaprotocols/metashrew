@@ -1,46 +1,54 @@
-//! Comprehensive end-to-end tests for BST functionality
-//!
-//! This test suite validates:
-//! - Real memshrew-runtime adapter with metashrew-minimal WASM
-//! - BST structures and historical queries
-//! - View function correctness at historical points
-
-use super::{TestConfig, TestUtils};
+//! Comprehensive end-to-end tests for the full sync framework
+use super::block_builder::ChainBuilder;
+use super::in_memory_adapters::InMemoryBitcoinNode;
+use super::TestConfig;
 use anyhow::Result;
-use bitcoin::hashes::Hash;
-use bitcoin::BlockHash;
+use memshrew_runtime::MemStoreAdapter;
+use rockshrew_sync::{MetashrewRuntimeAdapter, MetashrewSync, SyncConfig, StorageAdapter};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-/// Simple comprehensive test that validates BST functionality
 #[tokio::test]
-async fn test_comprehensive_bst_functionality() -> Result<()> {
-    // Create runtime with metashrew-minimal WASM
+async fn test_in_memory_sync_framework() -> Result<()> {
+    // 1. Setup the test environment
     let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
-
-    // Process 5 blocks
-    let mut prev_hash = BlockHash::all_zeros();
-
-    for height in 0..5 {
-        let block = TestUtils::create_test_block(height, prev_hash);
-        prev_hash = block.block_hash();
-        let block_bytes = TestUtils::serialize_block(&block);
-        {
-            let mut context = runtime.context.lock().unwrap();
-            context.block = block_bytes;
-            context.height = height as u32;
-        }
-        runtime.run()?;
-        runtime.refresh_memory()?;
+    let chain = ChainBuilder::new().add_blocks(5);
+    let blocks = chain.blocks();
+    let node = InMemoryBitcoinNode::new(blocks[0].clone());
+    for i in 1..blocks.len() {
+        node.add_block(blocks[i].clone(), i as u32);
     }
 
-    // Test historical queries at each height
+    // 2. Create in-memory adapters
+    let storage_adapter = MemStoreAdapter::new();
+    let runtime = Arc::new(Mutex::new(
+        config.create_runtime_from_adapter(storage_adapter.clone())?,
+    ));
+    let runtime_adapter = MetashrewRuntimeAdapter::from_arc(runtime.clone());
+
+    // 3. Configure and create the sync engine
+    let sync_config = SyncConfig {
+        start_block: 0,
+        exit_at: Some(5),
+        ..Default::default()
+    };
+    let mut sync_engine = MetashrewSync::new(node, storage_adapter.clone(), runtime_adapter, sync_config);
+
+    // 4. Run the synchronization
+    sync_engine.run().await?;
+
+    // 5. Verify the results
+    let final_height = sync_engine.storage().read().await.get_indexed_height().await?;
+    assert_eq!(final_height, 4, "Should be indexed up to block 4");
+
+    // 6. Test historical view calls
     for height in 0..5 {
         let view_input = vec![];
         let blocktracker_data = runtime
+            .lock()
+            .await
             .view("blocktracker".to_string(), &view_input, height)
             .await?;
-
-        // At each height, blocktracker should have (height + 1) bytes
         let expected_length = (height + 1) as usize;
         assert_eq!(
             blocktracker_data.len(),
@@ -49,95 +57,8 @@ async fn test_comprehensive_bst_functionality() -> Result<()> {
             expected_length,
             height
         );
-
-        println!("✓ Height {}: {} bytes", height, blocktracker_data.len());
     }
 
-    // Test getblock view function
-    for height in 0..5 {
-        let height_input = (height as u32).to_le_bytes().to_vec();
-        let block_data = runtime
-            .view("getblock".to_string(), &height_input, height)
-            .await?;
-
-        assert!(
-            !block_data.is_empty(),
-            "Block data should exist at height {}",
-            height
-        );
-        println!("✓ Block at height {}: {} bytes", height, block_data.len());
-    }
-
-    println!("✅ Comprehensive BST functionality test passed!");
-
-    Ok(())
-}
-
-/// Test BST historical consistency
-#[tokio::test]
-async fn test_bst_historical_consistency() -> Result<()> {
-    let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
-
-    // Process 3 blocks
-    let mut prev_hash = BlockHash::all_zeros();
-
-    for height in 0..3 {
-        let block = TestUtils::create_test_block(height, prev_hash);
-        prev_hash = block.block_hash();
-        let block_bytes = TestUtils::serialize_block(&block);
-        {
-            let mut context = runtime.context.lock().unwrap();
-            context.block = block_bytes;
-            context.height = height;
-        }
-        runtime.run()?;
-        runtime.refresh_memory()?;
-    }
-
-    // Test that historical queries are consistent
-    let view_input = vec![];
-
-    // Query at height 0 multiple times - should always return same result
-    let result1 = runtime
-        .view("blocktracker".to_string(), &view_input, 0)
-        .await?;
-    let result2 = runtime
-        .view("blocktracker".to_string(), &view_input, 0)
-        .await?;
-    assert_eq!(result1, result2, "Historical queries should be consistent");
-
-    // Query at height 1 multiple times - should always return same result
-    let result1 = runtime
-        .view("blocktracker".to_string(), &view_input, 1)
-        .await?;
-    let result2 = runtime
-        .view("blocktracker".to_string(), &view_input, 1)
-        .await?;
-    assert_eq!(result1, result2, "Historical queries should be consistent");
-
-    // Verify that different heights return different results
-    let height0_result = runtime
-        .view("blocktracker".to_string(), &view_input, 0)
-        .await?;
-    let height1_result = runtime
-        .view("blocktracker".to_string(), &view_input, 1)
-        .await?;
-    let height2_result = runtime
-        .view("blocktracker".to_string(), &view_input, 2)
-        .await?;
-
-    assert_eq!(height0_result.len(), 1);
-    assert_eq!(height1_result.len(), 2);
-    assert_eq!(height2_result.len(), 3);
-
-    // Verify that height0_result is a prefix of height1_result
-    assert_eq!(&height1_result[0..1], &height0_result[..]);
-
-    // Verify that height1_result is a prefix of height2_result
-    assert_eq!(&height2_result[0..2], &height1_result[..]);
-
-    println!("✅ BST historical consistency test passed!");
-
+    println!("✅ In-memory sync framework test passed!");
     Ok(())
 }

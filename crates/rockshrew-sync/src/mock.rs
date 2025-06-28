@@ -172,7 +172,7 @@ impl StorageAdapter for MockStorage {
         Ok(*self.indexed_height.lock().await)
     }
 
-    async fn set_indexed_height(&self, height: u32) -> SyncResult<()> {
+    async fn set_indexed_height(&mut self, height: u32) -> SyncResult<()> {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
         }
@@ -181,7 +181,7 @@ impl StorageAdapter for MockStorage {
         Ok(())
     }
 
-    async fn store_block_hash(&self, height: u32, hash: &[u8]) -> SyncResult<()> {
+    async fn store_block_hash(&mut self, height: u32, hash: &[u8]) -> SyncResult<()> {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
         }
@@ -198,7 +198,7 @@ impl StorageAdapter for MockStorage {
         Ok(hashes.get(&height).cloned())
     }
 
-    async fn store_state_root(&self, height: u32, root: &[u8]) -> SyncResult<()> {
+    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
         }
@@ -215,7 +215,7 @@ impl StorageAdapter for MockStorage {
         Ok(roots.get(&height).cloned())
     }
 
-    async fn rollback_to_height(&self, height: u32) -> SyncResult<()> {
+    async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
         }

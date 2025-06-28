@@ -202,14 +202,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        // This is a placeholder implementation for the generic adapter
-        // The actual implementation should query the SMT state root from storage
-        // For now, return an error to indicate that state root is not available
-        // This prevents false positives in block processing checks
-        Err(SyncError::Runtime(format!(
-            "State root not available for height {} in generic adapter",
-            height
-        )))
+        let runtime = self.runtime.lock().await;
+        runtime
+            .get_state_root(height)
+            .await
+            .map_err(|e| SyncError::Runtime(format!("Failed to get state root for height {}: {}", height, e)))
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {

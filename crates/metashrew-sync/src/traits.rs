@@ -197,22 +197,22 @@ pub trait StorageAdapter: Send + Sync {
     async fn get_indexed_height(&self) -> SyncResult<u32>;
 
     /// Set the current indexed height
-    async fn set_indexed_height(&self, height: u32) -> SyncResult<()>;
+    async fn set_indexed_height(&mut self, height: u32) -> SyncResult<()>;
 
     /// Store a block hash for a given height
-    async fn store_block_hash(&self, height: u32, hash: &[u8]) -> SyncResult<()>;
+    async fn store_block_hash(&mut self, height: u32, hash: &[u8]) -> SyncResult<()>;
 
     /// Get a stored block hash for a given height
     async fn get_block_hash(&self, height: u32) -> SyncResult<Option<Vec<u8>>>;
 
     /// Store a state root for a given height
-    async fn store_state_root(&self, height: u32, root: &[u8]) -> SyncResult<()>;
+    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()>;
 
     /// Get a state root for a given height
     async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>>;
 
     /// Rollback storage to a specific height (remove data after this height)
-    async fn rollback_to_height(&self, height: u32) -> SyncResult<()>;
+    async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()>;
 
     /// Check if storage is available and writable
     async fn is_available(&self) -> bool;

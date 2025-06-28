@@ -31,7 +31,7 @@
 //!
 //! ### Basic Synchronization
 //! ```rust
-//! use rockshrew_sync::*;
+//! use metashrew_sync::*;
 //!
 //! // Create adapters
 //! let node_adapter = MyBitcoinNodeAdapter::new();
@@ -187,7 +187,7 @@ where
                 // This prevents "No state root found for height X" errors
                 let empty_state_root = vec![0u8; 32]; // Empty/genesis state root
 
-                let storage = self.storage.write().await;
+                let mut storage = self.storage.write().await;
                 storage
                     .store_state_root(prev_height, &empty_state_root)
                     .await
@@ -241,7 +241,7 @@ where
 
                 // Update storage with all metadata atomically
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &result.block_hash).await?;
                     storage.store_state_root(height, &result.state_root).await?;
@@ -288,7 +288,7 @@ where
 
                 // Update storage with height, block hash, and state root
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &block_hash).await?;
                     storage.store_state_root(height, &state_root).await?;
@@ -460,7 +460,7 @@ where
 
             // Check exit condition
             if let Some(exit_at) = self.config.exit_at {
-                if height > exit_at {
+                if height >= exit_at {
                     info!("Reached exit height {}", exit_at);
                     break;
                 }
@@ -531,7 +531,7 @@ where
 
                 // Update storage with all metadata atomically
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &result.block_hash).await?;
                     storage.store_state_root(height, &result.state_root).await?;
@@ -569,7 +569,7 @@ where
 
                 // Update storage with height, block hash, and state root
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &block_hash).await?;
                     storage.store_state_root(height, &state_root).await?;
@@ -680,7 +680,7 @@ where
                         warn!("Reorg detected at height {}", check_height);
 
                         // Rollback storage
-                        let storage = self.storage.write().await;
+                        let mut storage = self.storage.write().await;
                         storage.rollback_to_height(check_height).await?;
                         drop(storage);
 

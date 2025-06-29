@@ -110,7 +110,7 @@ where
         let start_height = if indexed_height == 0 {
             self.config.start_block
         } else {
-            indexed_height
+            indexed_height + 1
         };
 
         self.current_height.store(start_height, Ordering::SeqCst);
@@ -182,7 +182,7 @@ where
 
                 // Update storage
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(best_snapshot.height).await?;
                     storage
                         .store_block_hash(best_snapshot.height, &best_snapshot.block_hash)
@@ -210,10 +210,9 @@ where
         block_data: Vec<u8>,
     ) -> SyncResult<()> {
         // Normal block processing
-        {
-            let mut runtime = self.runtime.write().await;
-            runtime.process_block(height, &block_data).await?;
-        }
+        let mut runtime = self.runtime.write().await;
+        runtime.process_block(height, &block_data).await?;
+        drop(runtime);
 
         // Get state root and block hash
         let state_root = {
@@ -225,13 +224,14 @@ where
 
         // Update storage
         {
-            let storage = self.storage.write().await;
+            let mut storage = self.storage.write().await;
             storage.set_indexed_height(height).await?;
             storage.store_block_hash(height, &block_hash).await?;
             storage.store_state_root(height, &state_root).await?;
         }
 
-        // Update metrics
+        // CRITICAL FIX: Only update current_height AFTER all operations succeed
+        // This prevents the height from advancing when there are failures
         self.current_height.store(height + 1, Ordering::SeqCst);
         self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
 
@@ -275,6 +275,30 @@ where
 
         // Main sync loop
         while self.is_running.load(Ordering::SeqCst) {
+            if height > 0 {
+                match crate::sync::handle_reorg(
+                    height,
+                    self.node.clone(),
+                    self.storage.clone(),
+                    self.runtime.clone(),
+                    &self.config,
+                )
+                .await
+                {
+                    Ok(reorg_height) => {
+                        if reorg_height < height {
+                            height = reorg_height;
+                            info!("Reorg handled. Resuming from height {}", height);
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error handling reorg: {}", e);
+                        sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+            }
             // Check exit condition
             if let Some(exit_at) = self.config.exit_at {
                 if height >= exit_at {
@@ -349,6 +373,8 @@ where
                 Err(e) => {
                     error!("Failed to fetch block {}: {}", height, e);
                     sleep(Duration::from_secs(1)).await;
+                    // CRITICAL FIX: Don't advance height on fetch failure
+                    // Continue the loop to retry the same block
                 }
             }
         }
@@ -450,6 +476,49 @@ where
             blocks_synced_from_snapshots: self.blocks_synced_from_snapshots.load(Ordering::SeqCst),
         })
     }
+
+    async fn process_next_block(&mut self) -> SyncResult<Option<u32>> {
+        let mut height = self.current_height.load(Ordering::SeqCst);
+
+        if height == 0 {
+            height = self.initialize().await?;
+        }
+
+        if height > 0 {
+            match crate::sync::handle_reorg(
+                height,
+                self.node.clone(),
+                self.storage.clone(),
+                self.runtime.clone(),
+                &self.config,
+            )
+            .await
+            {
+                Ok(reorg_height) => {
+                    if reorg_height < height {
+                        self.current_height.store(reorg_height, Ordering::SeqCst);
+                        return Ok(Some(reorg_height));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if let Some(exit_at) = self.config.exit_at {
+            if height > exit_at {
+                return Ok(None);
+            }
+        }
+
+        let remote_tip = self.node.get_tip_height().await?;
+        if height > remote_tip {
+            return Ok(None);
+        }
+
+        let block_data = self.node.get_block_data(height).await?;
+        self.process_block_with_snapshots(height, block_data).await?;
+        Ok(Some(height + 1))
+    }
 }
 
 #[async_trait]
@@ -469,7 +538,6 @@ where
         info!("Starting snapshot-enabled Metashrew sync engine");
         self.is_running.store(true, Ordering::SeqCst);
 
-        // Check connectivity
         if !self.node.is_connected().await {
             return Err(SyncError::BitcoinNode("Node is not connected".to_string()));
         }
@@ -486,7 +554,6 @@ where
         }
         drop(runtime);
 
-        // Start the snapshot sync loop
         self.run_snapshot_sync_loop().await?;
 
         Ok(())
@@ -539,45 +606,13 @@ where
         self.process_block_with_snapshots(height, block_data).await
     }
 
-    async fn handle_reorg(&mut self) -> SyncResult<u32> {
-        // Enhanced reorg handling that considers snapshots
-        let current_height = self.current_height.load(Ordering::SeqCst);
+}
 
-        // Check the last few blocks for consistency
-        for check_height in
-            (current_height.saturating_sub(self.config.reorg_check_threshold)..current_height).rev()
-        {
-            let storage = self.storage.read().await;
-            if let Ok(Some(local_hash)) = storage.get_block_hash(check_height).await {
-                drop(storage);
-
-                if let Ok(remote_hash) = self.node.get_block_hash(check_height).await {
-                    if local_hash != remote_hash {
-                        warn!("Reorg detected at height {}", check_height);
-
-                        // Rollback storage
-                        let storage = self.storage.write().await;
-                        storage.rollback_to_height(check_height).await?;
-                        drop(storage);
-
-                        // Update current height
-                        self.current_height
-                            .store(check_height + 1, Ordering::SeqCst);
-
-                        // In repo mode, we might want to check for snapshots after reorg
-                        if matches!(*self.sync_mode.read().await, SyncMode::Repo(_)) {
-                            let mut last_check = self.last_snapshot_check.write().await;
-                            *last_check = None; // Force immediate check
-                        }
-
-                        return Ok(check_height + 1);
-                    }
-                }
-            }
-        }
-
-        Ok(current_height)
-    }
+fn parse_height_string(height_str: &str) -> SyncResult<u32> {
+    let height_part = height_str.split(':').next().unwrap_or(height_str);
+    height_part
+        .parse::<u32>()
+        .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))
 }
 
 #[async_trait]
@@ -599,9 +634,7 @@ where
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height
-                .parse::<u32>()
-                .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
+            parse_height_string(&height)?
         };
 
         let call = ViewCall {
@@ -632,9 +665,7 @@ where
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height
-                .parse::<u32>()
-                .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
+            parse_height_string(&height)?
         };
 
         let call = PreviewCall {
@@ -651,8 +682,10 @@ where
     }
 
     async fn metashrew_height(&self) -> SyncResult<u32> {
-        let current_height = self.current_height.load(Ordering::SeqCst);
-        Ok(current_height.saturating_sub(1))
+        // Use storage adapter to get the actual indexed height from database
+        // This ensures consistency with the database state rather than sync engine's internal tracking
+        let storage = self.storage.read().await;
+        storage.get_indexed_height().await
     }
 
     async fn metashrew_getblockhash(&self, height: u32) -> SyncResult<String> {
@@ -670,9 +703,7 @@ where
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height
-                .parse::<u32>()
-                .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
+            parse_height_string(&height)?
         };
 
         let storage = self.storage.read().await;

@@ -3,8 +3,10 @@
 //! This crate provides comprehensive testing for the Metashrew indexer framework
 //! using the memshrew in-memory adapter and metashrew-minimal WASM module.
 
-pub mod tests;
+pub mod block_builder;
+pub mod test_utils;
+pub mod in_memory_adapters;
+pub use test_utils::*;
 
-// Re-export test utilities for external use
-pub use tests::block_builder::{BlockBuilder, ChainBuilder};
-pub use tests::{TestConfig, TestUtils};
+#[cfg(test)]
+pub mod tests;

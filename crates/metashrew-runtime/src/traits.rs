@@ -217,8 +217,8 @@ pub trait KeyValueStoreLike {
 
     /// Scan all key-value pairs with a given prefix
     ///
-    /// This is essential for range queries and is heavily used by the BST
-    /// implementation for historical state queries. The implementation should
+    /// This is essential for range queries and is heavily used by the append-only
+    /// store for historical state queries. The implementation should
     /// be efficient for the underlying storage system.
     ///
     /// # Arguments
@@ -233,7 +233,7 @@ pub trait KeyValueStoreLike {
     /// # Performance Notes
     ///
     /// This operation can be expensive for large datasets. Implementations should
-    /// optimize for common prefix patterns used by Metashrew (e.g., BST keys).
+    /// optimize for common prefix patterns used by Metashrew.
     fn scan_prefix<K: AsRef<[u8]>>(
         &self,
         prefix: K,

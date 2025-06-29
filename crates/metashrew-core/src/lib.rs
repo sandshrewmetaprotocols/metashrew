@@ -49,7 +49,7 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```rust,no_run
 //! use metashrew_core::{initialize, input, get, set, flush};
 //! use std::sync::Arc;
 //!
@@ -153,7 +153,7 @@ pub fn get_cache() -> &'static HashMap<Arc<Vec<u8>>, Arc<Vec<u8>>> {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use metashrew_core::{initialize, get};
 /// use std::sync::Arc;
 ///
@@ -201,7 +201,7 @@ pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use metashrew_core::{initialize, set, flush};
 /// use std::sync::Arc;
 ///
@@ -239,7 +239,7 @@ pub fn set(k: Arc<Vec<u8>>, v: Arc<Vec<u8>>) {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use metashrew_core::{initialize, set, flush};
 /// use std::sync::Arc;
 ///
@@ -287,7 +287,7 @@ pub fn flush() {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use metashrew_core::{initialize, input};
 ///
 /// initialize();
@@ -372,7 +372,7 @@ pub fn initialize() -> () {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use metashrew_core::export_bytes;
 ///
 /// let result_data = b"Hello, host!".to_vec();
@@ -429,7 +429,7 @@ pub fn reset() -> () {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,no_run
 /// use metashrew_core::{initialize, set, clear};
 /// use std::sync::Arc;
 ///

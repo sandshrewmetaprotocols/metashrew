@@ -18,7 +18,6 @@ pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
 pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
 
 // Re-export helper types
-pub use helpers::{BSTHelper, BSTStatistics};
 pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
 
 // Utility functions that are storage-backend agnostic

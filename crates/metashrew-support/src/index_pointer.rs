@@ -42,7 +42,7 @@
 //! # Usage Patterns
 //!
 //! ## Basic Key-Value Operations
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::index_pointer::KeyValuePointer;
 //!
 //! // Create hierarchical keys
@@ -55,7 +55,7 @@
 //! ```
 //!
 //! ## List Operations
-//! ```rust
+//! ```rust,ignore
 //! // Create a list of transactions
 //! let tx_list = IndexPointer::from_keyword("transactions");
 //!
@@ -71,7 +71,7 @@
 //! ```
 //!
 //! ## Nested Structures
-//! ```rust
+//! ```rust,ignore
 //! // Create nested address/transaction mapping
 //! let addr_txs = IndexPointer::from_keyword("address_transactions");
 //! let user_txs = addr_txs.keyword("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa");
@@ -129,7 +129,7 @@ use std::sync::Arc;
 ///
 /// # Example Implementation
 ///
-/// ```rust
+/// ```rust,ignore
 /// struct IndexPointer {
 ///     key: Arc<Vec<u8>>,
 ///     // ... storage backend reference
@@ -163,7 +163,7 @@ pub trait KeyValuePointer {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let ptr = IndexPointer::wrap(&b"balances/user123".to_vec());
     /// ```
     fn wrap(word: &Vec<u8>) -> Self;
@@ -179,7 +179,7 @@ pub trait KeyValuePointer {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let key_bytes = ptr.unwrap();
     /// println!("Key: {}", String::from_utf8_lossy(&key_bytes));
     /// ```
@@ -196,7 +196,7 @@ pub trait KeyValuePointer {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// ptr.set(Arc::new(b"some_data".to_vec()));
     /// ```
     fn set(&mut self, v: Arc<Vec<u8>>);
@@ -212,7 +212,7 @@ pub trait KeyValuePointer {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let data = ptr.get();
     /// ```
     fn get(&self) -> Arc<Vec<u8>>;

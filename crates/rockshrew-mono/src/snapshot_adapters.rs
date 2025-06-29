@@ -8,19 +8,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use rockshrew_sync::{
+use metashrew_sync::{
     SnapshotClient, SnapshotConsumer, SnapshotData, SnapshotMetadata as GenericMetadata,
     SnapshotProvider, SnapshotServer, SnapshotServerStatus, StorageAdapter, SyncError, SyncResult,
 };
 
-use crate::adapters::RocksDBStorageAdapter;
+use crate::adapters::MetashrewRuntimeAdapter;
 use crate::snapshot::{RepoIndex, SnapshotConfig, SnapshotManager};
+use rockshrew_runtime::RocksDBStorageAdapter;
 
 /// Production snapshot provider using the existing SnapshotManager
 pub struct RockshrewSnapshotProvider {
     manager: Arc<RwLock<SnapshotManager>>,
     storage: Arc<RwLock<RocksDBStorageAdapter>>,
-    runtime_adapter: Option<Arc<RwLock<crate::adapters::MetashrewRuntimeAdapter>>>,
+    runtime_adapter: Option<Arc<RwLock<MetashrewRuntimeAdapter>>>,
 }
 
 impl RockshrewSnapshotProvider {
@@ -36,7 +37,7 @@ impl RockshrewSnapshotProvider {
 
     /// Set the runtime adapter to get tracked changes from
     #[allow(dead_code)]
-    pub fn set_runtime_adapter(&mut self, runtime_adapter: Arc<RwLock<crate::adapters::MetashrewRuntimeAdapter>>) {
+    pub fn set_runtime_adapter(&mut self, runtime_adapter: Arc<RwLock<MetashrewRuntimeAdapter>>) {
         self.runtime_adapter = Some(runtime_adapter);
     }
 

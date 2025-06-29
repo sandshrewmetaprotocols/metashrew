@@ -16,6 +16,6 @@ pub type MemStoreRuntimeContext = MetashrewRuntimeContext<MemStoreAdapter>;
 
 // Re-export other useful types from metashrew-runtime
 pub use metashrew_runtime::{
-    get_label, has_label, set_label, to_labeled_key, wait_timeout, BSTHelper, BSTStatistics,
-    BatchLike, KVTrackerFn, KeyValueStoreLike,
+    get_label, has_label, set_label, to_labeled_key, wait_timeout, BatchLike, KVTrackerFn,
+    KeyValueStoreLike,
 };

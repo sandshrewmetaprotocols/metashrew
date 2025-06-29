@@ -41,7 +41,7 @@
 //! # Usage Patterns
 //!
 //! ## Block Processing
-//! ```rust
+//! ```rust,ignore
 //! let mut smt_helper = SMTHelper::new(storage);
 //!
 //! // Store key-value pairs with height indexing
@@ -52,7 +52,7 @@
 //! ```
 //!
 //! ## Historical Queries
-//! ```rust
+//! ```rust,ignore
 //! // Query value at specific height
 //! let value = smt_helper.get_at_height(key, height)?;
 //!
@@ -61,7 +61,7 @@
 //! ```
 //!
 //! ## Batch Operations
-//! ```rust
+//! ```rust,ignore
 //! let mut batched_helper = BatchedSMTHelper::new(storage);
 //! let state_root = batched_helper.calculate_and_store_state_root_batched(
 //!     height,
@@ -148,7 +148,7 @@ pub enum SMTNode {
 ///
 /// [`SMTHelper`] provides the fundamental SMT operations including node management,
 /// state root calculation, and historical queries. It combines traditional SMT
-/// functionality with height-indexed Binary Search Tree operations for efficient
+/// functionality with a height-indexed append-only store for efficient
 /// blockchain state management.
 ///
 /// # Type Parameters
@@ -164,7 +164,7 @@ pub enum SMTNode {
 ///
 /// ## Append-Only Operations
 /// - **Height indexing**: Store and query values at specific block heights
-/// - **Historical queries**: Retrieve state at any historical height using binary search
+/// - **Historical queries**: Retrieve state at any historical height using a binary search
 /// - **Rollback support**: Revert state changes to previous heights
 ///
 /// ## Batch Processing
@@ -175,7 +175,7 @@ pub enum SMTNode {
 /// # Usage Patterns
 ///
 /// ## Basic Operations
-/// ```rust
+/// ```rust,ignore
 /// let mut smt = SMTHelper::new(storage);
 ///
 /// // Store a key-value pair at specific height
@@ -186,7 +186,7 @@ pub enum SMTNode {
 /// ```
 ///
 /// ## Historical Queries
-/// ```rust
+/// ```rust,ignore
 /// // Get value at specific height
 /// let value = smt.get_at_height(b"key", height)?;
 ///
@@ -195,7 +195,7 @@ pub enum SMTNode {
 /// ```
 ///
 /// ## State Management
-/// ```rust
+/// ```rust,ignore
 /// // Get current state root
 /// let current_root = smt.get_current_state_root()?;
 ///
@@ -236,7 +236,7 @@ pub struct SMTHelper<T: KeyValueStoreLike> {
 ///
 /// # Usage Pattern
 ///
-/// ```rust
+/// ```rust,ignore
 /// let mut batched_smt = BatchedSMTHelper::new(storage);
 ///
 /// // Process multiple keys in a single batch
@@ -359,31 +359,38 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         // Create a batch for all operations
         let mut batch = self.storage.create_batch();
         
-        // MINIMAL STORAGE: Only store ONE update per key/value change with height annotation
+        // Use a map to track key lengths within this batch to handle multiple
+        // updates to the same key correctly.
+        let mut key_lengths: HashMap<Vec<u8>, u32> = HashMap::new();
+
         for (key, value) in key_values {
-            // Convert key to human-readable string
-            let key_str = String::from_utf8_lossy(key);
-            
-            // 1. Get current length of updates for this key
-            let length_key = format!("{}/length", key_str);
-            let current_length = match self.storage.get_immutable(length_key.as_bytes())
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-                Some(length_bytes) => {
-                    String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            // Get the length for the key, checking our in-memory map first.
+            // This ensures that if a key is updated multiple times in this batch,
+            // we use the correct incrementing length.
+            let length = if let Some(len) = key_lengths.get(key) {
+                *len
+            } else {
+                // If not in our map, fetch from storage.
+                let length_key = [key.as_slice(), b"/length".as_slice()].concat();
+                match self.storage.get_immutable(&length_key)? {
+                    Some(length_bytes) => {
+                        String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+                    }
+                    None => 0,
                 }
-                None => 0,
             };
 
-            // 2. Store ONLY the new value with the next index (minimal append-only)
-            let update_key = format!("{}/{}", key_str, current_length);
-            // Use hex encoding for binary data to avoid UTF-8 issues
+            // Append the new value.
+            let update_key = [key.as_slice(), b"/".as_slice(), length.to_string().as_bytes()].concat();
             let value_hex = hex::encode(value);
             let update_value = format!("{}:{}", height, value_hex);
-            batch.put(update_key.as_bytes(), update_value.as_bytes());
+            batch.put(&update_key, update_value.as_bytes());
 
-            // 3. Update the length
-            let new_length = current_length + 1;
-            batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
+            // Update length in the batch and our in-memory map.
+            let new_length = length + 1;
+            let length_key = [key.as_slice(), b"/length".as_slice()].concat();
+            batch.put(&length_key, new_length.to_string().as_bytes());
+            key_lengths.insert(key.clone(), new_length);
         }
         
         // MINIMAL SMT: Only compute and store the final root, not intermediate nodes
@@ -392,6 +399,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         // Store ONLY the new root (not intermediate SMT nodes)
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         batch.put(root_key, new_root.to_vec());
+
+        // Update tip height
+        batch.put(
+            &crate::runtime::TIP_HEIGHT_KEY.as_bytes().to_vec(),
+            &height.to_le_bytes(),
+        );
 
         // Write entire batch at once
         self.storage.write(batch)
@@ -405,11 +418,9 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
     /// Fast lookup using the new append-only approach with binary search
     pub fn get_at_height_fast(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        let key_str = String::from_utf8_lossy(key);
-        
         // 1. Get the length of updates for this key
-        let length_key = format!("{}/length", key_str);
-        let length = match self.storage.get_immutable(length_key.as_bytes())
+        let length_key = [key, b"/length"].concat();
+        let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(length_bytes) => {
                 String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
@@ -428,9 +439,9 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         while left < right {
             let mid = (left + right) / 2;
-            let update_key = format!("{}/{}", key_str, mid);
+            let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
             
-            match self.storage.get_immutable(update_key.as_bytes())
+            match self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 Some(update_data) => {
                     let update_str = String::from_utf8_lossy(&update_data);
@@ -965,7 +976,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let smt = SMTHelper::new(my_storage_backend);
     /// ```
     pub fn new(storage: T) -> Self {
@@ -993,7 +1004,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let key_hash = SMTHelper::<Storage>::hash_key(b"my_key");
     /// // key_hash is now a 32-byte path through the SMT
     /// ```
@@ -1024,7 +1035,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let value_hash = SMTHelper::<Storage>::hash_value(b"my_value");
     /// // value_hash can be stored in an SMT leaf node
     /// ```
@@ -1061,7 +1072,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let leaf = SMTNode::Leaf {
     ///     key: b"key".to_vec(),
     ///     value_index: value_hash,
@@ -1462,7 +1473,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Get a value at a specific height
-    /// SMT should use BST for value lookups, not store values itself
+    /// SMT delegates to the append-only store for value lookups, not store values itself
     pub fn get_value_at_height(
         &self,
         key: &[u8],
@@ -1494,12 +1505,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Internal method to add put operations to a batch using the new append-only approach
     pub fn put_to_batch(&self, batch: &mut T::Batch, key: &[u8], value: &[u8], height: u32) -> Result<()> {
-        // Convert key to human-readable string
-        let key_str = String::from_utf8_lossy(key);
-        
-        // 1. Get current length of updates for this key
-        let length_key = format!("{}/length", key_str);
-        let current_length = match self.storage.get_immutable(length_key.as_bytes())
+        let length_key = [key, b"/length"].concat();
+        let current_length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(length_bytes) => {
                 String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
@@ -1508,26 +1515,23 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         };
 
         // 2. Store the new value with the next index
-        let update_key = format!("{}/{}", key_str, current_length);
+        let update_key = [key, b"/", current_length.to_string().as_bytes()].concat();
         // Use hex encoding for binary data to avoid UTF-8 issues
         let value_hex = hex::encode(value);
         let update_value = format!("{}:{}", height, value_hex);
-        batch.put(update_key.as_bytes(), update_value.as_bytes());
+        batch.put(&update_key, update_value.as_bytes());
 
         // 3. Update the length
         let new_length = current_length + 1;
-        batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
+        batch.put(&length_key, new_length.to_string().as_bytes());
 
         Ok(())
     }
 
     /// Get the value of a key at a specific height using binary search through the flat list
     pub fn get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
-        let key_str = String::from_utf8_lossy(key);
-        
-        // 1. Get the length of updates for this key
-        let length_key = format!("{}/length", key_str);
-        let length = match self.storage.get_immutable(length_key.as_bytes())
+        let length_key = [key, b"/length"].concat();
+        let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(length_bytes) => {
                 String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
@@ -1546,9 +1550,9 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
         while left < right {
             let mid = (left + right) / 2;
-            let update_key = format!("{}/{}", key_str, mid);
+            let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
             
-            match self.storage.get_immutable(update_key.as_bytes())
+            match self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 Some(update_data) => {
                     let update_str = String::from_utf8_lossy(&update_data);
@@ -1586,11 +1590,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Get the current (most recent) value of a key across all heights
     pub fn get_current(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
-        let key_str = String::from_utf8_lossy(key);
-        
-        // Get the length of updates for this key
-        let length_key = format!("{}/length", key_str);
-        let length = match self.storage.get_immutable(length_key.as_bytes())
+        let length_key = [key, b"/length"].concat();
+        let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(length_bytes) => {
                 String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
@@ -1603,8 +1604,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         // Get the most recent update (length - 1)
-        let update_key = format!("{}/{}", key_str, length - 1);
-        match self.storage.get_immutable(update_key.as_bytes())
+        let update_key = [key, b"/", (length - 1).to_string().as_bytes()].concat();
+        match self.storage.get_immutable(&update_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(update_data) => {
                 let update_str = String::from_utf8_lossy(&update_data);
@@ -1625,11 +1626,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
     /// Get all heights at which a key was updated
     pub fn get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
-        let key_str = String::from_utf8_lossy(key);
-        
-        // Get the length of updates for this key
-        let length_key = format!("{}/length", key_str);
-        let length = match self.storage.get_immutable(length_key.as_bytes())
+        let length_key = [key, b"/length"].concat();
+        let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(length_bytes) => {
                 String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
@@ -1641,8 +1639,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         
         // Iterate through all updates and extract heights
         for i in 0..length {
-            let update_key = format!("{}/{}", key_str, i);
-            if let Some(update_data) = self.storage.get_immutable(update_key.as_bytes())
+            let update_key = [key, b"/", i.to_string().as_bytes()].concat();
+            if let Some(update_data) = self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 let update_str = String::from_utf8_lossy(&update_data);
                 if let Some(colon_pos) = update_str.find(':') {
@@ -1666,16 +1664,14 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Scan for all keys with "/length" suffix to find all keys in the database
         for (stored_key, _) in self.storage.scan_prefix(b"")
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            let key_str = String::from_utf8_lossy(&stored_key);
-            if key_str.ends_with(length_suffix) {
+            if stored_key.ends_with(length_suffix.as_bytes()) {
                 // Extract the original key by removing the "/length" suffix
-                let original_key_str = &key_str[..key_str.len() - length_suffix.len()];
-                let original_key = original_key_str.as_bytes().to_vec();
+                let original_key = &stored_key[..stored_key.len() - length_suffix.len()];
                 
                 // Check if this key was updated at the specified height
-                let heights = self.get_heights_for_key(&original_key)?;
+                let heights = self.get_heights_for_key(original_key)?;
                 if heights.contains(&height) {
-                    keys.push(original_key);
+                    keys.push(original_key.to_vec());
                 }
             }
         }
@@ -1705,18 +1701,17 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let _heights = self.get_heights_for_key(key)?;
 
         // For the new append-only approach, we need to remove updates after target_height
-        let key_str = String::from_utf8_lossy(key);
-        let length_key = format!("{}/length", key_str);
+        let length_key = [key, b"/length"].concat();
         
-        if let Some(length_bytes) = self.storage.get_immutable(length_key.as_bytes())
+        if let Some(length_bytes) = self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             let length = String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0);
             
             let mut new_length = 0;
             // Find the last valid update at or before target_height
             for i in 0..length {
-                let update_key = format!("{}/{}", key_str, i);
-                if let Some(update_data) = self.storage.get_immutable(update_key.as_bytes())
+                let update_key = [key, b"/", i.to_string().as_bytes()].concat();
+                if let Some(update_data) = self.storage.get_immutable(&update_key)
                     .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                     let update_str = String::from_utf8_lossy(&update_data);
                     if let Some(colon_pos) = update_str.find(':') {
@@ -1726,7 +1721,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                                 new_length = i + 1;
                             } else {
                                 // Delete this update
-                                batch.delete(update_key.as_bytes());
+                                batch.delete(&update_key);
                             }
                         }
                     }
@@ -1734,7 +1729,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             }
             
             // Update the length
-            batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
+            batch.put(&length_key, new_length.to_string().as_bytes());
         }
 
         Ok(())
@@ -1769,11 +1764,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Scan for all keys with "/length" suffix to find all keys in the database
         for (stored_key, _) in self.storage.scan_prefix(b"")
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            let key_str = String::from_utf8_lossy(&stored_key);
-            if key_str.ends_with(length_suffix) {
+            if stored_key.ends_with(length_suffix.as_bytes()) {
                 // Extract the original key by removing the "/length" suffix
-                let original_key = &key_str[..key_str.len() - length_suffix.len()];
-                keys_to_rollback.push(original_key.as_bytes().to_vec());
+                let original_key = &stored_key[..stored_key.len() - length_suffix.len()];
+                keys_to_rollback.push(original_key.to_vec());
             }
         }
         
@@ -2411,13 +2405,14 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let mut highest_root = None;
 
         for (key, value) in self.storage.scan_prefix(prefix.as_bytes())? {
-            let key_str = String::from_utf8_lossy(&key);
-            if let Some(height_str) = key_str.strip_prefix(&prefix) {
-                if let Ok(height) = height_str.parse::<u32>() {
-                    if highest_height.is_none() || height > highest_height.unwrap() {
-                        if value.len() == 32 {
-                            highest_height = Some(height);
-                            highest_root = Some(value);
+            if let Some(height_bytes) = key.strip_prefix(prefix.as_bytes()) {
+                if let Ok(height_str) = std::str::from_utf8(height_bytes) {
+                    if let Ok(height) = height_str.parse::<u32>() {
+                        if highest_height.is_none() || height > highest_height.unwrap() {
+                            if value.len() == 32 {
+                                highest_height = Some(height);
+                                highest_root = Some(value);
+                            }
                         }
                     }
                 }

@@ -1,9 +1,11 @@
 //! RocksDB-specific implementation of MetashrewRuntime
 
 pub mod adapter;
+pub mod storage_adapter;
 
 // Re-export the adapter and related types
 pub use adapter::{query_height, RocksDBBatch, RocksDBRuntimeAdapter};
+pub use storage_adapter::RocksDBStorageAdapter;
 
 // Re-export core runtime with RocksDB adapter
 pub use metashrew_runtime::{MetashrewRuntime, MetashrewRuntimeContext};
@@ -16,6 +18,6 @@ pub type RocksDBRuntimeContext = MetashrewRuntimeContext<RocksDBRuntimeAdapter>;
 
 // Re-export other useful types from metashrew-runtime
 pub use metashrew_runtime::{
-    get_label, has_label, set_label, to_labeled_key, wait_timeout, BSTHelper, BSTStatistics,
-    BatchLike, KVTrackerFn, KeyValueStoreLike,
+    get_label, has_label, set_label, to_labeled_key, wait_timeout, BatchLike, KVTrackerFn,
+    KeyValueStoreLike,
 };

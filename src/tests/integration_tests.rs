@@ -3,16 +3,16 @@
 //! These tests verify end-to-end functionality including block processing,
 //! view function execution, and data consistency across multiple operations.
 
-use super::block_builder::ChainBuilder;
-use super::TestConfig;
+use crate::block_builder::ChainBuilder;
+use crate::test_utils::TestConfig;
 use anyhow::Result;
 use memshrew_runtime::MemStoreAdapter;
 use metashrew_runtime::smt::SMTHelper;
 use metashrew_support::utils;
 use std::collections::HashMap;
 
-// Helper functions for BST database access
-fn get_blocktracker_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8>> {
+// Helper functions for append-only store access
+fn get_blocktracker(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8>> {
     let smt_helper = SMTHelper::new(adapter.clone());
     let key = b"/blocktracker".to_vec();
     Ok(smt_helper
@@ -20,7 +20,7 @@ fn get_blocktracker_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8
         .unwrap_or_default())
 }
 
-fn get_indexed_block_bst(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
+fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
     let smt_helper = SMTHelper::new(adapter.clone());
     let key = format!("/blocks/{}", height).into_bytes();
     Ok(smt_helper.get_at_height(&key, height)?)
@@ -52,15 +52,15 @@ async fn test_complete_indexing_workflow() -> Result<()> {
     // Verify final state using direct database access
     let adapter = &runtime.context.lock().unwrap().db;
 
-    // Check that all blocks are stored using BST access
+    // Check that all blocks are stored using append-only access
     for height in 0..chain.len() {
-        let stored_block = get_indexed_block_bst(adapter, height as u32)?;
+        let stored_block = get_indexed_block(adapter, height as u32)?;
         assert!(stored_block.is_some(), "Block {} should be stored", height);
     }
 
     // Check blocktracker has correct length (should be number of blocks processed)
     let final_height = (chain.len() - 1) as u32;
-    let blocktracker_result = get_blocktracker_bst(adapter, final_height)?;
+    let blocktracker_result = get_blocktracker(adapter, final_height)?;
     assert_eq!(
         blocktracker_result.len(),
         chain.len(),

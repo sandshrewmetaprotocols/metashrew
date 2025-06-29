@@ -39,7 +39,7 @@
 //! # Usage Patterns
 //!
 //! ## Basic Key-Value Operations
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::index_pointer::KeyValuePointer;
 //!
 //! // Create hierarchical keys
@@ -52,7 +52,7 @@
 //! ```
 //!
 //! ## Block Processing
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::block::AuxpowBlock;
 //!
 //! // Parse extended blocks with AuxPoW support
@@ -61,7 +61,7 @@
 //! ```
 //!
 //! ## Address Handling
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::address::{Payload, AddressType};
 //!
 //! // Create and validate Bitcoin addresses

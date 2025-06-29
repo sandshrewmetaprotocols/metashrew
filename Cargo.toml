@@ -10,7 +10,7 @@ anyhow = "1.0.86"
 log = "0.4.22"
 metashrew-runtime = { path = "crates/metashrew-runtime" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
-rockshrew-sync = { path = "crates/rockshrew-sync" }
+metashrew-sync = { path = "crates/metashrew-sync" }
 memshrew-runtime = { path = "crates/memshrew" }
 
 # Root package for running tests
@@ -33,7 +33,7 @@ metashrew-runtime = { path = "crates/metashrew-runtime" }
 metashrew-support = { path = "crates/metashrew-support" }
 memshrew-runtime = { path = "crates/memshrew" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
-rockshrew-sync = { path = "crates/rockshrew-sync", features = ["test-utils"] }
+metashrew-sync = { path = "crates/metashrew-sync", features = ["test-utils"] }
 rockshrew-mono = { path = "crates/rockshrew-mono" }
 
 # Database dependencies
@@ -53,11 +53,13 @@ hex = "0.4"
 # Test dependencies
 [dev-dependencies]
 tokio-test = "0.4.4"
+env_logger = "0.11.8"
+log = "0.4.27"
+reqwest = { version = "0.12.12", features = ["json"] }
+actix-web = "4.9.0"
+actix-cors = "0.7.0"
 
 # Build dependencies for compiling WASM
 [build-dependencies]
 # No additional build dependencies needed - using cargo directly
 
-[[test]]
-name = "integration"
-path = "src/tests/mod.rs"

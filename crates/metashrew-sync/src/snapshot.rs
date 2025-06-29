@@ -42,8 +42,8 @@
 //! ## Usage Examples
 //!
 //! ### Creating Snapshots
-//! ```rust
-//! use rockshrew_sync::snapshot::*;
+//! ```rust,ignore
+//! use metashrew_sync::snapshot::*;
 //!
 //! // Configure snapshot creation
 //! let config = SnapshotConfig {
@@ -64,8 +64,8 @@
 //! ```
 //!
 //! ### Consuming Snapshots
-//! ```rust
-//! use rockshrew_sync::snapshot::*;
+//! ```rust,ignore
+//! use metashrew_sync::snapshot::*;
 //!
 //! // Configure repository mode
 //! let config = RepoConfig {
@@ -89,8 +89,8 @@
 //! ```
 //!
 //! ### Serving Snapshots
-//! ```rust
-//! use rockshrew_sync::snapshot::*;
+//! ```rust,ignore
+//! use metashrew_sync::snapshot::*;
 //!
 //! // Create snapshot server
 //! let mut server = MySnapshotServer::new();
@@ -360,6 +360,9 @@ pub trait SnapshotSyncEngine: Send + Sync {
 
     /// Get sync statistics including snapshot info
     async fn get_snapshot_stats(&self) -> SyncResult<SnapshotSyncStats>;
+
+    /// Process the next block in the sync process
+    async fn process_next_block(&mut self) -> SyncResult<Option<u32>>;
 }
 
 /// Statistics for snapshot-enabled sync

@@ -848,19 +848,23 @@ impl SnapshotManager {
                 let value = diff_data.diff_data[i..i + value_len].to_vec();
                 i += value_len;
 
-                // Apply to database using optimized BST approach
-                use metashrew_runtime::key_utils::{make_current_key, make_historical_key, make_height_index_key, PREFIXES};
-                // Store current value for O(1) access
-                let current_key = make_current_key(PREFIXES.current_value, &key);
-                db.put(&current_key, &value)?;
-                
-                // Store historical value
-                let historical_key = make_historical_key(PREFIXES.historical_value, &key, interval.end_height);
-                db.put(&historical_key, &value)?;
+                // This section is part of the snapshot restoration logic and should
+                // directly write to the database using the append-only format.
+                let key_str = String::from_utf8_lossy(&key);
+                let length_key = format!("{}/length", key_str);
 
-                // Also store in keys-at-height tracking
-                let keys_at_height_key = make_height_index_key(PREFIXES.keys_at_height, interval.end_height, &key);
-                db.put(&keys_at_height_key, &[0u8; 0])?;
+                // For simplicity in snapshot restoration, we assume we are writing the
+                // definitive state at this point. We'll overwrite the length.
+                // A more sophisticated approach might merge histories, but for now,
+                // this ensures the restored state is clean.
+                let new_length = 1;
+                db.put(length_key.as_bytes(), new_length.to_string().as_bytes())?;
+
+                // Store the single historical value.
+                let update_key = format!("{}/0", key_str);
+                let value_hex = hex::encode(&value);
+                let update_value = format!("{}:{}", interval.end_height, value_hex);
+                db.put(update_key.as_bytes(), update_value.as_bytes())?;
 
                 applied_keys += 1;
             }

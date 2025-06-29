@@ -5,6 +5,7 @@ use metashrew_support::{compat::export_bytes, index_pointer::KeyValuePointer};
 use std::io::Cursor;
 use std::sync::Arc;
 
+#[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub fn _start() {
     let mut input_data = Cursor::new(input());
@@ -22,6 +23,7 @@ pub fn _start() {
     flush();
 }
 
+#[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub extern "C" fn getblock() -> i32 {
     let mut height_bytes = Cursor::new(input());
@@ -32,6 +34,7 @@ pub extern "C" fn getblock() -> i32 {
     export_bytes(block_bytes.clone())
 }
 
+#[cfg(target_arch = "wasm32")]
 #[unsafe(no_mangle)]
 pub fn blocktracker() -> i32 {
     export_bytes(

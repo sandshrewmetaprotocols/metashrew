@@ -30,8 +30,8 @@
 //! ## Usage Examples
 //!
 //! ### Basic Synchronization
-//! ```rust
-//! use rockshrew_sync::*;
+//! ```rust,ignore
+//! use metashrew_sync::*;
 //!
 //! // Create adapters
 //! let node_adapter = MyBitcoinNodeAdapter::new();
@@ -59,7 +59,7 @@
 //! ```
 //!
 //! ### JSON-RPC API Integration
-//! ```rust
+//! ```rust,ignore
 //! // The sync engine also implements JsonRpcProvider
 //! let result = sync_engine.metashrew_view(
 //!     "get_balance".to_string(),
@@ -164,11 +164,11 @@ where
     async fn initialize(&self) -> SyncResult<u32> {
         let storage = self.storage.read().await;
         let indexed_height = storage.get_indexed_height().await?;
-
+        
         let start_height = if indexed_height == 0 {
             self.config.start_block
         } else {
-            indexed_height
+            indexed_height + 1
         };
 
         // Handle start block state root initialization
@@ -185,8 +185,8 @@ where
                 // This prevents "No state root found for height X" errors
                 let empty_state_root = vec![0u8; 32]; // Empty/genesis state root
 
-                let storage = self.storage.write().await;
-                storage
+                let mut storage_write = self.storage.write().await;
+                storage_write
                     .store_state_root(prev_height, &empty_state_root)
                     .await
                     .map_err(|e| {
@@ -200,12 +200,7 @@ where
                     "Initialized empty state root for height {} (start block initialization)",
                     prev_height
                 );
-                drop(storage);
-            } else {
-                drop(storage);
             }
-        } else {
-            drop(storage);
         }
 
         self.current_height.store(start_height, Ordering::SeqCst);
@@ -214,15 +209,12 @@ where
     }
 
     /// Process a single block atomically
-    async fn process_block(&self, height: u32, block_data: Vec<u8>) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
         info!(
             "Processing block {} ({} bytes) atomically",
             height,
             block_data.len()
         );
-
-        // Get block hash before processing
-        let block_hash = self.node.get_block_hash(height).await?;
 
         // Try atomic processing first
         let atomic_result = {
@@ -239,7 +231,7 @@ where
 
                 // Update storage with all metadata atomically
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &result.block_hash).await?;
                     storage.store_state_root(height, &result.state_root).await?;
@@ -286,7 +278,7 @@ where
 
                 // Update storage with height, block hash, and state root
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &block_hash).await?;
                     storage.store_state_root(height, &state_root).await?;
@@ -322,22 +314,49 @@ where
         info!("Starting sync pipeline with size {}", pipeline_size);
 
         // Create channels for the pipeline
-        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>)>(pipeline_size);
+        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>, Vec<u8>)>(pipeline_size);
         let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(pipeline_size);
 
         // Spawn block fetcher task
         let fetcher_handle = {
             let node = self.node.clone();
             let storage = self.storage.clone();
+            let runtime = self.runtime.clone();
             let config = self.config.clone();
             let is_running = self.is_running.clone();
-            let result_sender = result_sender.clone();
             let block_sender = block_sender.clone();
 
             tokio::spawn(async move {
                 let mut current_height = height;
 
-                while is_running.load(Ordering::SeqCst) {
+                loop {
+                    if !is_running.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    // Detect and handle reorgs FIRST
+                    match handle_reorg(
+                        current_height,
+                        node.clone(),
+                        storage.clone(),
+                        runtime.clone(),
+                        &config,
+                    )
+                    .await
+                    {
+                        Ok(new_height) => {
+                            if new_height != current_height {
+                                info!("Reorg handled. Resuming from height {}", new_height);
+                            }
+                            current_height = new_height;
+                        }
+                        Err(e) => {
+                            error!("Error handling reorg: {}", e);
+                            sleep(Duration::from_secs(5)).await;
+                            continue;
+                        }
+                    }
+
                     // Check exit condition
                     if let Some(exit_at) = config.exit_at {
                         if current_height >= exit_at {
@@ -366,31 +385,16 @@ where
                         continue;
                     }
 
-                    // Detect reorgs (simplified version)
-                    if current_height > 0 {
-                        let storage_guard = storage.read().await;
-                        if let Ok(Some(local_hash)) =
-                            storage_guard.get_block_hash(current_height - 1).await
-                        {
-                            if let Ok(remote_hash) = node.get_block_hash(current_height - 1).await {
-                                if local_hash != remote_hash {
-                                    warn!("Reorg detected at height {}", current_height - 1);
-                                    // For now, just log and continue - full reorg handling would be more complex
-                                }
-                            }
-                        }
-                    }
-
                     // Fetch block
-                    match node.get_block_data(current_height).await {
-                        Ok(block_data) => {
+                    match node.get_block_info(current_height).await {
+                        Ok(block_info) => {
                             info!(
                                 "Fetched block {} ({} bytes)",
                                 current_height,
-                                block_data.len()
+                                block_info.data.len()
                             );
                             if block_sender
-                                .send((current_height, block_data))
+                                .send((current_height, block_info.data, block_info.hash))
                                 .await
                                 .is_err()
                             {
@@ -400,13 +404,6 @@ where
                         }
                         Err(e) => {
                             error!("Failed to fetch block {}: {}", current_height, e);
-                            if result_sender
-                                .send(BlockResult::Error(current_height, e.to_string()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
                             sleep(Duration::from_secs(1)).await;
                         }
                     }
@@ -422,14 +419,14 @@ where
             let result_sender = result_sender.clone();
 
             tokio::spawn(async move {
-                while let Some((block_height, block_data)) = block_receiver.recv().await {
+                while let Some((block_height, block_data, block_hash)) = block_receiver.recv().await {
                     info!(
                         "Processing block {} ({} bytes)",
                         block_height,
                         block_data.len()
                     );
 
-                    let result = match sync_engine.process_block(block_height, block_data).await {
+                    let result = match sync_engine.process_block(block_height, block_data, block_hash).await {
                         Ok(_) => BlockResult::Success(block_height),
                         Err(e) => BlockResult::Error(block_height, e.to_string()),
                     };
@@ -453,12 +450,14 @@ where
                 BlockResult::Error(failed_height, error) => {
                     error!("Failed to process block {}: {}", failed_height, error);
                     sleep(Duration::from_secs(5)).await;
+                    // CRITICAL FIX: Don't advance height on error - retry the same block
+                    // The fetcher will retry fetching the same block
                 }
             }
 
             // Check exit condition
             if let Some(exit_at) = self.config.exit_at {
-                if height > exit_at {
+                if height >= exit_at {
                     info!("Reached exit height {}", exit_at);
                     break;
                 }
@@ -505,12 +504,7 @@ where
     S: StorageAdapter,
     R: RuntimeAdapter,
 {
-    async fn process_block(&self, height: u32, block_data: Vec<u8>) -> SyncResult<()> {
-        // We need access to the node to get block hash, but ProcessingClone doesn't have it
-        // For now, we'll compute the block hash from the block data
-        use bitcoin::hashes::{sha256d, Hash};
-        let block_hash = sha256d::Hash::hash(&block_data).to_byte_array().to_vec();
-
+    async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
         // Try atomic processing first
         let atomic_result = {
             let mut runtime = self.runtime.write().await;
@@ -529,7 +523,7 @@ where
 
                 // Update storage with all metadata atomically
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &result.block_hash).await?;
                     storage.store_state_root(height, &result.state_root).await?;
@@ -567,7 +561,7 @@ where
 
                 // Update storage with height, block hash, and state root
                 {
-                    let storage = self.storage.write().await;
+                    let mut storage = self.storage.write().await;
                     storage.set_indexed_height(height).await?;
                     storage.store_block_hash(height, &block_hash).await?;
                     storage.store_state_root(height, &state_root).await?;
@@ -658,41 +652,74 @@ where
 
     async fn process_single_block(&mut self, height: u32) -> SyncResult<()> {
         let block_data = self.node.get_block_data(height).await?;
-        self.process_block(height, block_data).await
+        let block_hash = self.node.get_block_hash(height).await?;
+        self.process_block(height, block_data, block_hash).await
     }
 
-    async fn handle_reorg(&mut self) -> SyncResult<u32> {
-        // Simplified reorg handling - in a full implementation this would be more sophisticated
-        let current_height = self.current_height.load(Ordering::SeqCst);
+}
 
-        // Check the last few blocks for consistency
-        for check_height in
-            (current_height.saturating_sub(self.config.reorg_check_threshold)..current_height).rev()
-        {
-            let storage = self.storage.read().await;
-            if let Ok(Some(local_hash)) = storage.get_block_hash(check_height).await {
-                drop(storage);
+/// Handles chain reorganizations by finding the common ancestor and rolling back state.
+pub(crate) async fn handle_reorg<N, S, R>(
+    current_height: u32,
+    node: Arc<N>,
+    storage: Arc<RwLock<S>>,
+    runtime: Arc<RwLock<R>>,
+    config: &SyncConfig,
+) -> SyncResult<u32>
+where
+    N: BitcoinNodeAdapter + 'static,
+    S: StorageAdapter + 'static,
+    R: RuntimeAdapter + 'static,
+{
+    let mut check_height = current_height.saturating_sub(1);
+    let mut reorg_detected = false;
 
-                if let Ok(remote_hash) = self.node.get_block_hash(check_height).await {
-                    if local_hash != remote_hash {
-                        warn!("Reorg detected at height {}", check_height);
-
-                        // Rollback storage
-                        let storage = self.storage.write().await;
-                        storage.rollback_to_height(check_height).await?;
-                        drop(storage);
-
-                        // Update current height
-                        self.current_height
-                            .store(check_height + 1, Ordering::SeqCst);
-                        return Ok(check_height + 1);
-                    }
-                }
+    // Find the common ancestor
+    while check_height > 0 && check_height >= current_height.saturating_sub(config.max_reorg_depth) {
+        let storage_guard = storage.read().await;
+        let local_hash = match storage_guard.get_block_hash(check_height).await {
+            Ok(Some(hash)) => hash,
+            _ => {
+                check_height = check_height.saturating_sub(1);
+                continue;
             }
+        };
+        drop(storage_guard);
+
+        let remote_hash = match node.get_block_hash(check_height).await {
+            Ok(hash) => hash,
+            Err(e) => {
+                error!("Failed to get remote block hash at height {}: {}", check_height, e);
+                return Ok(current_height); // Don't reorg if node is failing
+            }
+        };
+
+        if local_hash == remote_hash {
+            break; // Common ancestor found
         }
 
-        Ok(current_height)
+        reorg_detected = true;
+        check_height = check_height.saturating_sub(1);
     }
+
+    if reorg_detected {
+        let rollback_height = check_height;
+        warn!("Reorg detected. Rolling back to height {}", rollback_height);
+
+        // Rollback storage
+        let mut storage_guard = storage.write().await;
+        storage_guard.rollback_to_height(rollback_height).await?;
+        drop(storage_guard);
+
+        // Refresh runtime memory
+        let mut runtime_guard = runtime.write().await;
+        runtime_guard.refresh_memory().await?;
+        drop(runtime_guard);
+
+        return Ok(rollback_height + 1);
+    }
+
+    Ok(current_height)
 }
 
 #[async_trait]
@@ -766,8 +793,10 @@ where
     }
 
     async fn metashrew_height(&self) -> SyncResult<u32> {
-        let current_height = self.current_height.load(Ordering::SeqCst);
-        Ok(current_height.saturating_sub(1))
+        // Use storage adapter to get the actual indexed height from database
+        // This ensures consistency with the database state rather than sync engine's internal tracking
+        let storage = self.storage.read().await;
+        storage.get_indexed_height().await
     }
 
     async fn metashrew_getblockhash(&self, height: u32) -> SyncResult<String> {

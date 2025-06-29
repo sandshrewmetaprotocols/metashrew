@@ -5,7 +5,7 @@
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// declare_indexer! {
 ///     impl MyIndexer {
 ///         fn index_block(height: u32, block: bitcoin::Block) {

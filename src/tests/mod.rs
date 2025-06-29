@@ -31,6 +31,7 @@ pub mod integration_tests;
 
 #[cfg(test)]
 pub mod reorg_focused_test;
+pub mod rpc_hang_test;
 
 /// Test configuration and utilities
 pub struct TestConfig {

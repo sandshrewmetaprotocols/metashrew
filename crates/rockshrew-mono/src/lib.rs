@@ -66,7 +66,7 @@ use crate::ssh_tunnel::parse_daemon_rpc_url;
 use metashrew_runtime::{set_label, MetashrewRuntime};
 use metashrew_sync::{
     BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync,
-    SnapshotProvider, StorageAdapter, SyncConfig, SyncEngine, SyncMode,
+    SnapshotProvider, StorageAdapter, SyncConfig, SyncEngine, SyncMode, SnapshotSyncEngine,
 };
 use rockshrew_runtime::{RocksDBRuntimeAdapter, RocksDBStorageAdapter};
 
@@ -139,7 +139,7 @@ where
         "metashrew_view" => {
             let function_name = params[0].as_str().unwrap_or_default().to_string();
             let input_hex = params[1].as_str().unwrap_or_default().to_string();
-            let height = params[2].to_string();
+            let height = params[2].as_str().unwrap_or("latest").to_string();
             state
                 .sync_engine
                 .read()
@@ -151,7 +151,7 @@ where
             let block_hex = params[0].as_str().unwrap_or_default().to_string();
             let function_name = params[1].as_str().unwrap_or_default().to_string();
             let input_hex = params[2].as_str().unwrap_or_default().to_string();
-            let height = params[3].to_string();
+            let height = params[3].as_str().unwrap_or("latest").to_string();
             state
                 .sync_engine
                 .read()
@@ -165,7 +165,7 @@ where
             state.sync_engine.read().await.metashrew_getblockhash(height).await
         }
         "metashrew_stateroot" => {
-            let height = params[0].to_string();
+            let height = params[0].as_str().unwrap_or("latest").to_string();
             state.sync_engine.read().await.metashrew_stateroot(height).await
         }
         "metashrew_snapshot" => state.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
@@ -257,8 +257,16 @@ where
         let sync_engine_clone = sync_engine_arc.clone();
         async move {
             info!("Starting block indexing process...");
-            if let Err(e) = sync_engine_clone.write().await.start().await {
-                error!("Indexer error: {}", e);
+            loop {
+                let mut engine = sync_engine_clone.write().await;
+                match engine.process_next_block().await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+                    Err(e) => {
+                        error!("Indexer error: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
             }
         }
     });

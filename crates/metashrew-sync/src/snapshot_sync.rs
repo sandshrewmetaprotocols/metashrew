@@ -210,10 +210,9 @@ where
         block_data: Vec<u8>,
     ) -> SyncResult<()> {
         // Normal block processing
-        {
-            let mut runtime = self.runtime.write().await;
-            runtime.process_block(height, &block_data).await?;
-        }
+        let mut runtime = self.runtime.write().await;
+        runtime.process_block(height, &block_data).await?;
+        drop(runtime);
 
         // Get state root and block hash
         let state_root = {
@@ -474,6 +473,49 @@ where
             blocks_synced_from_snapshots: self.blocks_synced_from_snapshots.load(Ordering::SeqCst),
         })
     }
+
+    async fn process_next_block(&mut self) -> SyncResult<Option<u32>> {
+        let mut height = self.current_height.load(Ordering::SeqCst);
+
+        if height == 0 {
+            height = self.initialize().await?;
+        }
+
+        if height > 0 {
+            match crate::sync::handle_reorg(
+                height,
+                self.node.clone(),
+                self.storage.clone(),
+                self.runtime.clone(),
+                &self.config,
+            )
+            .await
+            {
+                Ok(reorg_height) => {
+                    if reorg_height < height {
+                        self.current_height.store(reorg_height, Ordering::SeqCst);
+                        return Ok(Some(reorg_height));
+                    }
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+
+        if let Some(exit_at) = self.config.exit_at {
+            if height > exit_at {
+                return Ok(None);
+            }
+        }
+
+        let remote_tip = self.node.get_tip_height().await?;
+        if height > remote_tip {
+            return Ok(None);
+        }
+
+        let block_data = self.node.get_block_data(height).await?;
+        self.process_block_with_snapshots(height, block_data).await?;
+        Ok(Some(height + 1))
+    }
 }
 
 #[async_trait]
@@ -493,7 +535,6 @@ where
         info!("Starting snapshot-enabled Metashrew sync engine");
         self.is_running.store(true, Ordering::SeqCst);
 
-        // Check connectivity
         if !self.node.is_connected().await {
             return Err(SyncError::BitcoinNode("Node is not connected".to_string()));
         }
@@ -510,7 +551,6 @@ where
         }
         drop(runtime);
 
-        // Start the snapshot sync loop
         self.run_snapshot_sync_loop().await?;
 
         Ok(())
@@ -565,6 +605,13 @@ where
 
 }
 
+fn parse_height_string(height_str: &str) -> SyncResult<u32> {
+    let height_part = height_str.split(':').next().unwrap_or(height_str);
+    height_part
+        .parse::<u32>()
+        .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))
+}
+
 #[async_trait]
 impl<N, S, R> JsonRpcProvider for SnapshotMetashrewSync<N, S, R>
 where
@@ -584,9 +631,7 @@ where
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height
-                .parse::<u32>()
-                .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
+            parse_height_string(&height)?
         };
 
         let call = ViewCall {
@@ -617,9 +662,7 @@ where
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height
-                .parse::<u32>()
-                .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
+            parse_height_string(&height)?
         };
 
         let call = PreviewCall {
@@ -657,9 +700,7 @@ where
         let height = if height == "latest" {
             self.current_height.load(Ordering::SeqCst).saturating_sub(1)
         } else {
-            height
-                .parse::<u32>()
-                .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
+            parse_height_string(&height)?
         };
 
         let storage = self.storage.read().await;

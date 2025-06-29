@@ -360,6 +360,9 @@ pub trait SnapshotSyncEngine: Send + Sync {
 
     /// Get sync statistics including snapshot info
     async fn get_snapshot_stats(&self) -> SyncResult<SnapshotSyncStats>;
+
+    /// Process the next block in the sync process
+    async fn process_next_block(&mut self) -> SyncResult<Option<u32>>;
 }
 
 /// Statistics for snapshot-enabled sync

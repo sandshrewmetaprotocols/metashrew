@@ -2680,6 +2680,8 @@ dependencies = [
 name = "metashrew-tests"
 version = "9.0.0"
 dependencies = [
+ "actix-cors",
+ "actix-web",
  "anyhow",
  "async-trait",
  "bitcoin 0.32.6",
@@ -2691,6 +2693,7 @@ dependencies = [
  "metashrew-runtime",
  "metashrew-support",
  "metashrew-sync",
+ "reqwest",
  "rocksdb",
  "rockshrew-mono",
  "rockshrew-runtime",

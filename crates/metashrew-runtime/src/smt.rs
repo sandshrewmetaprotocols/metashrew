@@ -359,31 +359,62 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         // Create a batch for all operations
         let mut batch = self.storage.create_batch();
         
-        // MINIMAL STORAGE: Only store ONE update per key/value change with height annotation
+        // This logic handles historical insertions by reading all updates for a key,
+        // inserting the new one, sorting by height, and rewriting the update list.
+        // This ensures that the binary search in `get_at_height` works correctly.
+        // NOTE: This can be inefficient for keys with very long update histories.
         for (key, value) in key_values {
-            // Convert key to human-readable string
             let key_str = String::from_utf8_lossy(key);
-            
-            // 1. Get current length of updates for this key
             let length_key = format!("{}/length", key_str);
-            let current_length = match self.storage.get_immutable(length_key.as_bytes())
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+
+            // 1. Read all existing updates for the key into a HashMap to handle duplicates.
+            let mut updates = HashMap::new();
+            let current_length = match self.storage.get_immutable(length_key.as_bytes())? {
                 Some(length_bytes) => {
-                    String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+                    let len = String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0);
+                    for i in 0..len {
+                        let update_key = format!("{}/{}", key_str, i);
+                        if let Some(update_data) = self.storage.get_immutable(update_key.as_bytes())? {
+                            let update_str = String::from_utf8_lossy(&update_data);
+                            if let Some(colon_pos) = update_str.find(':') {
+                                let height_str = &update_str[..colon_pos];
+                                if let Ok(h) = height_str.parse::<u32>() {
+                                    let value_hex = &update_str[colon_pos + 1..];
+                                    updates.insert(h, value_hex.to_string());
+                                }
+                            }
+                        }
+                    }
+                    len
                 }
                 None => 0,
             };
 
-            // 2. Store ONLY the new value with the next index (minimal append-only)
-            let update_key = format!("{}/{}", key_str, current_length);
-            // Use hex encoding for binary data to avoid UTF-8 issues
-            let value_hex = hex::encode(value);
-            let update_value = format!("{}:{}", height, value_hex);
-            batch.put(update_key.as_bytes(), update_value.as_bytes());
+            // 2. Add/overwrite the new update for the current height.
+            updates.insert(height, hex::encode(value));
 
-            // 3. Update the length
-            let new_length = current_length + 1;
+            // 3. Sort updates by height.
+            let mut sorted_updates: Vec<_> = updates.into_iter().collect();
+            sorted_updates.sort_by_key(|k| k.0);
+
+            // 4. Write back all updates with new indices.
+            for (i, (h, v_hex)) in sorted_updates.iter().enumerate() {
+                let update_key = format!("{}/{}", key_str, i);
+                let update_value = format!("{}:{}", h, v_hex);
+                batch.put(update_key.as_bytes(), update_value.as_bytes());
+            }
+
+            // 5. Update the length.
+            let new_length = sorted_updates.len() as u32;
             batch.put(length_key.as_bytes(), new_length.to_string().as_bytes());
+
+            // 6. Clean up any dangling old updates if the list shrank (e.g., due to duplicate heights).
+            if new_length < current_length {
+                for i in new_length..current_length {
+                    let update_key = format!("{}/{}", key_str, i);
+                    batch.delete(update_key.as_bytes());
+                }
+            }
         }
         
         // MINIMAL SMT: Only compute and store the final root, not intermediate nodes

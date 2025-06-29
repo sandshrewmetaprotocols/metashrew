@@ -170,6 +170,12 @@ async fn test_comprehensive_e2e() -> Result<()> {
     );
     info!("Block 10 from the new chain is present.");
 
+    // Verify that the state from the final block (10) is present
+    let final_block_data = get_indexed_block(&final_db_adapter, 10)?.unwrap();
+    let final_block_from_chain = reorg_chain.get_block(10).unwrap();
+    let final_block_from_chain_bytes = metashrew_support::utils::consensus_encode(final_block_from_chain)?;
+    assert_eq!(final_block_data, final_block_from_chain_bytes, "Data for block 10 should match the new chain");
+
     // To truly verify the reorg, we need to check the HASH of block 6.
     // The old block 6 should be gone, and the new one should be there.
     let old_chain_block_6_hash = initial_chain.get_block(6).unwrap().block_hash();

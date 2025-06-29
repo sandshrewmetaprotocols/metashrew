@@ -423,7 +423,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///     my_storage_backend
     /// )?;
     /// ```
-    pub fn load(indexer: PathBuf, store: T) -> Result<Self> {
+    pub fn load(indexer: PathBuf, mut store: T) -> Result<Self> {
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -449,10 +449,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .context("Failed to load WASM module")?;
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
+        let tip_height = match store.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
+            Ok(Some(bytes)) if bytes.len() >= 4 => {
+                u32::from_le_bytes(bytes[..4].try_into().unwrap())
+            }
+            _ => 0,
+        };
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
         >::new(
-            MetashrewRuntimeContext::new(store, 0, vec![]),
+            MetashrewRuntimeContext::new(store, tip_height, vec![]),
         ));
         {
             wasmstore.limiter(|state| &mut state.limits)
@@ -897,8 +903,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     #[deprecated(note = "Reorg detection moved to sync framework level")]
     pub fn handle_reorg(&mut self) -> Result<()> {
         let (context_height, db_tip_height) = {
-            let guard = self.context.lock().map_err(lock_err)?;
-            let db_tip = match guard.db.get_immutable(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
+            let mut guard = self.context.lock().map_err(lock_err)?;
+            let db_tip = match guard.db.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
                 Ok(Some(bytes)) if bytes.len() >= 4 => {
                     u32::from_le_bytes(bytes[..4].try_into().unwrap())
                 }

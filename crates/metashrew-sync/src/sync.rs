@@ -413,6 +413,8 @@ where
                                 break;
                             }
                             sleep(Duration::from_secs(1)).await;
+                            // CRITICAL FIX: Don't advance height on fetch failure
+                            // The result handler will retry the same block
                         }
                     }
                 }
@@ -458,6 +460,8 @@ where
                 BlockResult::Error(failed_height, error) => {
                     error!("Failed to process block {}: {}", failed_height, error);
                     sleep(Duration::from_secs(5)).await;
+                    // CRITICAL FIX: Don't advance height on error - retry the same block
+                    // The fetcher will retry fetching the same block
                 }
             }
 

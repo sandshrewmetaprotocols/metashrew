@@ -260,11 +260,23 @@ where
             loop {
                 let mut engine = sync_engine_clone.write().await;
                 match engine.process_next_block().await {
-                    Ok(Some(_)) => continue,
-                    Ok(None) => tokio::time::sleep(std::time::Duration::from_secs(1)).await,
+                    Ok(Some(_)) => {
+                        // Successfully processed a block, continue immediately
+                        continue;
+                    }
+                    Ok(None) => {
+                        // No more blocks to process, wait for new blocks
+                        drop(engine); // Release the lock before sleeping
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
                     Err(e) => {
+                        // CRITICAL FIX: Don't advance to next block on error!
+                        // The process_next_block() method internally manages height,
+                        // but on error we need to retry the SAME block, not skip it.
                         error!("Indexer error: {}", e);
+                        drop(engine); // Release the lock before sleeping
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        // Continue the loop to retry the same block
                     }
                 }
             }

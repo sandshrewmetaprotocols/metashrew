@@ -39,7 +39,7 @@ pub struct BlockCountResponse {
     pub error: Option<Value>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 #[allow(dead_code)]
 pub struct BlockHashResponse {
     pub id: u32,

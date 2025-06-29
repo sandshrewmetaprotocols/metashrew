@@ -230,7 +230,8 @@ where
             storage.store_state_root(height, &state_root).await?;
         }
 
-        // Update metrics
+        // CRITICAL FIX: Only update current_height AFTER all operations succeed
+        // This prevents the height from advancing when there are failures
         self.current_height.store(height + 1, Ordering::SeqCst);
         self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
 
@@ -300,7 +301,7 @@ where
             }
             // Check exit condition
             if let Some(exit_at) = self.config.exit_at {
-                if height > exit_at {
+                if height >= exit_at {
                     info!("Reached exit height {}", exit_at);
                     break;
                 }
@@ -372,6 +373,8 @@ where
                 Err(e) => {
                     error!("Failed to fetch block {}: {}", height, e);
                     sleep(Duration::from_secs(1)).await;
+                    // CRITICAL FIX: Don't advance height on fetch failure
+                    // Continue the loop to retry the same block
                 }
             }
         }

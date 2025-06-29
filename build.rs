@@ -6,7 +6,9 @@ fn main() {
     println!("cargo:rerun-if-changed=crates/metashrew-minimal/src");
     println!("cargo:rerun-if-changed=crates/metashrew-minimal/Cargo.toml");
 
-    let source_wasm = Path::new("target/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    let workspace_root = Path::new(&manifest_dir);
+    let source_wasm = workspace_root.join("target/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
 
     // Check if we're running tests or in a build context that might cause deadlock
     let is_testing = env::var("CARGO_CFG_TEST").is_ok()

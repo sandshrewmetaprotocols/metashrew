@@ -346,8 +346,6 @@ pub trait SyncEngine: Send + Sync {
     /// Process a single block (for testing)
     async fn process_single_block(&mut self, height: u32) -> SyncResult<()>;
 
-    /// Detect and handle chain reorganizations
-    async fn handle_reorg(&mut self) -> SyncResult<u32>;
 }
 
 /// Sync engine status

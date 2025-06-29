@@ -45,16 +45,10 @@ impl MockBitcoinNode {
 
     pub fn simulate_reorg(&self, from_height: u32, new_blocks: Vec<(u32, Vec<u8>, Vec<u8>)>) {
         let mut blocks = self.blocks.write().unwrap();
-
-        // Remove blocks from the reorg point
         blocks.retain(|&height, _| height < from_height);
-
-        // Add new blocks
         for (height, hash, data) in new_blocks {
             blocks.insert(height, BlockInfo { height, hash, data });
         }
-
-        // Update tip
         if let Some(&max_height) = blocks.keys().max() {
             let mut tip = self.tip_height.write().unwrap();
             *tip = max_height;
@@ -75,7 +69,6 @@ impl BitcoinNodeAdapter for MockBitcoinNode {
         if !*self.connected.read().unwrap() {
             return Err(SyncError::BitcoinNode("Node not connected".to_string()));
         }
-
         let blocks = self.blocks.read().unwrap();
         match blocks.get(&height) {
             Some(block) => Ok(block.hash.clone()),
@@ -90,7 +83,6 @@ impl BitcoinNodeAdapter for MockBitcoinNode {
         if !*self.connected.read().unwrap() {
             return Err(SyncError::BitcoinNode("Node not connected".to_string()));
         }
-
         let blocks = self.blocks.read().unwrap();
         match blocks.get(&height) {
             Some(block) => Ok(block.data.clone()),
@@ -105,7 +97,6 @@ impl BitcoinNodeAdapter for MockBitcoinNode {
         if !*self.connected.read().unwrap() {
             return Err(SyncError::BitcoinNode("Node not connected".to_string()));
         }
-
         let blocks = self.blocks.read().unwrap();
         match blocks.get(&height) {
             Some(block) => Ok(block.clone()),
@@ -120,10 +111,8 @@ impl BitcoinNodeAdapter for MockBitcoinNode {
         if !*self.connected.read().unwrap() {
             return Err(SyncError::BitcoinNode("Node not connected".to_string()));
         }
-
         let tip_height = *self.tip_height.read().unwrap();
         let blocks = self.blocks.read().unwrap();
-
         match blocks.get(&tip_height) {
             Some(block) => Ok(ChainTip {
                 height: tip_height,
@@ -219,22 +208,16 @@ impl StorageAdapter for MockStorage {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
         }
-
-        // Remove data after the target height
         {
             let mut hashes = self.block_hashes.lock().await;
             hashes.retain(|&h, _| h <= height);
         }
-
         {
             let mut roots = self.state_roots.lock().await;
             roots.retain(|&h, _| h <= height);
         }
-
-        // Update indexed height
         let mut indexed = self.indexed_height.lock().await;
         *indexed = height;
-
         Ok(())
     }
 
@@ -246,16 +229,14 @@ impl StorageAdapter for MockStorage {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
         }
-
         let indexed_height = *self.indexed_height.lock().await;
         let hashes = self.block_hashes.lock().await;
         let roots = self.state_roots.lock().await;
         let total_entries = hashes.len() + roots.len();
-
         Ok(StorageStats {
             total_entries,
             indexed_height,
-            storage_size_bytes: Some((total_entries * 64) as u64), // Rough estimate
+            storage_size_bytes: Some((total_entries * 64) as u64),
         })
     }
 }
@@ -273,7 +254,7 @@ impl MockRuntime {
         Self {
             blocks_processed: Arc::new(Mutex::new(0)),
             ready: Arc::new(RwLock::new(true)),
-            memory_usage: Arc::new(Mutex::new(1024 * 1024)), // 1MB default
+            memory_usage: Arc::new(Mutex::new(1024 * 1024)),
         }
     }
 
@@ -293,17 +274,11 @@ impl RuntimeAdapter for MockRuntime {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
-
-        // Simulate processing
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Update stats
         let mut processed = self.blocks_processed.lock().await;
         *processed += 1;
-
         let mut memory = self.memory_usage.lock().await;
         *memory += block_data.len();
-
         log::debug!(
             "Mock runtime processed block {} ({} bytes)",
             height,
@@ -321,18 +296,11 @@ impl RuntimeAdapter for MockRuntime {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
-
-        // Simulate atomic processing
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Update stats
         let mut processed = self.blocks_processed.lock().await;
         *processed += 1;
-
         let mut memory = self.memory_usage.lock().await;
         *memory += block_data.len();
-
-        // Generate mock state root based on height
         let mut state_root = vec![0u8; 32];
         let height_bytes = height.to_le_bytes();
         for i in 0..8 {
@@ -341,16 +309,12 @@ impl RuntimeAdapter for MockRuntime {
             state_root[i + 16] = height_bytes[i % 4];
             state_root[i + 24] = height_bytes[i % 4];
         }
-
-        // Generate mock batch data (empty for now)
         let batch_data = Vec::new();
-
         log::debug!(
             "Mock runtime processed block {} atomically ({} bytes)",
             height,
             block_data.len()
         );
-
         Ok(AtomicBlockResult {
             state_root,
             batch_data,
@@ -363,12 +327,9 @@ impl RuntimeAdapter for MockRuntime {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
-
-        // Mock view function - just return the input data with some transformation
         let mut result_data = call.input_data;
         result_data.extend_from_slice(&call.height.to_le_bytes());
         result_data.extend_from_slice(call.function_name.as_bytes());
-
         Ok(ViewResult { data: result_data })
     }
 
@@ -376,13 +337,10 @@ impl RuntimeAdapter for MockRuntime {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
-
-        // Mock preview function - combine block data, input data, and metadata
         let mut result_data = call.block_data;
         result_data.extend_from_slice(&call.input_data);
         result_data.extend_from_slice(&call.height.to_le_bytes());
         result_data.extend_from_slice(call.function_name.as_bytes());
-
         Ok(ViewResult { data: result_data })
     }
 
@@ -390,8 +348,6 @@ impl RuntimeAdapter for MockRuntime {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
-
-        // Mock state root - generate a deterministic 32-byte hash based on height
         let mut state_root = vec![0u8; 32];
         let height_bytes = height.to_le_bytes();
         for i in 0..8 {
@@ -400,7 +356,6 @@ impl RuntimeAdapter for MockRuntime {
             state_root[i + 16] = height_bytes[i % 4];
             state_root[i + 24] = height_bytes[i % 4];
         }
-
         Ok(state_root)
     }
 
@@ -408,11 +363,8 @@ impl RuntimeAdapter for MockRuntime {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
-
-        // Reset memory usage
         let mut memory = self.memory_usage.lock().await;
-        *memory = 1024 * 1024; // Reset to 1MB
-
+        *memory = 1024 * 1024;
         log::debug!("Mock runtime memory refreshed");
         Ok(())
     }
@@ -425,10 +377,8 @@ impl RuntimeAdapter for MockRuntime {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
-
         let memory_usage = *self.memory_usage.lock().await;
         let blocks_processed = *self.blocks_processed.lock().await;
-
         Ok(RuntimeStats {
             memory_usage_bytes: memory_usage,
             blocks_processed,

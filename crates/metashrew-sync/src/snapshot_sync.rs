@@ -110,7 +110,7 @@ where
         let start_height = if indexed_height == 0 {
             self.config.start_block
         } else {
-            indexed_height
+            indexed_height + 1
         };
 
         self.current_height.store(start_height, Ordering::SeqCst);
@@ -275,9 +275,33 @@ where
 
         // Main sync loop
         while self.is_running.load(Ordering::SeqCst) {
+            if height > 0 {
+                match crate::sync::handle_reorg(
+                    height,
+                    self.node.clone(),
+                    self.storage.clone(),
+                    self.runtime.clone(),
+                    &self.config,
+                )
+                .await
+                {
+                    Ok(reorg_height) => {
+                        if reorg_height < height {
+                            height = reorg_height;
+                            info!("Reorg handled. Resuming from height {}", height);
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error handling reorg: {}", e);
+                        sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
+                }
+            }
             // Check exit condition
             if let Some(exit_at) = self.config.exit_at {
-                if height >= exit_at {
+                if height > exit_at {
                     info!("Reached exit height {}", exit_at);
                     break;
                 }
@@ -539,45 +563,6 @@ where
         self.process_block_with_snapshots(height, block_data).await
     }
 
-    async fn handle_reorg(&mut self) -> SyncResult<u32> {
-        // Enhanced reorg handling that considers snapshots
-        let current_height = self.current_height.load(Ordering::SeqCst);
-
-        // Check the last few blocks for consistency
-        for check_height in
-            (current_height.saturating_sub(self.config.reorg_check_threshold)..current_height).rev()
-        {
-            let storage = self.storage.read().await;
-            if let Ok(Some(local_hash)) = storage.get_block_hash(check_height).await {
-                drop(storage);
-
-                if let Ok(remote_hash) = self.node.get_block_hash(check_height).await {
-                    if local_hash != remote_hash {
-                        warn!("Reorg detected at height {}", check_height);
-
-                        // Rollback storage
-                        let mut storage = self.storage.write().await;
-                        storage.rollback_to_height(check_height).await?;
-                        drop(storage);
-
-                        // Update current height
-                        self.current_height
-                            .store(check_height + 1, Ordering::SeqCst);
-
-                        // In repo mode, we might want to check for snapshots after reorg
-                        if matches!(*self.sync_mode.read().await, SyncMode::Repo(_)) {
-                            let mut last_check = self.last_snapshot_check.write().await;
-                            *last_check = None; // Force immediate check
-                        }
-
-                        return Ok(check_height + 1);
-                    }
-                }
-            }
-        }
-
-        Ok(current_height)
-    }
 }
 
 #[async_trait]

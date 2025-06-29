@@ -1,9 +1,11 @@
 //! RocksDB-specific implementation of MetashrewRuntime
 
 pub mod adapter;
+pub mod storage_adapter;
 
 // Re-export the adapter and related types
 pub use adapter::{query_height, RocksDBBatch, RocksDBRuntimeAdapter};
+pub use storage_adapter::RocksDBStorageAdapter;
 
 // Re-export core runtime with RocksDB adapter
 pub use metashrew_runtime::{MetashrewRuntime, MetashrewRuntimeContext};

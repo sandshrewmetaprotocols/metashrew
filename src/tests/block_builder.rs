@@ -49,6 +49,12 @@ impl BlockBuilder {
         self
     }
 
+    /// Set the nonce
+    pub fn nonce(mut self, nonce: u32) -> Self {
+        self.nonce = nonce;
+        self
+    }
+
     /// Add a transaction to the block
     pub fn add_transaction(mut self, tx: Transaction) -> Self {
         self.transactions.push(tx);
@@ -111,14 +117,10 @@ impl BlockBuilder {
             transactions.push(coinbase_tx);
         }
 
-        // Calculate merkle root (simplified for testing)
-        let merkle_root = if transactions.len() == 1 {
-            transactions[0].compute_txid()
-        } else {
-            // For multiple transactions, we'd normally compute the merkle tree
-            // For testing, we'll use a simple hash
-            Txid::all_zeros()
-        };
+        // Calculate merkle root
+        let txids: Vec<Txid> = transactions.iter().map(|tx| tx.compute_txid()).collect();
+        let merkle_root = bitcoin::merkle_tree::calculate_root(txids.into_iter())
+            .unwrap_or_else(|| Txid::all_zeros());
 
         let header = BlockHeader {
             version: bitcoin::blockdata::block::Version::ONE,
@@ -137,10 +139,12 @@ impl BlockBuilder {
 }
 
 /// A chain builder for creating sequences of test blocks
+#[derive(Clone)]
 pub struct ChainBuilder {
     blocks: VecDeque<Block>,
     current_height: u32,
     current_hash: BlockHash,
+    salt: u32,
 }
 
 impl ChainBuilder {
@@ -159,6 +163,7 @@ impl ChainBuilder {
             blocks,
             current_height: 0,
             current_hash: genesis_hash,
+            salt: 0,
         }
     }
 
@@ -168,6 +173,8 @@ impl ChainBuilder {
         let block = BlockBuilder::new()
             .height(next_height)
             .prev_hash(self.current_hash)
+            .timestamp(1231006505 + (next_height * 600) + self.salt)
+            .nonce(2083236893 + next_height + self.salt)
             .build();
 
         self.current_hash = block.block_hash();
@@ -223,6 +230,20 @@ impl ChainBuilder {
     /// Get a specific block by height
     pub fn get_block(&self, height: u32) -> Option<&Block> {
         self.blocks.get(height as usize)
+    }
+
+    /// Fork the chain at a specific height
+    pub fn fork(mut self, height: u32) -> Self {
+        self.blocks.truncate(height as usize + 1);
+        self.current_height = height;
+        self.current_hash = self.blocks[height as usize].block_hash();
+        self
+    }
+
+    /// Set a salt to differentiate chains
+    pub fn with_salt(mut self, salt: u32) -> Self {
+        self.salt = salt;
+        self
     }
 }
 

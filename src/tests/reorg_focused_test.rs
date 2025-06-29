@@ -6,7 +6,7 @@
 
 use super::{TestConfig, TestUtils};
 use anyhow::Result;
-use bitcoin::{blockdata::script::ScriptBuf, hashes::Hash, BlockHash};
+use bitcoin::{hashes::Hash, BlockHash};
 
 /// Test to validate correct state rollback during a chain reorganization.
 #[tokio::test]

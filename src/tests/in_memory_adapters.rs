@@ -1,9 +1,8 @@
 //! In-memory adapters for comprehensive e2e testing
-use anyhow::Result;
 use async_trait::async_trait;
-use bitcoin::{Block, BlockHash, hashes::Hash};
-use rockshrew_sync::{
-    BitcoinNodeAdapter, BlockInfo, ChainTip, StorageAdapter, StorageStats, SyncError, SyncResult,
+use bitcoin::{Block, hashes::Hash};
+use metashrew_sync::{
+    BitcoinNodeAdapter, BlockInfo, ChainTip, SyncError, SyncResult,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};

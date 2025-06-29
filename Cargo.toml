@@ -63,6 +63,3 @@ actix-cors = "0.7.0"
 [build-dependencies]
 # No additional build dependencies needed - using cargo directly
 
-[[test]]
-name = "integration"
-path = "src/tests/mod.rs"

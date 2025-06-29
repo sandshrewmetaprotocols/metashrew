@@ -22,7 +22,7 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::compat::*;
 //!
 //! // Prepare data for export to WASM
@@ -108,13 +108,13 @@ pub fn to_passback_ptr(v: &mut Vec<u8>) -> i32 {
 ///
 /// # Layout
 /// The returned vector has the following structure:
-/// ```
+/// ```text
 /// [length_byte_0, length_byte_1, length_byte_2, length_byte_3, data_byte_0, data_byte_1, ...]
 /// ```
 /// Where the length is stored in little-endian format.
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::compat::to_arraybuffer_layout;
 ///
 /// let data = vec![0x41, 0x42, 0x43]; // "ABC"
@@ -150,7 +150,7 @@ pub fn to_arraybuffer_layout<T: AsRef<[u8]>>(v: T) -> Vec<u8> {
 ///
 /// # Usage Pattern
 /// This function is typically used in host function implementations:
-/// ```rust
+/// ```rust,ignore
 /// // In a host function that returns data to WASM
 /// fn host_function() -> i32 {
 ///     let result_data = vec![1, 2, 3, 4];

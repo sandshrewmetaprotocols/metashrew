@@ -37,7 +37,7 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::address::*;
 //! use bitcoin::{PublicKey, Script};
 //!

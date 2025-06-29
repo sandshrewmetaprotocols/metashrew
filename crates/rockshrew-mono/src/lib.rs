@@ -66,7 +66,7 @@ use crate::ssh_tunnel::parse_daemon_rpc_url;
 use metashrew_runtime::{set_label, MetashrewRuntime};
 use metashrew_sync::{
     BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync,
-    SnapshotProvider, StorageAdapter, SyncConfig, SyncEngine, SyncMode, SnapshotSyncEngine,
+    SnapshotProvider, StorageAdapter, SyncConfig, SyncMode, SnapshotSyncEngine,
 };
 use rockshrew_runtime::{RocksDBRuntimeAdapter, RocksDBStorageAdapter};
 

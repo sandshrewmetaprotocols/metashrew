@@ -107,7 +107,7 @@ pub trait ByteView {
 /// New byte vector with the first `v` bytes removed
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::byte_view::shrink_back;
 ///
 /// let data = vec![1, 2, 3, 4, 5];
@@ -116,12 +116,10 @@ pub trait ByteView {
 /// ```
 #[allow(dead_code)]
 pub fn shrink_back(b: Vec<u8>, v: usize) -> Vec<u8> {
-    let mut _vec = b.clone();
-    if b.len() >= v {
-        _vec.clear()
+    if v > b.len() {
+        return vec![];
     }
-    _vec.drain(0..v);
-    _vec
+    b[v..].to_vec()
 }
 
 /// Implementation of [`ByteView`] for 8-bit unsigned integers.

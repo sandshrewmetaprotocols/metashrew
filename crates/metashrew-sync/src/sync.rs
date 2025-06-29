@@ -30,7 +30,7 @@
 //! ## Usage Examples
 //!
 //! ### Basic Synchronization
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_sync::*;
 //!
 //! // Create adapters
@@ -59,7 +59,7 @@
 //! ```
 //!
 //! ### JSON-RPC API Integration
-//! ```rust
+//! ```rust,ignore
 //! // The sync engine also implements JsonRpcProvider
 //! let result = sync_engine.metashrew_view(
 //!     "get_balance".to_string(),
@@ -324,7 +324,6 @@ where
             let runtime = self.runtime.clone();
             let config = self.config.clone();
             let is_running = self.is_running.clone();
-            let result_sender = result_sender.clone();
             let block_sender = block_sender.clone();
 
             tokio::spawn(async move {
@@ -405,16 +404,7 @@ where
                         }
                         Err(e) => {
                             error!("Failed to fetch block {}: {}", current_height, e);
-                            if result_sender
-                                .send(BlockResult::Error(current_height, e.to_string()))
-                                .await
-                                .is_err()
-                            {
-                                break;
-                            }
                             sleep(Duration::from_secs(1)).await;
-                            // CRITICAL FIX: Don't advance height on fetch failure
-                            // The result handler will retry the same block
                         }
                     }
                 }

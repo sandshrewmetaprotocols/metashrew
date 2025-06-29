@@ -6,8 +6,8 @@
 //! - View function execution via mocked JSON-RPC
 //! - Data consistency and snapshotting
 
-use super::block_builder::ChainBuilder;
-use super::TestConfig;
+use crate::block_builder::ChainBuilder;
+use crate::TestConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use bitcoin::hashes::Hash;

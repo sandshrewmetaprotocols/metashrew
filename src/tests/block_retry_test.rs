@@ -3,8 +3,8 @@
 //! This test verifies that failed blocks are properly retried instead of skipped,
 //! ensuring that all blocks are eventually indexed even with intermittent failures.
 
-use super::block_builder::ChainBuilder;
-use super::TestConfig;
+use crate::block_builder::ChainBuilder;
+use crate::TestConfig;
 use anyhow::Result;
 use async_trait::async_trait;
 use bitcoin::hashes::Hash;
@@ -13,10 +13,9 @@ use log::{info, warn};
 use memshrew_runtime::MemStoreAdapter;
 use metashrew_runtime::smt::SMTHelper;
 use metashrew_sync::{
-    adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip, StorageAdapter,
+    adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip,
     SyncConfig, SyncEngine, SyncResult,
 };
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -68,21 +67,21 @@ impl BitcoinNodeAdapter for RetryingMockNode {
     }
 
     async fn get_block_data(&self, height: u32) -> SyncResult<Vec<u8>> {
-        // Simulate failure for the first few attempts
-        if self.should_fail(height).await {
-            return Err(metashrew_sync::SyncError::BitcoinNode(
-                format!("Simulated temporary failure for block {}", height)
-            ));
-        }
-
         let chain = self.chain.lock().await;
         let block = chain.get_block(height).unwrap();
         Ok(metashrew_support::utils::consensus_encode(block)?)
     }
 
     async fn get_block_info(&self, height: u32) -> SyncResult<BlockInfo> {
+        if self.should_fail(height).await {
+            return Err(metashrew_sync::SyncError::BitcoinNode(
+                format!("Simulated temporary failure for block {}", height)
+            ));
+        }
         let hash = self.get_block_hash(height).await?;
-        let data = self.get_block_data(height).await?;
+        let chain = self.chain.lock().await;
+        let block = chain.get_block(height).unwrap();
+        let data = metashrew_support::utils::consensus_encode(block)?;
         Ok(BlockInfo {
             height,
             hash,

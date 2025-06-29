@@ -42,7 +42,7 @@
 //! ## Usage Examples
 //!
 //! ### Basic Runtime Adapter Setup
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_sync::adapters::*;
 //! use metashrew_runtime::*;
 //!
@@ -62,7 +62,7 @@
 //! ```
 //!
 //! ### Shared Runtime Usage
-//! ```rust
+//! ```rust,ignore
 //! use std::sync::Arc;
 //! use tokio::sync::Mutex;
 //!

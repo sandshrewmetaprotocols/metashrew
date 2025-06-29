@@ -4,7 +4,7 @@
 //! It ensures that when a fork occurs, the indexer correctly rolls back the state
 //! of the old chain and applies the state of the new, longer chain.
 
-use super::{TestConfig, TestUtils};
+use crate::{TestConfig, TestUtils};
 use anyhow::Result;
 use bitcoin::{hashes::Hash, BlockHash};
 

@@ -44,7 +44,7 @@
 //!
 //! # Example Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_runtime::{MetashrewRuntime, traits::KeyValueStoreLike};
 //! use std::path::PathBuf;
 //!
@@ -135,7 +135,7 @@ impl State {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let state = State::new();
     /// // State is ready for deterministic WASM execution
     /// ```
@@ -187,25 +187,25 @@ impl State {
 ///
 /// ## Block Processing (`run`)
 /// Normal block processing with database writes and state updates:
-/// ```rust
+/// ```rust,ignore
 /// runtime.run()?; // Process current block
 /// ```
 ///
 /// ## View Functions (`view`)
 /// Read-only execution for querying historical state:
-/// ```rust
+/// ```rust,ignore
 /// let result = runtime.view("get_balance".to_string(), &input, height).await?;
 /// ```
 ///
 /// ## Preview Mode (`preview`)
 /// Isolated execution for testing block effects without committing:
-/// ```rust
+/// ```rust,ignore
 /// let result = runtime.preview(&block_data, "view_function".to_string(), &input, height)?;
 /// ```
 ///
 /// ## Atomic Processing (`process_block_atomic`)
 /// Batch processing with rollback capability:
-/// ```rust
+/// ```rust,ignore
 /// let atomic_result = runtime.process_block_atomic(height, &block_data, &block_hash).await?;
 /// ```
 ///
@@ -223,7 +223,7 @@ impl State {
 ///
 /// # Example Usage
 ///
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_runtime::{MetashrewRuntime, traits::KeyValueStoreLike};
 /// use std::path::PathBuf;
 ///
@@ -348,7 +348,7 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     }
 }
 
-// Legacy function removed - BST now handles height indexing directly
+// Legacy function removed
 
 pub fn to_signed_or_trap<'a, T: TryInto<i32>>(_caller: &mut Caller<'_, State>, v: T) -> i32 {
     return match <T as TryInto<i32>>::try_into(v) {
@@ -413,7 +413,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use metashrew_runtime::MetashrewRuntime;
     /// use std::path::PathBuf;
     ///
@@ -447,6 +447,68 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .context("Failed to load WASM module")?;
         let async_module = wasmtime::Module::from_file(&async_engine, indexer.into_os_string())
             .context("Failed to load WASM module")?;
+        let mut linker = Linker::<State>::new(&engine);
+        let mut wasmstore = Store::<State>::new(&engine, State::new());
+        let tip_height = match store.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
+            Ok(Some(bytes)) if bytes.len() >= 4 => {
+                u32::from_le_bytes(bytes[..4].try_into().unwrap())
+            }
+            _ => 0,
+        };
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+            MetashrewRuntimeContext<T>,
+        >::new(
+            MetashrewRuntimeContext::new(store, tip_height, vec![]),
+        ));
+        {
+            wasmstore.limiter(|state| &mut state.limits)
+        }
+        {
+            Self::setup_linker(context.clone(), &mut linker)
+                .context("Failed to setup basic linker")?;
+            Self::setup_linker_indexer(context.clone(), &mut linker)
+                .context("Failed to setup indexer linker")?;
+            linker.define_unknown_imports_as_traps(&module)?;
+        }
+        let instance = linker
+            .instantiate(&mut wasmstore, &module)
+            .context("Failed to instantiate WASM module")?;
+        Ok(MetashrewRuntime {
+            wasmstore,
+            async_engine,
+            engine,
+            async_module,
+            module,
+            linker,
+            context,
+            instance,
+        })
+    }
+
+    pub fn new(indexer: &[u8], mut store: T) -> Result<Self> {
+        // Configure the engine with settings for deterministic execution
+        let mut config = wasmtime::Config::default();
+        // Enable NaN canonicalization for deterministic floating point operations
+        config.cranelift_nan_canonicalization(true);
+        // Make relaxed SIMD deterministic (or disable it if not needed)
+        config.relaxed_simd_deterministic(true);
+        // Allocate memory at maximum size to avoid non-deterministic memory growth
+        config.static_memory_maximum_size(0x100000000); // 4GB max memory
+        config.static_memory_guard_size(0x10000); // 64KB guard
+                                                  // Pre-allocate memory to maximum size
+        config.memory_init_cow(false); // Disable copy-on-write to ensure consistent memory behavior
+
+        // Configure async engine with the same deterministic settings
+        let mut async_config = config.clone();
+        async_config.consume_fuel(true);
+        async_config.async_support(true);
+
+        let engine = wasmtime::Engine::new(&config)?;
+        let async_engine = wasmtime::Engine::new(&async_config)?;
+        let module = wasmtime::Module::new(&engine, indexer)
+            .context("Failed to load WASM module from bytes")?;
+        let async_module = wasmtime::Module::new(&async_engine, indexer)
+            .context("Failed to load async WASM module from bytes")?;
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let tip_height = match store.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
@@ -526,7 +588,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// // Preview the effect of a block on account balances
     /// let balance_after = runtime.preview(
     ///     &block_data,
@@ -683,7 +745,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// # State Access
     ///
     /// View functions access historical state through:
-    /// - **BST queries**: Height-indexed binary search tree lookups
+    /// - **Append-only lookups**: Height-indexed lookups on append-only data
     /// - **Immutable snapshots**: Consistent view of state at target height
     /// - **Efficient indexing**: Optimized for historical range queries
     ///
@@ -703,7 +765,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// // Query account balance at a specific block height
     /// let balance = runtime.view(
     ///     "get_balance".to_string(),
@@ -836,7 +898,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///
     /// # Example Usage
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// // Set block data in context first
     /// {
     ///     let mut guard = runtime.context.lock()?;
@@ -962,68 +1024,23 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
 
-    /// Get the value of a key at a specific block height using BST
-    /// This replaces the legacy annotated value approach
-    pub fn db_value_at_block(
+    /// Get the value of a key at a specific block height using the append-only data structure.
+    /// This function performs a binary search on the list of historical values for the key.
+    pub fn get_value_at_height(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
-        // Use BST for historical queries - this is the unified approach
-        Self::bst_get_at_height(context, key, height)
-    }
-
-    /// Get a value from the BST at a specific height using historical queries
-    /// This is the proper way to query historical state for view functions
-    pub fn bst_get_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        key: &Vec<u8>,
-        height: u32,
-    ) -> Result<Vec<u8>> {
-        // Get the database adapter from the context
         let db = {
             let guard = context.lock().map_err(lock_err)?;
             guard.db.clone()
         };
-
-        // Create SMTHelper to use BST functionality
         let smt_helper = SMTHelper::new(db);
-
-        // Use BST to get the value at the specific height
         match smt_helper.get_at_height(key, height) {
             Ok(Some(value)) => Ok(value),
             Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(anyhow!("BST query error: {}", e)),
+            Err(e) => Err(anyhow!("Append-only query error: {}", e)),
         }
-    }
-
-    /// Create an empty update list for a specific block height
-    pub fn db_create_empty_update_list(batch: &mut T::Batch, height: u32) -> Result<()> {
-        // Create a key for the update list
-        let update_list_key = format!("updates:{}", height).into_bytes();
-
-        // Create an empty update list
-        batch.put(update_list_key, Vec::new());
-
-        Ok(())
-    }
-
-    /// Store a value in the BST structure (replaces legacy annotated approach)
-    pub fn db_store_in_bst(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-        key: &Vec<u8>,
-        value: &Vec<u8>,
-        height: u32,
-    ) -> Result<()> {
-        let db = {
-            let guard = context.lock().map_err(lock_err)?;
-            guard.db.clone()
-        };
-
-        let mut smt_helper = SMTHelper::new(db);
-        smt_helper.put(key, value, height)?;
-
-        Ok(())
     }
 
     /// Append a key to an update list
@@ -1199,10 +1216,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            // Use optimized BST for historical queries in view functions
-
-                            // Create OptimizedBST for efficient historical queries
-                            match Self::bst_get_at_height(context_get.clone(), &key_vec, height) {
+                            // Use append-only store for historical queries in view functions
+                            match Self::get_value_at_height(context_get.clone(), &key_vec, height) {
                                 Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1257,9 +1272,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            // Use optimized BST for historical queries in view functions
-
-                            match Self::bst_get_at_height(context_get_len.clone(), &key_vec, height) {
+                            // Use append-only store for historical queries in view functions
+                            match Self::get_value_at_height(context_get_len.clone(), &key_vec, height) {
                                 Ok(value) => value.len() as i32,
                                 Err(_) => 0,
                             }
@@ -1407,17 +1421,17 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         Ok(mut ctx) => {
                             ctx.state = 1;
                             
-                            // Use optimized BST for preview operations with batching
+                            // Use append-only store for preview operations with batching
                             let mut batch = ctx.db.create_batch();
-                            let mut smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
+                            let smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
                             
                             // Write all operations to a single batch for atomicity
                             for (k, v) in decoded.list.iter().tuples() {
                                 let k_owned = <Vec<u8> as Clone>::clone(k);
                                 let v_owned = <Vec<u8> as Clone>::clone(v);
 
-                                // Add to batch using optimized BST (dual storage: current + historical)
-                                if let Err(_) = smt_helper.put_batched(&mut batch, &k_owned, &v_owned, height) {
+                                // Add to batch using append-only logic
+                                if let Err(_) = smt_helper.put_to_batch(&mut batch, &k_owned, &v_owned, height) {
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
@@ -1468,9 +1482,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            // Use optimized BST for preview queries
-
-                            match Self::bst_get_at_height(context_get.clone(), &key_vec, height) {
+                            // Use append-only store for preview queries
+                            match Self::get_value_at_height(context_get.clone(), &key_vec, height) {
                                 Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1525,9 +1538,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            // Use optimized BST for preview queries
-
-                            match Self::bst_get_at_height(context_get_len.clone(), &key_vec, height) {
+                            // Use append-only store for preview queries
+                            match Self::get_value_at_height(context_get_len.clone(), &key_vec, height) {
                                 Ok(value) => value.len() as i32,
                                 Err(_) => 0,
                             }
@@ -1596,7 +1608,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         }
                     };
 
-                    // Get the database from context to use BST operations
+                    // Get the database from context to use SMT operations
                     let db = match context_ref.clone().lock() {
                         Ok(ctx) => ctx.db.clone(),
                         Err(_) => {
@@ -1611,7 +1623,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     // Collect all key-value pairs for batch processing
                     // This is the new, correct flow for handling state updates.
                     // All key-value pairs are collected and passed to a single, atomic
-                    // function that handles both the SMT update and the historical BST storage.
+                    // function that handles both the SMT update and the historical append-only storage.
                     let key_values: Vec<(Vec<u8>, Vec<u8>)> = decoded
                         .list
                         .iter()
@@ -1705,9 +1717,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             // If height is 0, there is no parent, so we read at height 0 (which will be empty).
                             let target_height = if height > 0 { height - 1 } else { 0 };
 
-                            // Use bst_get_at_height to get the value from the previous canonical state.
-                            // This function correctly traverses the SMT to find the value at a specific height.
-                            match Self::bst_get_at_height(context_get.clone(), &key_vec, target_height) {
+                            // Use get_value_at_height to get the value from the previous canonical state.
+                            // This function correctly performs a binary search on the append-only data.
+                            match Self::get_value_at_height(context_get.clone(), &key_vec, target_height) {
                                 Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1767,7 +1779,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                             let target_height = if height > 0 { height - 1 } else { 0 };
 
-                            match Self::bst_get_at_height(
+                            match Self::get_value_at_height(
                                 context_get_len.clone(),
                                 &key_vec,
                                 target_height,

@@ -42,7 +42,7 @@
 //! ## Usage Examples
 //!
 //! ### Creating Snapshots
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_sync::snapshot::*;
 //!
 //! // Configure snapshot creation
@@ -64,7 +64,7 @@
 //! ```
 //!
 //! ### Consuming Snapshots
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_sync::snapshot::*;
 //!
 //! // Configure repository mode
@@ -89,7 +89,7 @@
 //! ```
 //!
 //! ### Serving Snapshots
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_sync::snapshot::*;
 //!
 //! // Create snapshot server

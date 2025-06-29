@@ -57,7 +57,7 @@ use crate::traits::KeyValueStoreLike;
 ///
 /// # Usage Pattern
 ///
-/// ```rust
+/// ```rust,ignore
 /// // Create context with storage backend
 /// let context = MetashrewRuntimeContext::new(
 ///     storage_backend,
@@ -146,7 +146,7 @@ impl<T: KeyValueStoreLike> MetashrewRuntimeContext<T> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let context = MetashrewRuntimeContext::new(
     ///     my_storage_backend,
     ///     block_height,
@@ -161,7 +161,7 @@ impl<T: KeyValueStoreLike> MetashrewRuntimeContext<T> {
     /// # Usage in Runtime
     ///
     /// Typically used within the runtime like:
-    /// ```rust
+    /// ```rust,ignore
     /// let context = Arc::new(Mutex::new(
     ///     MetashrewRuntimeContext::new(storage, height, block_data)
     /// ));

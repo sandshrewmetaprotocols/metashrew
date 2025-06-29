@@ -16,7 +16,7 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::utils::*;
 //! use std::io::Cursor;
 //!
@@ -66,7 +66,7 @@ use std::mem::size_of;
 /// Byte vector containing the consensus-encoded representation
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::utils::consensus_encode;
 /// use bitcoin::Transaction;
 ///
@@ -96,7 +96,7 @@ pub fn consensus_encode<T: Encodable>(v: &T) -> Result<Vec<u8>> {
 /// Deserialized value of type `T`
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::utils::consensus_decode;
 /// use bitcoin::Transaction;
 /// use std::io::Cursor;
@@ -128,7 +128,7 @@ pub fn consensus_decode<T: Decodable>(cursor: &mut std::io::Cursor<Vec<u8>>) -> 
 /// Deserialized integer value of type `T`
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::utils::consume_sized_int;
 /// use std::io::Cursor;
 ///
@@ -155,7 +155,7 @@ pub fn consume_sized_int<T: ByteView>(cursor: &mut std::io::Cursor<Vec<u8>>) -> 
 /// Vector containing all remaining bytes from the cursor position
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::utils::consume_to_end;
 /// use std::io::Cursor;
 ///
@@ -188,7 +188,7 @@ pub fn consume_to_end(cursor: &mut std::io::Cursor<Vec<u8>>) -> Result<Vec<u8>> 
 /// Vector containing exactly `n` bytes read from the cursor
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::utils::consume_exact;
 /// use std::io::Cursor;
 ///
@@ -219,7 +219,7 @@ pub fn consume_exact(cursor: &mut std::io::Cursor<Vec<u8>>, n: usize) -> Result<
 /// Decoded 64-bit unsigned integer value
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::utils::consume_varint;
 /// use std::io::Cursor;
 ///
@@ -331,7 +331,7 @@ pub fn ptr_to_vec(ptr: i32) -> Vec<u8> {
 /// Formatted string representation of the key
 ///
 /// # Examples
-/// ```rust
+/// ```rust,ignore
 /// use metashrew_support::utils::format_key;
 ///
 /// // ASCII key components

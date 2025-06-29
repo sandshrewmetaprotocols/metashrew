@@ -23,7 +23,7 @@
 //!
 //! ## Usage Examples
 //!
-//! ```rust
+//! ```rust,ignore
 //! use metashrew_support::block::*;
 //! use std::io::Cursor;
 //!

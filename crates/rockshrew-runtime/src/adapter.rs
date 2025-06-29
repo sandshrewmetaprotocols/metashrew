@@ -61,6 +61,15 @@ impl RocksDBRuntimeAdapter {
         })
     }
 
+    /// Open RocksDB with optimized configuration for metashrew workloads
+    ///
+    /// This uses performance-optimized settings based on profiling analysis that identified
+    /// bloom filter and memory allocation bottlenecks as the primary performance issues.
+    pub fn open_optimized(path: String) -> Result<RocksDBRuntimeAdapter> {
+        let opts = crate::optimized_config::create_optimized_options();
+        Self::open(path, opts)
+    }
+
     /// Create a new adapter from an existing DB handle
     pub fn from_db(db: Arc<DB>) -> Self {
         RocksDBRuntimeAdapter {

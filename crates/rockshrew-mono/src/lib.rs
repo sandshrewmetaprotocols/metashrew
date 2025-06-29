@@ -58,11 +58,13 @@ use actix_cors::Cors;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder, Result as ActixResult};
 use anyhow::{anyhow, Result};
 use clap::Parser;
-use log::{error, info};
+use log::{error, info, warn};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::signal;
+use tracing::{debug, instrument};
 
 use crate::adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter};
 use crate::ssh_tunnel::parse_daemon_rpc_url;
@@ -123,6 +125,7 @@ where
 }
 
 /// Handles JSON-RPC requests.
+#[instrument(skip(body, state))]
 async fn handle_jsonrpc<N, S, R>(
     body: web::Json<serde_json::Value>,
     state: web::Data<AppState<N, S, R>>,
@@ -138,6 +141,7 @@ where
     let params = request["params"].as_array().unwrap_or(&empty_params);
     let id = request["id"].clone();
 
+    let start_time = Instant::now();
     let result = match method {
         "metashrew_view" => {
             let function_name = params[0].as_str().unwrap_or_default().to_string();
@@ -175,20 +179,32 @@ where
         _ => Err(anyhow::anyhow!("Method not found").into()),
     };
 
+    let duration = start_time.elapsed();
+    
+    // Log slow RPC calls
+    if duration > std::time::Duration::from_millis(100) {
+        warn!("Slow RPC call: {} took {:?}", method, duration);
+    } else {
+        debug!("RPC call: {} completed in {:?}", method, duration);
+    }
+
     let response = match result {
         Ok(res) => serde_json::json!({
             "jsonrpc": "2.0",
             "result": res,
             "id": id
         }),
-        Err(e) => serde_json::json!({
-            "jsonrpc": "2.0",
-            "error": {
-                "code": -32000,
-                "message": e.to_string()
-            },
-            "id": id
-        }),
+        Err(e) => {
+            error!("RPC error for method {}: {}", method, e);
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32000,
+                    "message": e.to_string()
+                },
+                "id": id
+            })
+        }
     };
 
     Ok(HttpResponse::Ok().json(response))
@@ -260,15 +276,43 @@ where
         let sync_engine_clone = sync_engine_arc.clone();
         async move {
             info!("Starting block indexing process...");
+            let mut block_count = 0u64;
+            let mut total_processing_time = std::time::Duration::ZERO;
+            let start_time = Instant::now();
+            
             loop {
+                let block_start = Instant::now();
                 let mut engine = sync_engine_clone.write().await;
+                
                 match engine.process_next_block().await {
-                    Ok(Some(_)) => {
+                    Ok(Some(height)) => {
+                        let block_duration = block_start.elapsed();
+                        block_count += 1;
+                        total_processing_time += block_duration;
+                        
+                        // Log performance metrics
+                        if block_duration > std::time::Duration::from_millis(500) {
+                            warn!("Slow block processing at height {}: {:?}", height, block_duration);
+                        }
+                        
+                        // Log periodic performance summary
+                        if block_count % 100 == 0 {
+                            let avg_time = total_processing_time / block_count as u32;
+                            let elapsed = start_time.elapsed();
+                            let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
+                            info!(
+                                "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
+                                block_count, avg_time, blocks_per_sec
+                            );
+                        }
+                        
+                        debug!("Processed block {} in {:?}", height, block_duration);
                         // Successfully processed a block, continue immediately
                         continue;
                     }
                     Ok(None) => {
                         // No more blocks to process, wait for new blocks
+                        debug!("No new blocks available, waiting...");
                         drop(engine); // Release the lock before sleeping
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
@@ -276,7 +320,8 @@ where
                         // CRITICAL FIX: Don't advance to next block on error!
                         // The process_next_block() method internally manages height,
                         // but on error we need to retry the SAME block, not skip it.
-                        error!("Indexer error: {}", e);
+                        let error_duration = block_start.elapsed();
+                        error!("Indexer error after {:?}: {}", error_duration, e);
                         drop(engine); // Release the lock before sleeping
                         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         // Continue the loop to retry the same block
@@ -345,129 +390,22 @@ where
     Ok(())
 }
 
-/// Create optimized RocksDB options for large-scale deployment
-///
-/// Configuration optimized for:
-/// - Database size: 500GB-2TB
-/// - Key-value pairs: ~1.5 billion
-/// - Key size: up to 256 bytes
-/// - Value size: typically 64 bytes, up to 4MB
-/// - Batch size: 50K-150K operations per batch
-/// - Use case: Fast initial sync on multithreaded systems
-pub fn create_optimized_rocksdb_options() -> rocksdb::Options {
-    let mut opts = rocksdb::Options::default();
-    
-    // === BASIC CONFIGURATION ===
-    opts.create_if_missing(true);
-    opts.create_missing_column_families(true);
-    
-    // === MEMORY CONFIGURATION ===
-    // Large write buffer for batch operations (128MB per memtable)
-    opts.set_write_buffer_size(128 * 1024 * 1024);
-    // Multiple memtables to handle concurrent writes
-    opts.set_max_write_buffer_number(6);
-    opts.set_min_write_buffer_number_to_merge(2);
-    
-    // Block cache for reads (2GB - adjust based on available RAM)
-    let cache = rocksdb::Cache::new_lru_cache(2 * 1024 * 1024 * 1024);
-    
-    // === TABLE OPTIONS (SST FILES) ===
-    let mut table_opts = rocksdb::BlockBasedOptions::default();
-    table_opts.set_block_cache(&cache);
-    table_opts.set_block_size(64 * 1024); // 64KB blocks for large values
-    table_opts.set_cache_index_and_filter_blocks(true);
-    table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-    // Use bloom filter to reduce disk reads
-    table_opts.set_bloom_filter(10.0, false);
-    // Enable compression for storage efficiency
-    table_opts.set_format_version(5);
-    opts.set_block_based_table_factory(&table_opts);
-    
-    // === COMPACTION CONFIGURATION ===
-    // Use Level compaction for better space efficiency with large datasets
-    opts.set_compaction_style(rocksdb::DBCompactionStyle::Level);
-    // Larger L0 to reduce compaction overhead during fast sync
-    opts.set_level_zero_file_num_compaction_trigger(8);
-    opts.set_level_zero_slowdown_writes_trigger(20);
-    opts.set_level_zero_stop_writes_trigger(36);
-    // Target file size for L1 (256MB)
-    opts.set_target_file_size_base(256 * 1024 * 1024);
-    opts.set_target_file_size_multiplier(2);
-    // Max bytes for L1 (2GB)
-    opts.set_max_bytes_for_level_base(2 * 1024 * 1024 * 1024);
-    opts.set_max_bytes_for_level_multiplier(8.0);
-    
-    // === PARALLELISM CONFIGURATION ===
-    // Utilize multiple CPU cores for compaction and flushes
-    let cpu_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4) as i32;
-    opts.set_max_background_jobs(cpu_count.max(8)); // At least 8 background jobs
-    opts.set_max_subcompactions(cpu_count as u32);
-    
-    // === WRITE OPTIMIZATION ===
-    // Optimize for large batch writes
-    opts.set_max_write_buffer_size_to_maintain(512 * 1024 * 1024); // 512MB
-    opts.set_db_write_buffer_size(1024 * 1024 * 1024); // 1GB total write buffer
-    
-    // === FILE SYSTEM CONFIGURATION ===
-    // Increase file limits for large databases
-    opts.set_max_open_files(50000); // Increased from 10000
-    // Use direct I/O to avoid double buffering
-    opts.set_use_direct_reads(true);
-    opts.set_use_direct_io_for_flush_and_compaction(true);
-    
-    // === COMPRESSION ===
-    // Use LZ4 for L0-L2 (fast compression for recent data)
-    opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
-    // Use Zstd for L3+ (better compression for older data)
-    opts.set_compression_per_level(&[
-        rocksdb::DBCompressionType::None,    // L0
-        rocksdb::DBCompressionType::Lz4,     // L1
-        rocksdb::DBCompressionType::Lz4,     // L2
-        rocksdb::DBCompressionType::Zstd,    // L3+
-        rocksdb::DBCompressionType::Zstd,
-        rocksdb::DBCompressionType::Zstd,
-        rocksdb::DBCompressionType::Zstd,
-    ]);
-    
-    // === LOGGING AND MONITORING ===
-    opts.set_log_level(rocksdb::LogLevel::Info);
-    opts.set_keep_log_file_num(5);
-    opts.set_log_file_time_to_roll(24 * 60 * 60); // 24 hours
-    
-    // === ADDITIONAL OPTIMIZATIONS ===
-    // Optimize for sequential writes (blockchain data)
-    opts.set_level_compaction_dynamic_level_bytes(true);
-    // Reduce write amplification
-    opts.set_bytes_per_sync(8 * 1024 * 1024); // 8MB
-    opts.set_wal_bytes_per_sync(8 * 1024 * 1024); // 8MB
-    
-    // === WAL (Write-Ahead Log) CONFIGURATION ===
-    // Large WAL for batch operations
-    opts.set_max_total_wal_size(2 * 1024 * 1024 * 1024); // 2GB
-    opts.set_wal_ttl_seconds(0); // Keep WAL files
-    opts.set_wal_size_limit_mb(0); // No size limit
-    
-    opts
-}
+// RocksDB configuration has been moved to rockshrew-runtime/src/optimized_config.rs
+// for better organization and reusability across the codebase.
 
 /// Production-specific run function.
 pub async fn run_prod(args: Args) -> Result<()> {
     let (rpc_url, bypass_ssl, tunnel_config) =
         parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
 
-    // Use optimized RocksDB configuration for large-scale deployment
-    let opts = create_optimized_rocksdb_options();
-    
-    info!("Initializing RocksDB with optimized configuration for large-scale deployment");
+    info!("Initializing RocksDB with performance-optimized configuration");
     info!("Database path: {}", args.db_path.display());
-    info!("Expected scale: 500GB-2TB, ~1.5B key-value pairs");
-    info!("Batch size: 50K-150K operations per batch");
+    info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
 
+    // Use the optimized configuration from rockshrew-runtime based on performance analysis
     let runtime = MetashrewRuntime::load(
         args.indexer.clone(),
-        RocksDBRuntimeAdapter::open(args.db_path.to_string_lossy().to_string(), opts)?,
+        RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
     )?;
 
     let db = {

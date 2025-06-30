@@ -43,7 +43,7 @@ use clap::Parser;
 /// Initialize logging/tracing based on build features and environment
 fn init_tracing() {
     // Check if console debugging is requested via environment variable
-    let use_console = std::env::var("ROCKSHREW_CONSOLE").is_ok();
+    let _use_console = std::env::var("ROCKSHREW_CONSOLE").is_ok();
     
     #[cfg(feature = "console")]
     if use_console {

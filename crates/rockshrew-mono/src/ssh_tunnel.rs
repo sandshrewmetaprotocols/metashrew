@@ -65,6 +65,7 @@ pub struct SshTunnelConfig {
     pub ssh_host: String,
     pub ssh_port: u16,
     pub ssh_user: String,
+    pub ssh_password: Option<String>,
     pub target_host: String,
     pub target_port: u16,
     pub local_port: u16,
@@ -123,6 +124,7 @@ impl SshTunnel {
             &key_path,
             None, // No certificate
             config.ssh_user.clone(),
+            config.ssh_password.clone(),
             (config.ssh_host.clone(), config.ssh_port),
         )
         .await?;
@@ -224,67 +226,35 @@ impl SshTunnel {
     /// Connect to an SSH server
     async fn connect<P: AsRef<Path>, A: tokio::net::ToSocketAddrs>(
         key_path: P,
-        openssh_cert_path: Option<P>,
+        _openssh_cert_path: Option<P>,
         user: impl Into<String>,
+        password: Option<String>,
         addrs: A,
     ) -> Result<Arc<Mutex<client::Handle<Client>>>> {
-        let key_pair = load_secret_key(key_path, None)?;
         let config = client::Config::default();
-
-        // Load SSH certificate if provided
-        let mut openssh_cert = None;
-        if let Some(cert_path) = openssh_cert_path {
-            openssh_cert = Some(load_openssh_certificate(cert_path)?);
-        }
-
         let config = Arc::new(config);
         let sh = Client {};
-
         let mut session = client::connect(config, addrs, sh).await?;
-
-        // Use publickey authentication, with or without certificate
         let user = user.into();
-        let user_str = if user.is_empty() {
-            "root".to_string()
+
+        let auth_res = if let Some(pass) = password {
+            session.authenticate_password(user, pass).await?
         } else {
-            user
+            let key_pair = load_secret_key(key_path, None)?;
+            let hash_alg = match session.best_supported_rsa_hash().await? {
+                Some(alg) => alg,
+                None => return Err(anyhow!("No supported RSA hash algorithm found")),
+            };
+            session
+                .authenticate_publickey(
+                    user,
+                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg),
+                )
+                .await?
         };
 
-        if openssh_cert.is_none() {
-            // For russh 0.50.0-beta.7, we need to create a PrivateKeyWithHashAlg
-            let hash_alg = match session.best_supported_rsa_hash().await? {
-                Some(alg) => alg,
-                None => return Err(anyhow!("No supported RSA hash algorithm found")),
-            };
-
-            let auth_res = session
-                .authenticate_publickey(
-                    user_str,
-                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg),
-                )
-                .await?;
-
-            if !auth_res.success() {
-                return Err(anyhow!("Authentication (with publickey) failed"));
-            }
-        } else {
-            // For certificate authentication, we need to use the correct Certificate type
-            // Since we don't have a proper Certificate, let's fall back to regular publickey auth
-            let hash_alg = match session.best_supported_rsa_hash().await? {
-                Some(alg) => alg,
-                None => return Err(anyhow!("No supported RSA hash algorithm found")),
-            };
-
-            let auth_res = session
-                .authenticate_publickey(
-                    user_str,
-                    russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key_pair), hash_alg),
-                )
-                .await?;
-
-            if !auth_res.success() {
-                return Err(anyhow!("Authentication (with publickey) failed"));
-            }
+        if !auth_res.success() {
+            return Err(anyhow!("Authentication failed"));
         }
 
         Ok(Arc::new(Mutex::new(session)))
@@ -402,21 +372,6 @@ fn load_secret_key<P: AsRef<Path>>(
     }
 }
 
-/// Load an OpenSSH certificate from a file
-fn load_openssh_certificate<P: AsRef<Path>>(path: P) -> Result<ssh_key::PublicKey> {
-    let cert_path = path.as_ref();
-
-    if !cert_path.exists() {
-        return Err(anyhow!("SSH certificate file not found: {:?}", cert_path));
-    }
-
-    let cert_data = std::fs::read_to_string(cert_path)?;
-
-    match russh_keys::decode_openssh(cert_data.as_bytes(), None) {
-        Ok(key) => Ok(key.public_key().clone()),
-        Err(e) => Err(anyhow!("Failed to decode SSH certificate: {}", e)),
-    }
-}
 
 /// Find an available local port for the SSH tunnel
 pub async fn find_available_port() -> Result<u16> {
@@ -585,6 +540,7 @@ pub async fn parse_daemon_rpc_url(
             .ok_or_else(|| anyhow!("Missing SSH host"))?;
         let ssh_port = parsed_url.port().unwrap_or(22);
         let ssh_user = parsed_url.username().to_string();
+        let ssh_password = parsed_url.password().map(|s| s.to_string());
 
         // Extract target details (after the path)
         let path = parsed_url.path();
@@ -635,6 +591,7 @@ pub async fn parse_daemon_rpc_url(
             ssh_host: actual_ssh_host,
             ssh_port: actual_ssh_port,
             ssh_user: final_ssh_user,
+            ssh_password,
             target_host: target_host.to_string(),
             target_port,
             local_port,
@@ -928,6 +885,7 @@ pub async fn read_file_over_ssh(url_str: &str) -> Result<String> {
         ssh_host: ssh_host.clone(),
         ssh_port,
         ssh_user: ssh_user.clone(),
+        ssh_password: None,
         target_host: "".to_string(), // Not used for file reading
         target_port: 0,              // Not used for file reading
         local_port: 0,               // Not used for file reading
@@ -939,6 +897,7 @@ pub async fn read_file_over_ssh(url_str: &str) -> Result<String> {
         &actual_key_path,
         None, // No certificate
         ssh_user,
+        None, // No password for file reading
         (ssh_host, ssh_port),
     )
     .await?;

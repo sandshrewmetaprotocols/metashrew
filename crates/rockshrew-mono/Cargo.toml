@@ -43,8 +43,14 @@ zstd = "0.13.0"  # Added for snapshot compression
 default = []
 console = ["console-subscriber"]
 debug-tracing = ["tracing-subscriber/json"]
+ssh_e2e_tests = []
 
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"
 memshrew-runtime = { path = "../memshrew" }
+metashrew-core = { path = "../metashrew-core" }
+
+
+[profile.release]
+debug = true

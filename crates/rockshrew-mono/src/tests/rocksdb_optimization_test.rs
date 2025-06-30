@@ -9,7 +9,7 @@
 //! - Batch size: 50K-150K operations per batch
 //! - Use case: Fast initial sync on multithreaded systems
 
-use crate::create_optimized_rocksdb_options;
+use rockshrew_runtime::optimized_config::create_optimized_options as create_optimized_rocksdb_options;
 use anyhow::Result;
 use rocksdb::DB;
 use std::sync::Arc;

@@ -18,10 +18,10 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let db1 = DB::open_for_read_only(&Options::default(), &args.db1, false)
+    let _db1 = DB::open_for_read_only(&Options::default(), &args.db1, false)
         .with_context(|| format!("Failed to open db1 at {:?}", args.db1))?;
 
-    let db2 = DB::open_for_read_only(&Options::default(), &args.db2, false)
+    let _db2 = DB::open_for_read_only(&Options::default(), &args.db2, false)
         .with_context(|| format!("Failed to open db2 at {:?}", args.db2))?;
 
     println!("Successfully opened both databases.");

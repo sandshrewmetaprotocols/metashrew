@@ -1,6 +1,5 @@
 use bitcoin;
 use metashrew_core::{flush, get, index_pointer::IndexPointer, input};
-use metashrew_support;
 use metashrew_support::{compat::export_bytes, index_pointer::KeyValuePointer};
 use std::io::Cursor;
 use std::sync::Arc;

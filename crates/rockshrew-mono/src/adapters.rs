@@ -79,10 +79,15 @@ impl BitcoinRpcAdapter {
         let mut retry_delay = Duration::from_millis(500);
         let max_delay = Duration::from_secs(16);
 
-        for _attempt in 0..max_retries {
-            let existing_tunnel = if self.tunnel_config.is_some() {
-                let active_tunnel = self.active_tunnel.lock().await;
-                active_tunnel.clone()
+        let mut active_tunnel_guard = if self.tunnel_config.is_some() {
+            Some(self.active_tunnel.lock().await)
+        } else {
+            None
+        };
+
+        for attempt in 0..max_retries {
+            let existing_tunnel: Option<SshTunnel> = if let Some(guard) = &active_tunnel_guard {
+                (**guard).clone()
             } else {
                 None
             };
@@ -98,20 +103,19 @@ impl BitcoinRpcAdapter {
             .await
             {
                 Ok(tunneled_response) => {
-                    if let Some(tunnel) = tunneled_response._tunnel.clone() {
-                        if self.tunnel_config.is_some() {
-                            let mut active_tunnel = self.active_tunnel.lock().await;
-                            *active_tunnel = Some(tunnel);
+                    if let Some(guard) = &mut active_tunnel_guard {
+                        if guard.is_none() {
+                            if let Some(tunnel) = tunneled_response._tunnel.clone() {
+                                **guard = Some(tunnel);
+                            }
                         }
                     }
                     return Ok(tunneled_response);
                 }
-                Err(_e) => {
-                    if self.tunnel_config.is_some() {
-                        let mut active_tunnel = self.active_tunnel.lock().await;
-                        if active_tunnel.is_some() {
-                            *active_tunnel = None;
-                        }
+                Err(e) => {
+                    log::warn!("Request failed (attempt {}): {}. Retrying in {:?}...", attempt + 1, e, retry_delay);
+                    if let Some(guard) = &mut active_tunnel_guard {
+                        **guard = None;
                     }
                     let jitter = {
                         use rand::Rng;

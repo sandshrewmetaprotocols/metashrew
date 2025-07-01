@@ -300,6 +300,60 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     /// Contains the loaded and linked WASM instance with all
     /// host functions bound and ready to execute.
     pub instance: wasmtime::Instance,
+
+    /// Stateful view runtime for retaining WASM memory between view calls
+    ///
+    /// This optional field contains a persistent WASM runtime that retains
+    /// its memory and instance state between view function calls. When present,
+    /// view functions will reuse this runtime instead of creating new instances.
+    /// This enables stateful view operations where WASM memory persists.
+    pub stateful_view_runtime: Option<StatefulViewRuntime<T>>,
+}
+
+/// Stateful view runtime that retains WASM memory and instance between calls
+///
+/// This struct maintains a persistent WASM execution environment specifically
+/// for view functions. Unlike the main runtime which resets memory after each
+/// block, this runtime preserves WASM memory state between view calls, enabling
+/// stateful view operations.
+///
+/// # Key Features
+///
+/// - **Memory Persistence**: WASM memory is retained between view calls
+/// - **Instance Reuse**: Same WASM instance used for all view operations
+/// - **Thread Safety**: Protected by mutex for concurrent access
+/// - **Lazy Initialization**: Created on first view call if enabled
+///
+/// # Memory Management
+///
+/// The WASM author is responsible for managing memory within their WASM module.
+/// The runtime simply provides a persistent execution environment without
+/// automatic memory cleanup between calls.
+pub struct StatefulViewRuntime<T: KeyValueStoreLike> {
+    /// Asynchronous WASM store for view execution
+    ///
+    /// Maintains the WASM execution state including memory, globals,
+    /// and other runtime state that persists between view calls.
+    /// Protected by mutex for thread-safe access.
+    pub wasmstore: Arc<tokio::sync::Mutex<wasmtime::Store<State>>>,
+    
+    /// WASM instance for view execution
+    ///
+    /// The instantiated WASM module that will be reused for all
+    /// view function calls, maintaining its memory state.
+    pub instance: wasmtime::Instance,
+    
+    /// Host function linker for view operations
+    ///
+    /// Provides the view-specific host functions like `__get` and `__log`
+    /// that view functions can call to interact with the database.
+    pub linker: wasmtime::Linker<State>,
+    
+    /// Execution context for view operations
+    ///
+    /// Contains the database reference and other context needed for
+    /// view function execution. Updated for each view call.
+    pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
 }
 
 pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Result<Vec<u8>> {
@@ -489,6 +543,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            stateful_view_runtime: None,
         })
     }
 
@@ -558,6 +613,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            stateful_view_runtime: None,
         })
     }
 
@@ -692,6 +748,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 linker,
                 context: view_context,
                 instance,
+                stateful_view_runtime: None,
             }
         };
 
@@ -804,6 +861,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - WASM execution encounters an error
     /// - Memory access violations occur
     pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
+        // Check if we have a stateful view runtime and should use it
+        if let Some(ref stateful_runtime) = self.stateful_view_runtime {
+            return self.view_stateful(stateful_runtime, symbol, input, height).await;
+        }
+
+        // Fall back to the original non-stateful implementation
         let db = {
             let guard = self.context.lock().map_err(lock_err)?;
             guard.db.clone()
@@ -1339,6 +1402,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            stateful_view_runtime: None,
         })
     }
 
@@ -1381,6 +1445,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            stateful_view_runtime: None,
         })
     }
 
@@ -2044,5 +2109,213 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     pub async fn get_state_root(&self, height: u32) -> Result<Vec<u8>> {
         let state_root = Self::get_state_root_at_height(self.context.clone(), height)?;
         Ok(state_root.to_vec())
+    }
+
+    /// Enable stateful view mode by creating a persistent WASM runtime
+    ///
+    /// This method initializes a stateful view runtime that retains WASM memory
+    /// and instance state between view function calls. Once enabled, all view
+    /// function calls will reuse the same WASM instance instead of creating
+    /// new ones, allowing for stateful operations.
+    ///
+    /// # Memory Management
+    ///
+    /// The WASM author is responsible for managing memory within their WASM module.
+    /// The runtime provides a persistent execution environment without automatic
+    /// memory cleanup between view calls.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the stateful runtime was successfully created,
+    /// or an error if initialization failed.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Enable stateful view mode
+    /// runtime.enable_stateful_views().await?;
+    ///
+    /// // Now all view calls will reuse the same WASM instance
+    /// let result1 = runtime.view("function1".to_string(), &input1, height).await?;
+    /// let result2 = runtime.view("function2".to_string(), &input2, height).await?;
+    /// // WASM memory state persists between these calls
+    /// ```
+    pub async fn enable_stateful_views(&mut self) -> Result<()> {
+        let db = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+
+        // Create the stateful view runtime
+        let stateful_runtime = StatefulViewRuntime::new(
+            db,
+            0, // Initial height, will be updated per view call
+            self.async_engine.clone(),
+            self.async_module.clone(),
+        ).await?;
+
+        self.stateful_view_runtime = Some(stateful_runtime);
+        log::info!("Stateful view mode enabled - WASM memory will persist between view calls");
+        Ok(())
+    }
+
+    /// Disable stateful view mode and return to creating new instances per call
+    ///
+    /// This method removes the stateful view runtime, causing subsequent view
+    /// function calls to create fresh WASM instances with clean memory state.
+    /// This is the default behavior.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Disable stateful view mode
+    /// runtime.disable_stateful_views();
+    ///
+    /// // Now view calls will create fresh WASM instances
+    /// let result = runtime.view("function".to_string(), &input, height).await?;
+    /// ```
+    pub fn disable_stateful_views(&mut self) {
+        self.stateful_view_runtime = None;
+        log::info!("Stateful view mode disabled - view calls will create fresh WASM instances");
+    }
+
+    /// Check if stateful view mode is currently enabled
+    ///
+    /// # Returns
+    ///
+    /// `true` if stateful view mode is enabled, `false` otherwise.
+    pub fn is_stateful_views_enabled(&self) -> bool {
+        self.stateful_view_runtime.is_some()
+    }
+
+    /// Execute a view function using the stateful runtime
+    ///
+    /// This method executes a view function using the persistent WASM runtime,
+    /// maintaining memory state between calls. It updates the context for the
+    /// current call but preserves WASM memory across invocations.
+    ///
+    /// # Parameters
+    ///
+    /// - `stateful_runtime`: Reference to the stateful view runtime
+    /// - `symbol`: Name of the view function to execute
+    /// - `input`: Input data for the view function
+    /// - `height`: Block height for the query context
+    ///
+    /// # Returns
+    ///
+    /// The result of the view function execution as raw bytes
+    async fn view_stateful(
+        &self,
+        stateful_runtime: &StatefulViewRuntime<T>,
+        symbol: String,
+        input: &Vec<u8>,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        // Update the context for this view call
+        {
+            let mut guard = stateful_runtime.context.lock().map_err(lock_err)?;
+            guard.block = input.clone();
+            guard.height = height;
+            
+            // Update the database reference to ensure we're using the current state
+            let current_db = {
+                let main_guard = self.context.lock().map_err(lock_err)?;
+                main_guard.db.clone()
+            };
+            guard.db = current_db;
+        }
+
+        // Execute the view function using the stateful runtime
+        let mut wasmstore_guard = stateful_runtime.wasmstore.lock().await;
+        
+        // Set fuel for cooperative yielding
+        wasmstore_guard.set_fuel(u64::MAX)?;
+        wasmstore_guard.fuel_async_yield_interval(Some(10000))?;
+
+        // Get the view function
+        let func = stateful_runtime
+            .instance
+            .get_typed_func::<(), i32>(&mut *wasmstore_guard, symbol.as_str())
+            .with_context(|| format!("Failed to get view function '{}' in stateful mode", symbol))?;
+
+        // Execute the function asynchronously
+        let result = func
+            .call_async(&mut *wasmstore_guard, ())
+            .await
+            .with_context(|| format!("Failed to execute view function '{}' in stateful mode", symbol))?;
+
+        // Get the memory to read the result
+        let memory = stateful_runtime
+            .instance
+            .get_memory(&mut *wasmstore_guard, "memory")
+            .ok_or_else(|| anyhow!("Failed to get memory for stateful view result"))?;
+
+        // Read the result from WASM memory
+        let result_data = read_arraybuffer_as_vec(
+            memory.data(&*wasmstore_guard),
+            result,
+        );
+
+        log::debug!("Executed view function '{}' in stateful mode, memory state preserved", symbol);
+        Ok(result_data)
+    }
+}
+
+impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> StatefulViewRuntime<T> {
+    /// Create a new stateful view runtime
+    ///
+    /// This initializes a persistent WASM execution environment that can be
+    /// reused across multiple view function calls, maintaining memory state.
+    ///
+    /// # Parameters
+    ///
+    /// - `db`: Database backend for view operations
+    /// - `height`: Initial block height (updated per view call)
+    /// - `engine`: Async WASM engine for execution
+    /// - `module`: Compiled WASM module to instantiate
+    ///
+    /// # Returns
+    ///
+    /// A new stateful view runtime ready for persistent execution
+    pub async fn new(
+        db: T,
+        height: u32,
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+    ) -> Result<Self> {
+        let mut linker = Linker::<State>::new(&engine);
+        let mut wasmstore = Store::<State>::new(&engine, State::new());
+        
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+            MetashrewRuntimeContext<T>,
+        >::new(MetashrewRuntimeContext::new(
+            db,
+            height,
+            vec![],
+            vec![],
+        )));
+
+        // Set up store limits
+        wasmstore.limiter(|state| &mut state.limits);
+
+        // Set up host functions for view operations
+        MetashrewRuntime::<T>::setup_linker(context.clone(), &mut linker)
+            .context("Failed to setup basic linker for stateful view")?;
+        MetashrewRuntime::<T>::setup_linker_view(context.clone(), &mut linker)
+            .context("Failed to setup view linker for stateful view")?;
+        linker.define_unknown_imports_as_traps(&module)?;
+
+        // Instantiate the WASM module
+        let instance = linker
+            .instantiate_async(&mut wasmstore, &module)
+            .await
+            .context("Failed to instantiate WASM module for stateful view")?;
+
+        Ok(StatefulViewRuntime {
+            wasmstore: Arc::new(tokio::sync::Mutex::new(wasmstore)),
+            instance,
+            linker,
+            context,
+        })
     }
 }

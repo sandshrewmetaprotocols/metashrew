@@ -74,5 +74,18 @@ pub mod block;
 pub mod byte_view;
 pub mod compat;
 pub mod index_pointer;
+pub mod lru_cache;
 pub mod proto;
 pub mod utils;
+
+// Re-export commonly used items
+pub use byte_view::ByteView;
+pub use index_pointer::KeyValuePointer;
+pub use lru_cache::{
+    initialize_lru_cache, get_lru_cache, set_lru_cache, clear_lru_cache,
+    api_cache_get, api_cache_set, api_cache_remove, get_cache_stats,
+    is_lru_cache_initialized, get_total_memory_usage, CacheStats,
+    set_view_height, clear_view_height, get_view_height,
+    get_height_partitioned_cache, set_height_partitioned_cache, flush_to_lru,
+    CacheAllocationMode, set_cache_allocation_mode, get_cache_allocation_mode
+};

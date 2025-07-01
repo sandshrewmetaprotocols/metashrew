@@ -50,7 +50,7 @@ impl TestUtils {
     /// Creates a simple test block with a specified height and previous block hash.
     pub fn create_test_block(height: u32, prev_hash: BlockHash) -> Block {
         let txdata: Vec<Transaction> = vec![];
-        let merkle_root = bitcoin::merkle_tree::calculate_root(txdata.iter().map(|tx| tx.txid()))
+        let merkle_root = bitcoin::merkle_tree::calculate_root(txdata.iter().map(|tx| tx.compute_txid()))
             .map(|hash| TxMerkleNode::from_raw_hash(hashes::sha256d::Hash::from_byte_array(hash.to_byte_array())))
             .unwrap_or(TxMerkleNode::all_zeros());
         let header = Header {

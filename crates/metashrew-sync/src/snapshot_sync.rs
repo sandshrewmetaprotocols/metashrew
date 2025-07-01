@@ -766,7 +766,7 @@ mod tests {
     async fn test_metashrew_prefixroot() {
         let node = MockBitcoinNode::new();
         let storage = MockStorage::new();
-        let mut runtime = MockRuntime::new();
+        let runtime = MockRuntime::new();
 
         let prefix_name = "test_prefix".to_string();
         let expected_root = [1; 32];

@@ -11,6 +11,8 @@ pub mod runtime;
 pub mod smt;
 pub mod traits;
 
+#[cfg(test)]
+pub mod tests;
 
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;

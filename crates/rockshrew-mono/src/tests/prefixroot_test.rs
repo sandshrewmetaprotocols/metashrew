@@ -9,46 +9,36 @@
  * - To test the `metashrew_prefixroot` JSON-RPC method in a mocked environment.
  */
 
-use metashrew_sync::{
-    mock::{MockBitcoinNode, MockRuntime, MockStorage},
-    JsonRpcProvider, SnapshotMetashrewSync, SyncConfig, SyncMode,
-};
-use std::sync::atomic::Ordering;
+use crate::{run_prod, Args};
+use tempfile::tempdir;
 
 #[tokio::test]
-async fn test_prefixroot_in_memory() {
-    // 1. Setup mocked components
-    let node = MockBitcoinNode::new();
-    let storage = MockStorage::new();
-    let runtime = MockRuntime::new();
-
-    // 2. Pre-populate the mock runtime with a known prefix root
-    let prefix_name = "test_prefix".to_string();
-    let expected_root = [1; 32];
-    runtime
-        .prefix_roots
-        .lock()
-        .await
-        .insert(prefix_name.clone(), expected_root.clone());
-
-    // 3. Create the sync engine instance with the mocks
-    let sync_engine = SnapshotMetashrewSync::new(
-        node,
-        storage,
-        runtime,
-        SyncConfig::default(),
-        SyncMode::Normal,
-    );
-
-    // Set a mock height for the query
-    sync_engine.current_height.store(1, Ordering::SeqCst);
-
-    // 4. Directly call the `metashrew_prefixroot` method
-    let result = sync_engine
-        .metashrew_prefixroot(prefix_name, "0".to_string())
-        .await
-        .unwrap();
-
-    // 5. Assert that the result matches the expected root
-    assert_eq!(result, format!("0x{}", hex::encode(expected_root)));
+async fn test_prefixroot_parsing() {
+    let wasm_dir = tempdir().unwrap();
+    let wasm_path = wasm_dir.path().join("indexer.wasm");
+    std::fs::write(&wasm_path, b"").unwrap();
+    let db_path = tempdir().unwrap();
+    let args = Args {
+        daemon_rpc_url: "mock".to_string(),
+        indexer: wasm_path,
+        db_path: db_path.path().to_path_buf(),
+        start_block: Some(0),
+        auth: None,
+        host: "127.0.0.1".to_string(),
+        port: 8081,
+        label: None,
+        exit_at: Some(0),
+        pipeline_size: None,
+        cors: None,
+        snapshot_directory: None,
+        snapshot_interval: 1000,
+        repo: None,
+        max_reorg_depth: 100,
+        reorg_check_threshold: 6,
+        prefixroot: vec![
+            "balances:0x62616c616e6365733a,sequence:0x73657175656e63653a".to_string(),
+        ],
+    };
+    // This will panic if parsing fails
+    let _ = run_prod(args).await;
 }

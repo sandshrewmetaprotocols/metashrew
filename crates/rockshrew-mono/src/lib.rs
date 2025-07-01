@@ -426,6 +426,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
     let prefix_configs = args
         .prefixroot
         .iter()
+        .flat_map(|s| s.split(','))
         .map(|s| {
             let parts: Vec<&str> = s.split(':').collect();
             if parts.len() != 2 {

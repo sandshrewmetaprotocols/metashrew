@@ -29,8 +29,8 @@ where
 {
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
-    runtime: Arc<RwLock<R>>,
-    config: SyncConfig,
+    pub runtime: Arc<RwLock<R>>,
+    pub config: SyncConfig,
     sync_mode: Arc<RwLock<SyncMode>>,
 
     // Snapshot components
@@ -40,7 +40,7 @@ where
 
     // State tracking
     is_running: Arc<AtomicBool>,
-    current_height: Arc<AtomicU32>,
+    pub current_height: Arc<AtomicU32>,
     last_snapshot_height: Arc<AtomicU32>,
     snapshots_created: Arc<AtomicU32>,
     snapshots_applied: Arc<AtomicU32>,
@@ -734,5 +734,59 @@ where
             "blocks_synced_normally": snapshot_stats.blocks_synced_normally,
             "blocks_synced_from_snapshots": snapshot_stats.blocks_synced_from_snapshots
         }))
+    }
+
+    async fn metashrew_prefixroot(&self, name: String, height: String) -> SyncResult<String> {
+        let height = if height == "latest" {
+            self.current_height.load(Ordering::SeqCst).saturating_sub(1)
+        } else {
+            parse_height_string(&height)?
+        };
+
+        let runtime = self.runtime.read().await;
+        match runtime.get_prefix_root(&name, height).await? {
+            Some(root) => Ok(format!("0x{}", hex::encode(root))),
+            None => Err(SyncError::Storage(format!(
+                "Prefix root {} not found for height {}",
+                name, height
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        mock::{MockBitcoinNode, MockRuntime, MockStorage},
+        SyncConfig,
+    };
+
+    #[tokio::test]
+    async fn test_metashrew_prefixroot() {
+        let node = MockBitcoinNode::new();
+        let storage = MockStorage::new();
+        let mut runtime = MockRuntime::new();
+
+        let prefix_name = "test_prefix".to_string();
+        let expected_root = [1; 32];
+        runtime.prefix_roots.lock().await.insert(prefix_name.clone(), expected_root.clone());
+
+        let sync_engine = SnapshotMetashrewSync::new(
+            node,
+            storage,
+            runtime,
+            SyncConfig::default(),
+            SyncMode::Normal,
+        );
+
+        sync_engine.current_height.store(1, Ordering::SeqCst);
+
+        let result = sync_engine
+            .metashrew_prefixroot(prefix_name, "0".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(result, format!("0x{}", hex::encode(expected_root)));
     }
 }

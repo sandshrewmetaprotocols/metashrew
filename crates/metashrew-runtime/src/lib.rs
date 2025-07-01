@@ -19,6 +19,7 @@ pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
 
 // Re-export helper types
 pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
+pub use key_utils::decode_historical_key;
 
 // Utility functions that are storage-backend agnostic
 static mut _LABEL: Option<String> = None;

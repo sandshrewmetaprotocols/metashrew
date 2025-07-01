@@ -268,6 +268,11 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Get runtime statistics
     async fn get_stats(&self) -> SyncResult<RuntimeStats>;
 
+    /// Get a prefix state root at a specific height
+    async fn get_prefix_root(&self, name: &str, height: u32) -> SyncResult<Option<[u8; 32]>>;
+
+    async fn log_prefix_roots(&self) -> SyncResult<()>;
+
     /// Track runtime updates for snapshot creation (optional, used in snapshot mode)
     /// This method should be called after successful block processing to capture
     /// key-value changes for snapshot diff generation
@@ -329,6 +334,9 @@ pub trait JsonRpcProvider: Send + Sync {
 
     /// Get snapshot information
     async fn metashrew_snapshot(&self) -> SyncResult<serde_json::Value>;
+
+    /// Get a prefix state root by name and height
+    async fn metashrew_prefixroot(&self, name: String, height: String) -> SyncResult<String>;
 }
 
 /// Trait for the complete sync engine that coordinates all components

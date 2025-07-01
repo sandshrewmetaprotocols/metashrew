@@ -423,7 +423,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///     my_storage_backend
     /// )?;
     /// ```
-    pub fn load(indexer: PathBuf, mut store: T) -> Result<Self> {
+    pub fn load(
+        indexer: PathBuf,
+        mut store: T,
+        prefix_configs: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self> {
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -457,9 +461,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         };
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(
-            MetashrewRuntimeContext::new(store, tip_height, vec![]),
-        ));
+        >::new(MetashrewRuntimeContext::new(
+            store,
+            tip_height,
+            vec![],
+            prefix_configs,
+        )));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -485,7 +492,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         })
     }
 
-    pub fn new(indexer: &[u8], mut store: T) -> Result<Self> {
+    pub fn new(
+        indexer: &[u8],
+        mut store: T,
+        prefix_configs: Vec<(String, Vec<u8>)>,
+    ) -> Result<Self> {
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -519,9 +530,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         };
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(
-            MetashrewRuntimeContext::new(store, tip_height, vec![]),
-        ));
+        >::new(MetashrewRuntimeContext::new(
+            store,
+            tip_height,
+            vec![],
+            prefix_configs,
+        )));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -654,7 +668,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             let view_context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
                 MetashrewRuntimeContext<T>,
             >::new(
-                MetashrewRuntimeContext::new(context.db.clone(), preview_height, vec![]),
+                MetashrewRuntimeContext::new(context.db.clone(), preview_height, vec![], vec![]),
             ));
 
             wasmstore.limiter(|state| &mut state.limits);
@@ -1297,9 +1311,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(
-            MetashrewRuntimeContext::new(db, height, vec![]),
-        ));
+        >::new(MetashrewRuntimeContext::new(
+            db,
+            height,
+            vec![],
+            vec![],
+        )));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -1335,9 +1352,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(
-            MetashrewRuntimeContext::new(db, height, vec![]),
-        ));
+        >::new(MetashrewRuntimeContext::new(
+            db,
+            height,
+            vec![],
+            vec![],
+        )));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -1663,6 +1683,26 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             return;
                         }
                     }
+
+                    // Calculate and store prefix roots
+                    if let Ok(mut ctx) = context_ref.clone().lock() {
+                        for (name, prefix) in &ctx.prefix_configs.clone() {
+                            let prefixed_kvs: Vec<(Vec<u8>, Vec<u8>)> = key_values
+                                .iter()
+                                .filter(|(k, _)| k.starts_with(prefix))
+                                .cloned()
+                                .collect();
+                            if !prefixed_kvs.is_empty() {
+                                if let Some(smt) = ctx.prefix_smts.get_mut(name) {
+                                    if smt.update(&prefixed_kvs).is_err() {
+                                        caller.data_mut().had_failure = true;
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
 
                     // Set completion state
                     match context_ref.clone().lock() {

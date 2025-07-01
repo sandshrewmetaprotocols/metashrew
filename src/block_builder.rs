@@ -118,14 +118,13 @@ impl BlockBuilder {
         }
 
         // Calculate merkle root
-        let txids: Vec<Txid> = transactions.iter().map(|tx| tx.compute_txid()).collect();
-        let merkle_root = bitcoin::merkle_tree::calculate_root(txids.into_iter())
-            .unwrap_or_else(|| Txid::all_zeros());
+        let txids: Vec<Txid> = transactions.iter().map(|tx| tx.txid()).collect();
+        let merkle_root = bitcoin::merkle_tree::calculate_root(txids.into_iter()).map(|h| h.to_raw_hash()).unwrap_or(bitcoin::hashes::sha256d::Hash::all_zeros()).into();
 
         let header = BlockHeader {
             version: bitcoin::blockdata::block::Version::ONE,
             prev_blockhash: self.prev_hash,
-            merkle_root: merkle_root.into(),
+            merkle_root,
             time: self.timestamp,
             bits: bitcoin::CompactTarget::from_consensus(0x1d00ffff),
             nonce: self.nonce,

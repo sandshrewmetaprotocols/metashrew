@@ -26,14 +26,14 @@ impl TestConfig {
 
     /// Create a new MetashrewRuntime for testing
     pub fn create_runtime(&self) -> Result<MetashrewRuntime<MemStoreAdapter>> {
-        MetashrewRuntime::new(self.wasm, MemStoreAdapter::new())
+        MetashrewRuntime::new(self.wasm, MemStoreAdapter::new(), vec![])
     }
 
     pub fn create_runtime_from_adapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static>(
         &self,
         store: T,
     ) -> Result<MetashrewRuntime<T>> {
-        MetashrewRuntime::new(self.wasm, store)
+        MetashrewRuntime::new(self.wasm, store, vec![])
     }
 }
 
@@ -50,7 +50,7 @@ impl TestUtils {
     /// Creates a simple test block with a specified height and previous block hash.
     pub fn create_test_block(height: u32, prev_hash: BlockHash) -> Block {
         let txdata: Vec<Transaction> = vec![];
-        let merkle_root = bitcoin::merkle_tree::calculate_root(txdata.iter().map(|tx| tx.compute_txid()))
+        let merkle_root = bitcoin::merkle_tree::calculate_root(txdata.iter().map(|tx| tx.txid()))
             .map(|hash| TxMerkleNode::from_raw_hash(hashes::sha256d::Hash::from_byte_array(hash.to_byte_array())))
             .unwrap_or(TxMerkleNode::all_zeros());
         let header = Header {

@@ -64,6 +64,7 @@ Configuration options:
 - `--port`: JSON-RPC port
 - `--label`: Optional database label
 - `--exit-at`: Optional block height to stop at
+- `--prefixroot`: Defines a named, hex-encoded key prefix for which to track a separate SMT root (e.g., `balances:0x...`). Can be specified multiple times or as a comma-separated list.
 
 ## Comparing Indexers with rockshrew-diff
 
@@ -109,6 +110,61 @@ This example compares how two versions of the ALKANES metaprotocol index balance
 - `--start-block`: Block height to start comparison
 - `--exit-at`: Optional block height to stop at
 - `--pipeline-size`: Optional pipeline size for parallel processing (default: 5)
+## Prefix Root State Commitments
+
+Metashrew supports tracking separate Sparse Merkle Tree (SMT) roots for specific key prefixes. This allows for creating state commitments for subsets of the total state, which is useful for protocols that need to verify the integrity of their own data independently.
+
+### Configuration
+
+Use the `--prefixroot` argument to define a named prefix. You can provide multiple arguments or a single comma-separated list.
+
+**Format**: `name:0x<hex_prefix>`
+
+- `name`: A human-readable identifier for the prefix.
+- `hex_prefix`: The key prefix, hex-encoded.
+
+**Example**:
+
+```sh
+./target/release/rockshrew-mono \
+  # ... other args
+  --prefixroot "balances:0x62616c616e6365733a" \
+  --prefixroot "sequence:0x73657175656e63653a"
+```
+
+Or, using a comma-separated list:
+
+```sh
+./target/release/rockshrew-mono \
+  # ... other args
+  --prefixroot "balances:0x62616c616e6365733a,sequence:0x73657175656e63653a"
+```
+
+### Querying Prefix Roots
+
+A new JSON-RPC method, `metashrew_prefixroot`, is available to query the SMT root for a configured prefix at a specific block height.
+
+**Request**:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "metashrew_prefixroot",
+  "params": ["<name>", "<height>"]
+}
+```
+
+- `<name>`: The name of the prefix (e.g., `"balances"`).
+- `<height>`: The block height or `"latest"`.
+
+**Response**:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": "0x<root_hash>"
+}
+```
 
 ## WASM Runtime Environment
 

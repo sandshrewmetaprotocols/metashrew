@@ -383,4 +383,29 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             last_refresh_height: Some(blocks_processed),
         })
     }
+
+    async fn get_prefix_root(&self, name: &str, _height: u32) -> SyncResult<Option<[u8; 32]>> {
+        let runtime = self.runtime.read().await;
+        let context = runtime
+            .context
+            .lock()
+            .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+        if let Some(smt) = context.prefix_smts.get(name) {
+            Ok(Some(smt.root()))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn log_prefix_roots(&self) -> SyncResult<()> {
+        let runtime = self.runtime.read().await;
+        let context = runtime
+            .context
+            .lock()
+            .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+        for (name, smt) in context.prefix_smts.iter() {
+            log::info!("prefixroot {}: {}", name, hex::encode(smt.root()));
+        }
+        Ok(())
+    }
 }

@@ -132,6 +132,7 @@ impl RocksDBRuntimeAdapter {
     pub fn write_atomic_batch(&self, batch: WriteBatch) -> Result<(), rocksdb::Error> {
         self.db.write(batch)
     }
+
 }
 
 pub struct RocksDBBatch(pub WriteBatch);

@@ -247,6 +247,7 @@ pub struct MockRuntime {
     blocks_processed: Arc<Mutex<u32>>,
     ready: Arc<RwLock<bool>>,
     memory_usage: Arc<Mutex<usize>>,
+    pub prefix_roots: Arc<Mutex<HashMap<String, [u8; 32]>>>,
 }
 
 impl MockRuntime {
@@ -255,6 +256,7 @@ impl MockRuntime {
             blocks_processed: Arc::new(Mutex::new(0)),
             ready: Arc::new(RwLock::new(true)),
             memory_usage: Arc::new(Mutex::new(1024 * 1024)),
+            prefix_roots: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -384,5 +386,14 @@ impl RuntimeAdapter for MockRuntime {
             blocks_processed,
             last_refresh_height: Some(blocks_processed),
         })
+    }
+
+    async fn get_prefix_root(&self, name: &str, _height: u32) -> SyncResult<Option<[u8; 32]>> {
+        let roots = self.prefix_roots.lock().await;
+        Ok(roots.get(name).cloned())
+    }
+
+    async fn log_prefix_roots(&self) -> SyncResult<()> {
+        Ok(())
     }
 }

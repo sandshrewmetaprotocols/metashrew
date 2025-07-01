@@ -112,7 +112,7 @@ where
 {
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
-    runtime: Arc<RwLock<R>>,
+    pub runtime: Arc<RwLock<R>>,
     config: SyncConfig,
     is_running: Arc<AtomicBool>,
     pub current_height: Arc<AtomicU32>,
@@ -840,5 +840,24 @@ where
             "total_entries": stats.total_entries,
             "storage_size_bytes": stats.storage_size_bytes
         }))
+    }
+
+    async fn metashrew_prefixroot(&self, name: String, height: String) -> SyncResult<String> {
+        let height = if height == "latest" {
+            self.current_height.load(Ordering::SeqCst).saturating_sub(1)
+        } else {
+            height
+                .parse::<u32>()
+                .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))?
+        };
+
+        let runtime = self.runtime.read().await;
+        match runtime.get_prefix_root(&name, height).await? {
+            Some(root) => Ok(format!("0x{}", hex::encode(root))),
+            None => Err(SyncError::Storage(format!(
+                "Prefix root {} not found for height {}",
+                name, height
+            ))),
+        }
     }
 }

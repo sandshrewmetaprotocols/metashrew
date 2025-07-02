@@ -223,6 +223,7 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime and is snapshot-aware.
 /// Now includes a parallelized view pool for concurrent view execution.
+#[derive(Clone)]
 pub struct MetashrewRuntimeAdapter {
     runtime: Arc<RwLock<MetashrewRuntime<RocksDBKeyValueAdapter>>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
@@ -258,6 +259,19 @@ impl MetashrewRuntimeAdapter {
         } else {
             None
         }
+    }
+    
+    /// Disable stateful views to use non-stateful async wasmtime
+    pub async fn disable_stateful_views(&self) {
+        let mut runtime = self.runtime.write().await;
+        runtime.disable_stateful_views();
+        log::info!("Stateful views disabled - will use non-stateful async wasmtime");
+    }
+    
+    /// Check if stateful views are enabled
+    pub async fn is_stateful_views_enabled(&self) -> bool {
+        let runtime = self.runtime.read().await;
+        runtime.is_stateful_views_enabled()
     }
 
     pub async fn set_snapshot_manager(&self, manager: Arc<RwLock<crate::snapshot::SnapshotManager>>) {

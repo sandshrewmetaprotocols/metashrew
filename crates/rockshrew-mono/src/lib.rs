@@ -467,7 +467,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
     let storage_adapter = RocksDBStorageAdapter::new(db.clone());
     let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
 
-    // Initialize view pool if enabled
+    // Configure view execution based on view pool setting
     if args.enable_view_pool {
         let pool_size = args.view_pool_size.unwrap_or_else(num_cpus::get);
         let max_concurrent = args.view_pool_max_concurrent.unwrap_or(pool_size * 2);
@@ -486,9 +486,11 @@ pub async fn run_prod(args: Args) -> Result<()> {
             return Err(e);
         }
         
-        info!("View pool initialized successfully");
+        info!("View pool initialized successfully - using stateful view runtimes for parallel execution");
     } else {
-        info!("View pool disabled, using direct runtime execution");
+        // Disable stateful views to ensure we use non-stateful async wasmtime
+        runtime_adapter.disable_stateful_views().await;
+        info!("View pool disabled - using non-stateful async wasmtime for view execution");
     }
 
     run(args, node_adapter, storage_adapter, runtime_adapter, None).await

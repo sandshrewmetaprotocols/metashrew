@@ -54,8 +54,7 @@ wat = "1.235.0"
 metashrew-sync = { path = "../metashrew-sync", features = ["test-utils"] }
 bitcoin = { version = "0.32.6", features = ["rand"] }
 metashrew-tests = { path = "../../" }
-
+futures = "0.3"
 
 [profile.release]
 debug = true
-futures = "0.3"

@@ -202,7 +202,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {
-        log::info!("Manual memory refresh requested - note that memory is now refreshed automatically after each block");
+        log::info!("Memory refresh requested (typically during chain reorganization)");
+        let mut runtime = self.runtime.lock().await;
+        runtime.refresh_memory().map_err(|e| {
+            SyncError::Runtime(format!("Failed to refresh runtime memory: {}", e))
+        })?;
         Ok(())
     }
 

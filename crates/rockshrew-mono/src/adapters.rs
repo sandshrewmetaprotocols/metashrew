@@ -363,6 +363,11 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {
+        log::info!("Memory refresh requested (typically during chain reorganization)");
+        let mut runtime = self.runtime.write().await;
+        runtime.refresh_memory().map_err(|e| {
+            SyncError::Runtime(format!("Failed to refresh runtime memory: {}", e))
+        })?;
         Ok(())
     }
 

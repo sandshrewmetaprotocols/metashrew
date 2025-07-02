@@ -211,10 +211,11 @@ impl State {
 ///
 /// # Memory Management
 ///
-/// The runtime ensures deterministic execution through:
-/// - **Memory isolation**: Fresh memory for each block execution
+/// The runtime now supports persistent memory between blocks:
+/// - **Memory persistence**: WASM memory state is retained between normal block processing
 /// - **Resource limits**: Pre-allocated maximum memory to avoid growth
-/// - **Automatic refresh**: Memory is reset after each block for consistency
+/// - **LRU cache**: metashrew-core redesign prevents unbounded memory growth
+/// - **Reorg refresh**: Memory is only refreshed during chain reorganizations
 ///
 /// # Thread Safety
 ///
@@ -913,18 +914,24 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         ))
     }
 
+    /// Refresh WASM memory by creating a new instance
+    ///
+    /// **NEW USAGE**: This function is now only called during chain reorganizations
+    /// to ensure clean state after rollback. It is no longer called after normal
+    /// block processing to allow memory persistence between blocks.
+    ///
+    /// The LRU cache in metashrew-core prevents unbounded memory growth, making
+    /// persistent memory safe for normal operation.
     pub fn refresh_memory(&mut self) -> Result<()> {
-        // Only refresh memory if there was actual execution or failure
-        // This reduces overhead for blocks with minimal processing
-        if self.wasmstore.data().had_failure || self.context.lock().map_err(lock_err)?.state == 1 {
-            let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-            wasmstore.limiter(|state| &mut state.limits);
-            self.instance = self
-                .linker
-                .instantiate(&mut wasmstore, &self.module)
-                .context("Failed to instantiate module during memory refresh")?;
-            self.wasmstore = wasmstore;
-        }
+        // Always refresh when explicitly called (typically during reorgs)
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        wasmstore.limiter(|state| &mut state.limits);
+        self.instance = self
+            .linker
+            .instantiate(&mut wasmstore, &self.module)
+            .context("Failed to instantiate module during memory refresh")?;
+        self.wasmstore = wasmstore;
+        log::info!("WASM memory refreshed (typically due to chain reorganization)");
         Ok(())
     }
 
@@ -932,39 +939,27 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///
     /// This is the core block processing method that executes the WASM module's
     /// `_start` function to process the current block data. It handles the complete
-    /// block processing lifecycle including chain reorganization detection,
-    /// execution, and memory cleanup.
+    /// block processing lifecycle with persistent memory between blocks.
     ///
     /// # Block Processing Flow
     ///
     /// 1. **Initialize state**: Reset execution state to 0 (starting)
-    /// 2. **Handle reorgs**: Check for and handle chain reorganizations
-    /// 3. **Execute WASM**: Call the `_start` function with current block data
-    /// 4. **Validate completion**: Ensure indexer completed successfully (state = 1)
-    /// 5. **Refresh memory**: Reset WASM memory for deterministic execution
-    ///
-    /// # Deterministic Execution
-    ///
-    /// The runtime ensures deterministic behavior through:
-    /// - **Memory isolation**: Fresh WASM memory for each block
-    /// - **State validation**: Strict execution state checking
-    /// - **Error handling**: Consistent error propagation
-    /// - **Resource limits**: Bounded execution resources
-    ///
-    /// # Chain Reorganization Handling
-    ///
-    /// Before processing, the method:
-    /// - Compares context height with database tip height
-    /// - Detects potential chain reorganizations
-    /// - Handles rollback scenarios (implementation pending)
+    /// 2. **Execute WASM**: Call the `_start` function with current block data
+    /// 3. **Validate completion**: Ensure indexer completed successfully (state = 1)
+    /// 4. **Retain memory**: WASM memory persists between blocks (LRU cache prevents unbounded growth)
     ///
     /// # Memory Management
     ///
-    /// After each block execution:
-    /// - WASM memory is completely refreshed
-    /// - Module instance is recreated
-    /// - No state persists between blocks
-    /// - Ensures consistent execution environment
+    /// **NEW BEHAVIOR**: Memory is now retained between blocks:
+    /// - **Persistent memory**: WASM memory state persists between normal block processing
+    /// - **LRU cache**: metashrew-core redesign prevents unbounded memory growth
+    /// - **No automatic refresh**: Memory is only refreshed during reorganizations
+    /// - **Crash on unexpected exit**: If WASM exits unexpectedly, the indexer crashes (no retry)
+    ///
+    /// # Chain Reorganization Handling
+    ///
+    /// Chain reorganization detection is handled at the sync framework level.
+    /// When a reorg occurs, memory will be refreshed to ensure clean state.
     ///
     /// # State Validation
     ///
@@ -972,6 +967,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Indexer reaches completion state (state = 1)
     /// - No host function failures occurred
     /// - WASM execution completed without traps
+    /// - If any validation fails, the indexer crashes immediately
     ///
     /// # Example Usage
     ///
@@ -983,19 +979,19 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///     guard.height = height;
     /// }
     ///
-    /// // Process the block
+    /// // Process the block (memory persists after this call)
     /// runtime.run()?;
     /// ```
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Chain reorganization handling fails
     /// - `_start` function is not found in WASM module
     /// - WASM execution traps or fails
     /// - Indexer exits without reaching completion state
-    /// - Memory refresh fails after execution
     /// - Host function failures occur during execution
+    ///
+    /// **Note**: Any unexpected exit will cause the indexer to crash rather than retry.
     pub fn run(&mut self) -> Result<(), anyhow::Error> {
         self.context.lock().map_err(lock_err)?.state = 0;
         let start = self
@@ -1015,7 +1011,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 
                 if context_state != 1 && !had_failure {
                     log::error!("Indexer exited unexpectedly: context_state={}, had_failure={}", context_state, had_failure);
-                    Err(anyhow!("indexer exited unexpectedly"))
+                    // NEW BEHAVIOR: Crash the indexer instead of returning an error for retry
+                    std::process::exit(1);
                 } else {
                     log::debug!("Indexer completed successfully: context_state={}", context_state);
                     Ok(())
@@ -1023,19 +1020,15 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             }
             Err(e) => {
                 log::error!("Error calling _start function: {}", e);
-                Err(e).context("Error calling _start function")
+                // NEW BEHAVIOR: Crash the indexer instead of returning an error for retry
+                std::process::exit(1);
             }
         };
 
-        // ALWAYS refresh memory after block execution for deterministic behavior
-        // This ensures no WASM state persists between blocks
-        if let Err(refresh_err) = self.refresh_memory() {
-            log::error!("Failed to refresh memory after block execution: {}", refresh_err);
-            // Return the refresh error as it's critical for deterministic execution
-            return Err(refresh_err).context("Memory refresh failed after block execution");
-        }
-
-        log::debug!("Memory refreshed after block execution for deterministic state isolation");
+        // NEW BEHAVIOR: Do NOT refresh memory after normal block execution
+        // Memory is now retained between blocks to enable persistent state
+        // LRU cache in metashrew-core prevents unbounded memory growth
+        log::debug!("Block execution completed, memory retained for persistent state");
         execution_result
     }
 
@@ -2074,23 +2067,15 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 (state_root, batch_data)
             }
             Err(e) => {
-                // ALWAYS refresh memory even on execution failure for deterministic behavior
-                if let Err(refresh_err) = self.refresh_memory() {
-                    log::error!("Failed to refresh memory after failed atomic block execution: {}", refresh_err);
-                }
-                return Err(e);
+                // NEW BEHAVIOR: Crash the indexer instead of returning an error for retry
+                log::error!("Atomic block execution failed: {}", e);
+                std::process::exit(1);
             }
         };
 
-        // ALWAYS refresh memory after block execution for deterministic behavior
-        // This ensures no WASM state persists between blocks
-        if let Err(refresh_err) = self.refresh_memory() {
-            log::error!("Failed to refresh memory after atomic block execution: {}", refresh_err);
-            // Return the refresh error as it's critical for deterministic execution
-            return Err(refresh_err).context("Memory refresh failed after atomic block execution");
-        }
-
-        log::debug!("Memory refreshed after atomic block execution for deterministic state isolation");
+        // NEW BEHAVIOR: Do NOT refresh memory after atomic block execution
+        // Memory is now retained between blocks to enable persistent state
+        log::debug!("Atomic block execution completed, memory retained for persistent state");
 
         // Return the atomic result
         Ok(crate::traits::AtomicBlockResult {

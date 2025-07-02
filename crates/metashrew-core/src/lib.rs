@@ -344,14 +344,7 @@ pub fn flush() {
                 __flush(to_ptr(&mut to_arraybuffer_layout(&serialized_vec)) + 4);
             }
             Err(_) => {
-                // Serialization failed - create empty flush to signal completion
-                let empty_buffer = KeyValueFlush::new();
-                if let Ok(empty_serialized) = empty_buffer.write_to_bytes() {
-                    let empty_vec = empty_serialized.to_vec();
-                    __flush(to_ptr(&mut to_arraybuffer_layout(&empty_vec)) + 4);
-                }
-                // If even empty serialization fails, we have a serious problem
-                // but we still need to clear cache to maintain consistency
+                panic!("failed to serialize KeyValueFlush");
             }
         }
         

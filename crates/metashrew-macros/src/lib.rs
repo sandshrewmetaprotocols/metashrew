@@ -5,7 +5,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, FnArg, Pat, Type};
+use syn::{parse_macro_input, FnArg, ItemFn, Pat, Type};
 
 /// Procedural macro to generate the `_start` function for a Metashrew indexer
 ///
@@ -39,18 +39,20 @@ use syn::{parse_macro_input, ItemFn, FnArg, Pat, Type};
 #[proc_macro_attribute]
 pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
-    
+
     // Extract function name
     let fn_name = &input_fn.sig.ident;
-    
+
     // Validate function signature
     if input_fn.sig.inputs.len() != 2 {
         return syn::Error::new_spanned(
             &input_fn.sig,
-            "Function must have exactly 2 parameters: height: u32, block: &[u8]"
-        ).to_compile_error().into();
+            "Function must have exactly 2 parameters: height: u32, block: &[u8]",
+        )
+        .to_compile_error()
+        .into();
     }
-    
+
     // Validate parameter types
     for (i, arg) in input_fn.sig.inputs.iter().enumerate() {
         if let FnArg::Typed(pat_type) = arg {
@@ -62,11 +64,13 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
                             if type_path.path.segments.last().unwrap().ident != "u32" {
                                 return syn::Error::new_spanned(
                                     &pat_type.ty,
-                                    "First parameter must be of type u32"
-                                ).to_compile_error().into();
+                                    "First parameter must be of type u32",
+                                )
+                                .to_compile_error()
+                                .into();
                             }
                         }
-                    },
+                    }
                     1 => {
                         // Second parameter should be block: &[u8]
                         if let Type::Reference(type_ref) = pat_type.ty.as_ref() {
@@ -75,44 +79,52 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
                                     if type_path.path.segments.last().unwrap().ident != "u8" {
                                         return syn::Error::new_spanned(
                                             &pat_type.ty,
-                                            "Second parameter must be of type &[u8]"
-                                        ).to_compile_error().into();
+                                            "Second parameter must be of type &[u8]",
+                                        )
+                                        .to_compile_error()
+                                        .into();
                                     }
                                 } else {
                                     return syn::Error::new_spanned(
                                         &pat_type.ty,
-                                        "Second parameter must be of type &[u8]"
-                                    ).to_compile_error().into();
+                                        "Second parameter must be of type &[u8]",
+                                    )
+                                    .to_compile_error()
+                                    .into();
                                 }
                             } else {
                                 return syn::Error::new_spanned(
                                     &pat_type.ty,
-                                    "Second parameter must be of type &[u8]"
-                                ).to_compile_error().into();
+                                    "Second parameter must be of type &[u8]",
+                                )
+                                .to_compile_error()
+                                .into();
                             }
                         } else {
                             return syn::Error::new_spanned(
                                 &pat_type.ty,
-                                "Second parameter must be of type &[u8]"
-                            ).to_compile_error().into();
+                                "Second parameter must be of type &[u8]",
+                            )
+                            .to_compile_error()
+                            .into();
                         }
-                    },
+                    }
                     _ => {}
                 }
             }
         }
     }
-    
+
     // Generate the _start function and keep the original function
     let expanded = quote! {
         #input_fn
-        
+
         #[cfg(all(target_arch = "wasm32", not(test)))]
         #[no_mangle]
         pub fn _start() {
             // Set cache allocation mode to Indexer (all memory to main LRU cache)
             metashrew_core::set_cache_mode(metashrew_support::CacheAllocationMode::Indexer);
-            
+
             let mut host_input = std::io::Cursor::new(metashrew_core::input());
             let height = metashrew_support::utils::consume_sized_int::<u32>(&mut host_input)
                 .expect("failed to parse height");
@@ -123,7 +135,7 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
             metashrew_core::flush();
         }
     };
-    
+
     TokenStream::from(expanded)
 }
 
@@ -163,19 +175,22 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn view(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
-    
+
     // Extract function name and create the internal function name
     let original_fn_name = &input_fn.sig.ident;
-    let internal_fn_name = syn::Ident::new(&format!("__{}", original_fn_name), original_fn_name.span());
-    
+    let internal_fn_name =
+        syn::Ident::new(&format!("__{}", original_fn_name), original_fn_name.span());
+
     // Validate function signature
     if input_fn.sig.inputs.len() != 1 {
         return syn::Error::new_spanned(
             &input_fn.sig,
-            "View function must have exactly 1 parameter: input: &[u8]"
-        ).to_compile_error().into();
+            "View function must have exactly 1 parameter: input: &[u8]",
+        )
+        .to_compile_error()
+        .into();
     }
-    
+
     // Validate parameter type
     if let Some(FnArg::Typed(pat_type)) = input_fn.sig.inputs.first() {
         if let Pat::Ident(_pat_ident) = pat_type.pat.as_ref() {
@@ -186,71 +201,76 @@ pub fn view(_attr: TokenStream, item: TokenStream) -> TokenStream {
                         if type_path.path.segments.last().unwrap().ident != "u8" {
                             return syn::Error::new_spanned(
                                 &pat_type.ty,
-                                "Parameter must be of type &[u8]"
-                            ).to_compile_error().into();
+                                "Parameter must be of type &[u8]",
+                            )
+                            .to_compile_error()
+                            .into();
                         }
                     } else {
                         return syn::Error::new_spanned(
                             &pat_type.ty,
-                            "Parameter must be of type &[u8]"
-                        ).to_compile_error().into();
+                            "Parameter must be of type &[u8]",
+                        )
+                        .to_compile_error()
+                        .into();
                     }
                 } else {
                     return syn::Error::new_spanned(
                         &pat_type.ty,
-                        "Parameter must be of type &[u8]"
-                    ).to_compile_error().into();
+                        "Parameter must be of type &[u8]",
+                    )
+                    .to_compile_error()
+                    .into();
                 }
             } else {
-                return syn::Error::new_spanned(
-                    &pat_type.ty,
-                    "Parameter must be of type &[u8]"
-                ).to_compile_error().into();
+                return syn::Error::new_spanned(&pat_type.ty, "Parameter must be of type &[u8]")
+                    .to_compile_error()
+                    .into();
             }
         }
     }
-    
+
     // Create the internal function (renamed original)
     let mut internal_fn = input_fn.clone();
     internal_fn.sig.ident = internal_fn_name.clone();
-    
+
     // Extract function visibility and attributes
     let fn_vis = &input_fn.vis;
     let fn_attrs = &input_fn.attrs;
-    
+
     // Extract the function block
     let fn_block = &input_fn.block;
-    
+
     // Generate the external view function
     let expanded = quote! {
         // Keep the original function with __ prefix
         #(#fn_attrs)*
         #fn_vis fn #internal_fn_name(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>>
             #fn_block
-        
+
         // Generate the WASM export function
         #[cfg(not(test))]
         #[no_mangle]
         pub fn #original_fn_name() -> i32 {
             // Set cache allocation mode to View (memory split between height-partitioned and API caches)
             metashrew_core::set_cache_mode(metashrew_support::CacheAllocationMode::View);
-            
+
             let mut host_input = std::io::Cursor::new(metashrew_core::input());
             let height = metashrew_support::utils::consume_sized_int::<u32>(&mut host_input)
                 .expect("failed to read height from host input");
-            
+
             // Set view height for height-partitioned caching
             metashrew_core::set_view_for_height(height);
-            
+
             let result = #internal_fn_name(&metashrew_support::utils::consume_to_end(&mut host_input)
                 .expect("failed to read input from host environment")).unwrap();
-            
+
             // Clear view height and immediate cache
             metashrew_core::clear_view_cache();
-            
+
             metashrew_support::compat::export_bytes(result)
         }
     };
-    
+
     TokenStream::from(expanded)
 }

@@ -51,7 +51,7 @@
 //! }
 //! ```
 
-use lru_mem::{LruCache, MemSize, HeapSize};
+use lru_mem::{HeapSize, LruCache, MemSize};
 use std::sync::{Arc, RwLock};
 
 /// Memory limit for the LRU cache (1GB)
@@ -67,7 +67,8 @@ pub enum CacheAllocationMode {
 }
 
 /// Current cache allocation mode
-static CACHE_ALLOCATION_MODE: RwLock<CacheAllocationMode> = RwLock::new(CacheAllocationMode::Indexer);
+static CACHE_ALLOCATION_MODE: RwLock<CacheAllocationMode> =
+    RwLock::new(CacheAllocationMode::Indexer);
 
 /// Global LRU cache instance
 ///
@@ -88,7 +89,8 @@ static API_CACHE: RwLock<Option<LruCache<ApiCacheKey, CacheValue>>> = RwLock::ne
 /// This cache partitions entries by block height, ensuring that view functions
 /// only see cache entries for the specific height they are querying. This enables
 /// proper archival state queries without side effects.
-static HEIGHT_PARTITIONED_CACHE: RwLock<Option<LruCache<HeightPartitionedKey, CacheValue>>> = RwLock::new(None);
+static HEIGHT_PARTITIONED_CACHE: RwLock<Option<LruCache<HeightPartitionedKey, CacheValue>>> =
+    RwLock::new(None);
 
 /// Current view height for height-partitioned caching
 ///
@@ -139,9 +141,7 @@ impl From<CacheValue> for Arc<Vec<u8>> {
 impl HeapSize for CacheValue {
     fn heap_size(&self) -> usize {
         // Size of the Arc wrapper + size of the Vec + size of the data
-        std::mem::size_of::<Arc<Vec<u8>>>() +
-        std::mem::size_of::<Vec<u8>>() +
-        self.0.len()
+        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
     }
 }
 
@@ -164,9 +164,7 @@ impl From<CacheKey> for Arc<Vec<u8>> {
 impl HeapSize for CacheKey {
     fn heap_size(&self) -> usize {
         // Size of the Arc wrapper + size of the Vec + size of the data
-        std::mem::size_of::<Arc<Vec<u8>>>() +
-        std::mem::size_of::<Vec<u8>>() +
-        self.0.len()
+        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
     }
 }
 
@@ -207,10 +205,10 @@ impl From<(u32, Arc<Vec<u8>>)> for HeightPartitionedKey {
 
 impl HeapSize for HeightPartitionedKey {
     fn heap_size(&self) -> usize {
-        std::mem::size_of::<u32>() +
-        std::mem::size_of::<Arc<Vec<u8>>>() +
-        std::mem::size_of::<Vec<u8>>() +
-        self.key.len()
+        std::mem::size_of::<u32>()
+            + std::mem::size_of::<Arc<Vec<u8>>>()
+            + std::mem::size_of::<Vec<u8>>()
+            + self.key.len()
     }
 }
 
@@ -226,7 +224,7 @@ impl HeapSize for HeightPartitionedKey {
 /// calls will be no-ops if the cache is already initialized.
 pub fn initialize_lru_cache() {
     let allocation_mode = *CACHE_ALLOCATION_MODE.read().unwrap();
-    
+
     match allocation_mode {
         CacheAllocationMode::Indexer => {
             // Indexer mode: allocate all memory to main LRU cache
@@ -236,7 +234,7 @@ pub fn initialize_lru_cache() {
                     *cache = Some(LruCache::new(LRU_CACHE_MEMORY_LIMIT)); // All memory to main cache
                 }
             }
-            
+
             // Initialize other caches with minimal memory (they won't be used)
             {
                 let mut api_cache = API_CACHE.write().unwrap();
@@ -244,14 +242,14 @@ pub fn initialize_lru_cache() {
                     *api_cache = Some(LruCache::new(1024)); // Minimal allocation
                 }
             }
-            
+
             {
                 let mut height_cache = HEIGHT_PARTITIONED_CACHE.write().unwrap();
                 if height_cache.is_none() {
                     *height_cache = Some(LruCache::new(1024)); // Minimal allocation
                 }
             }
-        },
+        }
         CacheAllocationMode::View => {
             // View mode: allocate memory to height-partitioned and API caches
             {
@@ -260,18 +258,20 @@ pub fn initialize_lru_cache() {
                     *cache = Some(LruCache::new(1024)); // Minimal allocation
                 }
             }
-            
+
             {
                 let mut api_cache = API_CACHE.write().unwrap();
                 if api_cache.is_none() {
-                    *api_cache = Some(LruCache::new(LRU_CACHE_MEMORY_LIMIT / 2)); // Half for API cache
+                    *api_cache = Some(LruCache::new(LRU_CACHE_MEMORY_LIMIT / 2));
+                    // Half for API cache
                 }
             }
-            
+
             {
                 let mut height_cache = HEIGHT_PARTITIONED_CACHE.write().unwrap();
                 if height_cache.is_none() {
-                    *height_cache = Some(LruCache::new(LRU_CACHE_MEMORY_LIMIT / 2)); // Half for height-partitioned cache
+                    *height_cache = Some(LruCache::new(LRU_CACHE_MEMORY_LIMIT / 2));
+                    // Half for height-partitioned cache
                 }
             }
         }
@@ -297,7 +297,7 @@ pub fn initialize_lru_cache() {
 /// only when updating the LRU ordering.
 pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
     let cache_key = CacheKey::from(key.clone());
-    
+
     // Try to read with read lock first
     {
         let cache_guard = LRU_CACHE.read().unwrap();
@@ -305,12 +305,12 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
             // Check if key exists without updating LRU order
             if cache.contains(&cache_key) {
                 drop(cache_guard); // Release read lock
-                
+
                 // Upgrade to write lock to update LRU order and get value
                 let mut cache_guard = LRU_CACHE.write().unwrap();
                 if let Some(cache) = cache_guard.as_mut() {
                     let result = cache.get(&cache_key).cloned().map(|v| v.into());
-                    
+
                     // Update statistics
                     {
                         let mut stats = CACHE_STATS.write().unwrap();
@@ -322,19 +322,19 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
                         stats.items = cache.len();
                         stats.memory_usage = cache.mem_size();
                     }
-                    
+
                     return result;
                 }
             }
         }
     }
-    
+
     // Update miss statistics
     {
         let mut stats = CACHE_STATS.write().unwrap();
         stats.misses += 1;
     }
-    
+
     None
 }
 
@@ -357,18 +357,18 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
 pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
     let cache_key = CacheKey::from(key);
     let cache_value = CacheValue::from(value);
-    
+
     let mut cache_guard = LRU_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
         let _ = cache.insert(cache_key, cache_value);
-        
+
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
             stats.items = cache.len();
             stats.memory_usage = cache.mem_size();
-            
+
             // If cache size decreased, items were evicted
             if cache.len() < old_len {
                 stats.evictions += (old_len - cache.len()) as u64;
@@ -393,21 +393,21 @@ pub fn clear_lru_cache() {
             cache.clear();
         }
     }
-    
+
     {
         let mut api_cache_guard = API_CACHE.write().unwrap();
         if let Some(cache) = api_cache_guard.as_mut() {
             cache.clear();
         }
     }
-    
+
     {
         let mut height_cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
         if let Some(cache) = height_cache_guard.as_mut() {
             cache.clear();
         }
     }
-    
+
     // Reset statistics
     {
         let mut stats = CACHE_STATS.write().unwrap();
@@ -456,7 +456,7 @@ pub fn get_cache_stats() -> CacheStats {
 pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
     let cache_key = ApiCacheKey::from(key);
     let cache_value = CacheValue::from(value);
-    
+
     let mut cache_guard = API_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let _ = cache.insert(cache_key, cache_value);
@@ -489,14 +489,14 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
 /// ```
 pub fn api_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
     let cache_key = ApiCacheKey::from(key.to_string());
-    
+
     // Try to read with read lock first
     {
         let cache_guard = API_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
             if cache.contains(&cache_key) {
                 drop(cache_guard); // Release read lock
-                
+
                 // Upgrade to write lock to update LRU order and get value
                 let mut cache_guard = API_CACHE.write().unwrap();
                 if let Some(cache) = cache_guard.as_mut() {
@@ -505,7 +505,7 @@ pub fn api_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
             }
         }
     }
-    
+
     None
 }
 
@@ -522,7 +522,7 @@ pub fn api_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
 /// `Some(value)` if the key existed and was removed, `None` if the key didn't exist.
 pub fn api_cache_remove(key: &str) -> Option<Arc<Vec<u8>>> {
     let cache_key = ApiCacheKey::from(key.to_string());
-    
+
     let mut cache_guard = API_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         cache.remove(&cache_key).map(|v| v.into())
@@ -547,21 +547,21 @@ pub fn is_lru_cache_initialized() -> bool {
 /// LRU cache and the API cache.
 pub fn get_total_memory_usage() -> usize {
     let mut total = 0;
-    
+
     {
         let cache_guard = LRU_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
             total += cache.mem_size();
         }
     }
-    
+
     {
         let cache_guard = API_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
             total += cache.mem_size();
         }
     }
-    
+
     total
 }
 
@@ -611,19 +611,19 @@ pub fn get_view_height() -> Option<u32> {
 /// `Some(value)` if the key exists in the cache for this height, `None` otherwise.
 pub fn get_height_partitioned_cache(height: u32, key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
     let cache_key = HeightPartitionedKey::from((height, key.clone()));
-    
+
     // Try to read with read lock first
     {
         let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
             if cache.contains(&cache_key) {
                 drop(cache_guard); // Release read lock
-                
+
                 // Upgrade to write lock to update LRU order and get value
                 let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
                 if let Some(cache) = cache_guard.as_mut() {
                     let result = cache.get(&cache_key).cloned().map(|v| v.into());
-                    
+
                     // Update statistics
                     {
                         let mut stats = CACHE_STATS.write().unwrap();
@@ -635,19 +635,19 @@ pub fn get_height_partitioned_cache(height: u32, key: &Arc<Vec<u8>>) -> Option<A
                         stats.items = cache.len();
                         stats.memory_usage = cache.mem_size();
                     }
-                    
+
                     return result;
                 }
             }
         }
     }
-    
+
     // Update miss statistics
     {
         let mut stats = CACHE_STATS.write().unwrap();
         stats.misses += 1;
     }
-    
+
     None
 }
 
@@ -664,18 +664,18 @@ pub fn get_height_partitioned_cache(height: u32, key: &Arc<Vec<u8>>) -> Option<A
 pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
     let cache_key = HeightPartitionedKey::from((height, key));
     let cache_value = CacheValue::from(value);
-    
+
     let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
         let _ = cache.insert(cache_key, cache_value);
-        
+
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
             stats.items = cache.len();
             stats.memory_usage = cache.mem_size();
-            
+
             // If cache size decreased, items were evicted
             if cache.len() < old_len {
                 stats.evictions += (old_len - cache.len()) as u64;
@@ -722,75 +722,75 @@ mod tests {
     #[test]
     fn test_lru_cache_basic_operations() {
         initialize_lru_cache();
-        
+
         let key = Arc::new(b"test_key".to_vec());
         let value = Arc::new(b"test_value".to_vec());
-        
+
         // Test set and get
         set_lru_cache(key.clone(), value.clone());
         let retrieved = get_lru_cache(&key);
         assert_eq!(retrieved, Some(value));
-        
+
         // Test cache miss
         let missing_key = Arc::new(b"missing_key".to_vec());
         let missing = get_lru_cache(&missing_key);
         assert_eq!(missing, None);
     }
-    
+
     #[test]
     fn test_api_cache_operations() {
         // Set to View mode to ensure API cache gets proper allocation
         set_cache_allocation_mode(CacheAllocationMode::View);
         initialize_lru_cache();
-        
+
         let key = "test_api_key".to_string();
         let value = Arc::new(b"test_api_value".to_vec());
-        
+
         // Test set and get
         api_cache_set(key.clone(), value.clone());
         let retrieved = api_cache_get(&key);
         assert_eq!(retrieved, Some(value));
-        
+
         // Test cache miss
         let missing = api_cache_get("missing_api_key");
         assert_eq!(missing, None);
-        
+
         // Test remove
         let removed = api_cache_remove(&key);
         assert_eq!(removed, Some(Arc::new(b"test_api_value".to_vec())));
-        
+
         // Verify removal
         let after_remove = api_cache_get(&key);
         assert_eq!(after_remove, None);
-        
+
         // Reset to default mode
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
     }
-    
+
     #[test]
     fn test_cache_stats() {
         // Ensure we're in indexer mode for this test
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
         initialize_lru_cache();
         clear_lru_cache(); // Reset stats
-        
+
         // Use a unique key to avoid conflicts with other tests
         let unique_suffix = std::thread::current().id();
         let key = Arc::new(format!("stats_test_key_{:?}", unique_suffix).into_bytes());
         let value = Arc::new(format!("stats_test_value_{:?}", unique_suffix).into_bytes());
-        
+
         // Clear cache again to ensure clean state
         clear_lru_cache();
-        
+
         // Get initial stats - should be zero after clear
         let initial_stats = get_cache_stats();
-        
+
         // Cache miss should increment misses
         let miss_result = get_lru_cache(&key);
         assert!(miss_result.is_none()); // Should be a miss
         let after_miss = get_cache_stats();
         assert!(after_miss.misses > initial_stats.misses);
-        
+
         // Set value and hit should increment hits
         set_lru_cache(key.clone(), value);
         let hit_result = get_lru_cache(&key);
@@ -799,22 +799,24 @@ mod tests {
         assert!(after_hit.hits > initial_stats.hits);
         assert!(after_hit.items >= 1); // At least our item should be there
     }
-    
+
     #[test]
     fn test_memory_size_calculation() {
         let small_vec = Arc::new(vec![1, 2, 3]);
         let large_vec = Arc::new(vec![0u8; 1000]);
-        
+
         let small_cache_value = CacheValue::from(small_vec);
         let large_cache_value = CacheValue::from(large_vec);
-        
+
         let small_size = small_cache_value.mem_size();
         let large_size = large_cache_value.mem_size();
-        
+
         // Large vector should use more memory
         assert!(large_size > small_size);
-        
+
         // Size should include overhead plus data
-        assert!(small_size >= 3 + std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>());
+        assert!(
+            small_size >= 3 + std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>()
+        );
     }
 }

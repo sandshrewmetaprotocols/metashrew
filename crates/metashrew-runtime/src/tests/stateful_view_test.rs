@@ -3,7 +3,10 @@
 //! This module tests the stateful view runtime that retains WASM memory
 //! and instance state between view function calls.
 
-use crate::{MetashrewRuntime, traits::{KeyValueStoreLike, BatchLike}};
+use crate::{
+    traits::{BatchLike, KeyValueStoreLike},
+    MetashrewRuntime,
+};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -30,7 +33,8 @@ pub struct InMemoryBatch {
 
 impl crate::traits::BatchLike for InMemoryBatch {
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.operations.push((key.as_ref().to_vec(), Some(value.as_ref().to_vec())));
+        self.operations
+            .push((key.as_ref().to_vec(), Some(value.as_ref().to_vec())));
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
@@ -49,7 +53,9 @@ impl KeyValueStoreLike for InMemoryStore {
     type Batch = InMemoryBatch;
 
     fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
-        let mut data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let mut data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         for (key, value_opt) in batch.operations {
             match value_opt {
                 Some(value) => {
@@ -64,12 +70,16 @@ impl KeyValueStoreLike for InMemoryStore {
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         Ok(data.get(key.as_ref()).cloned())
     }
 
     fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         Ok(data.get(key.as_ref()).cloned())
     }
 
@@ -78,13 +88,17 @@ impl KeyValueStoreLike for InMemoryStore {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        let mut data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let mut data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         data.insert(key.as_ref().to_vec(), value.as_ref().to_vec());
         Ok(())
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
-        let mut data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let mut data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         data.remove(key.as_ref());
         Ok(())
     }
@@ -93,7 +107,9 @@ impl KeyValueStoreLike for InMemoryStore {
         &self,
         prefix: K,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         let prefix_bytes = prefix.as_ref();
         Ok(data
             .iter()
@@ -107,7 +123,9 @@ impl KeyValueStoreLike for InMemoryStore {
     }
 
     fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         let keys: Vec<Vec<u8>> = data.keys().cloned().collect();
         Ok(Box::new(keys.into_iter()))
     }
@@ -117,10 +135,11 @@ impl KeyValueStoreLike for InMemoryStore {
 /// This demonstrates stateful behavior between view calls
 const STATEFUL_WASM: &[u8] = &[
     0x00, 0x61, 0x73, 0x6d, // WASM magic number
-    0x01, 0x00, 0x00, 0x00, // WASM version
-    // This is a minimal WASM module for testing
-    // In a real implementation, this would be a proper WASM module
-    // that maintains state in memory between calls
+    0x01, 0x00, 0x00,
+    0x00, // WASM version
+          // This is a minimal WASM module for testing
+          // In a real implementation, this would be a proper WASM module
+          // that maintains state in memory between calls
 ];
 
 #[cfg(test)]

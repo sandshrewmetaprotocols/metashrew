@@ -35,9 +35,7 @@ async fn test_prefixroot_parsing() {
         repo: None,
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
-        prefixroot: vec![
-            "balances:0x62616c616e6365733a,sequence:0x73657175656e63653a".to_string(),
-        ],
+        prefixroot: vec!["balances:0x62616c616e6365733a,sequence:0x73657175656e63653a".to_string()],
         enable_view_pool: false,
         view_pool_size: None,
         view_pool_max_concurrent: None,

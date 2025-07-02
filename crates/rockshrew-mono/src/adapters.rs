@@ -8,7 +8,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use hex;
-use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime, ViewRuntimePool, ViewPoolConfig, ViewPoolSupport, ViewPoolStats};
+use metashrew_runtime::{
+    KeyValueStoreLike, MetashrewRuntime, ViewPoolConfig, ViewPoolStats, ViewPoolSupport,
+    ViewRuntimePool,
+};
 use metashrew_sync::{
     AtomicBlockResult, BitcoinNodeAdapter, BlockInfo, ChainTip, PreviewCall, RuntimeAdapter,
     RuntimeStats, SyncError, SyncResult, ViewCall, ViewResult,
@@ -113,7 +116,12 @@ impl BitcoinRpcAdapter {
                     return Ok(tunneled_response);
                 }
                 Err(e) => {
-                    log::warn!("Request failed (attempt {}): {}. Retrying in {:?}...", attempt + 1, e, retry_delay);
+                    log::warn!(
+                        "Request failed (attempt {}): {}. Retrying in {:?}...",
+                        attempt + 1,
+                        e,
+                        retry_delay
+                    );
                     if let Some(guard) = &mut active_tunnel_guard {
                         **guard = None;
                     }
@@ -238,20 +246,22 @@ impl MetashrewRuntimeAdapter {
             view_pool: Arc::new(RwLock::new(None)),
         }
     }
-    
+
     /// Initialize the view pool with the specified configuration
     pub async fn initialize_view_pool(&self, config: ViewPoolConfig) -> Result<()> {
         let runtime = self.runtime.read().await;
-        let pool = runtime.create_view_pool(config).await
+        let pool = runtime
+            .create_view_pool(config)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to create view pool: {}", e))?;
-        
+
         let mut view_pool_guard = self.view_pool.write().await;
         *view_pool_guard = Some(pool);
-        
+
         log::info!("View pool initialized successfully");
         Ok(())
     }
-    
+
     /// Get view pool statistics for monitoring
     pub async fn get_view_pool_stats(&self) -> Option<ViewPoolStats> {
         if let Some(pool) = self.view_pool.read().await.as_ref() {
@@ -260,26 +270,31 @@ impl MetashrewRuntimeAdapter {
             None
         }
     }
-    
+
     /// Disable stateful views to use non-stateful async wasmtime
     pub async fn disable_stateful_views(&self) {
         let mut runtime = self.runtime.write().await;
         runtime.disable_stateful_views();
         log::info!("Stateful views disabled - will use non-stateful async wasmtime");
     }
-    
+
     /// Check if stateful views are enabled
     pub async fn is_stateful_views_enabled(&self) -> bool {
         let runtime = self.runtime.read().await;
         runtime.is_stateful_views_enabled()
     }
 
-    pub async fn set_snapshot_manager(&self, manager: Arc<RwLock<crate::snapshot::SnapshotManager>>) {
+    pub async fn set_snapshot_manager(
+        &self,
+        manager: Arc<RwLock<crate::snapshot::SnapshotManager>>,
+    ) {
         let mut snapshot_manager = self.snapshot_manager.write().await;
         *snapshot_manager = Some(manager);
     }
 
-    pub async fn get_snapshot_manager(&self) -> Option<Arc<RwLock<crate::snapshot::SnapshotManager>>> {
+    pub async fn get_snapshot_manager(
+        &self,
+    ) -> Option<Arc<RwLock<crate::snapshot::SnapshotManager>>> {
         self.snapshot_manager.read().await.as_ref().cloned()
     }
 }
@@ -385,7 +400,9 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             let result = pool
                 .view(call.function_name, &call.input_data, call.height)
                 .await
-                .map_err(|e| SyncError::ViewFunction(format!("View pool execution failed: {}", e)))?;
+                .map_err(|e| {
+                    SyncError::ViewFunction(format!("View pool execution failed: {}", e))
+                })?;
             Ok(ViewResult { data: result })
         } else {
             // Fallback to direct runtime execution
@@ -416,9 +433,9 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
     async fn refresh_memory(&mut self) -> SyncResult<()> {
         log::info!("Memory refresh requested (typically during chain reorganization)");
         let mut runtime = self.runtime.write().await;
-        runtime.refresh_memory().map_err(|e| {
-            SyncError::Runtime(format!("Failed to refresh runtime memory: {}", e))
-        })?;
+        runtime
+            .refresh_memory()
+            .map_err(|e| SyncError::Runtime(format!("Failed to refresh runtime memory: {}", e)))?;
         Ok(())
     }
 

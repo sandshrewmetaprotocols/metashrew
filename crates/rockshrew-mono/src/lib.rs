@@ -45,8 +45,8 @@
 // - The `run` function should be generic over the adapter traits to support both
 //   production (RocksDB) and testing (in-memory) environments.
 
-pub mod smt_helper;
 pub mod adapters;
+pub mod smt_helper;
 pub mod snapshot;
 pub mod snapshot_adapters;
 pub mod ssh_tunnel;
@@ -70,8 +70,8 @@ use crate::adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter};
 use crate::ssh_tunnel::parse_daemon_rpc_url;
 use metashrew_runtime::{set_label, MetashrewRuntime, ViewPoolConfig};
 use metashrew_sync::{
-    BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync,
-    SnapshotProvider, StorageAdapter, SyncConfig, SyncMode, SnapshotSyncEngine,
+    BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync, SnapshotProvider,
+    SnapshotSyncEngine, StorageAdapter, SyncConfig, SyncMode,
 };
 use rockshrew_runtime::{RocksDBRuntimeAdapter, RocksDBStorageAdapter};
 
@@ -181,26 +181,53 @@ where
                 .metashrew_preview(block_hex, function_name, input_hex, height)
                 .await
         }
-        "metashrew_height" => state.sync_engine.read().await.metashrew_height().await.map(|h| h.to_string()),
+        "metashrew_height" => state
+            .sync_engine
+            .read()
+            .await
+            .metashrew_height()
+            .await
+            .map(|h| h.to_string()),
         "metashrew_getblockhash" => {
             let height = params[0].as_u64().unwrap_or_default() as u32;
-            state.sync_engine.read().await.metashrew_getblockhash(height).await
+            state
+                .sync_engine
+                .read()
+                .await
+                .metashrew_getblockhash(height)
+                .await
         }
         "metashrew_stateroot" => {
             let height = params[0].as_str().unwrap_or("latest").to_string();
-            state.sync_engine.read().await.metashrew_stateroot(height).await
+            state
+                .sync_engine
+                .read()
+                .await
+                .metashrew_stateroot(height)
+                .await
         }
-        "metashrew_snapshot" => state.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
+        "metashrew_snapshot" => state
+            .sync_engine
+            .read()
+            .await
+            .metashrew_snapshot()
+            .await
+            .map(|v| v.to_string()),
         "metashrew_prefixroot" => {
             let name = params[0].as_str().unwrap_or_default().to_string();
             let height = params[1].as_str().unwrap_or("latest").to_string();
-            state.sync_engine.read().await.metashrew_prefixroot(name, height).await
+            state
+                .sync_engine
+                .read()
+                .await
+                .metashrew_prefixroot(name, height)
+                .await
         }
         _ => Err(anyhow::anyhow!("Method not found").into()),
     };
 
     let duration = start_time.elapsed();
-    
+
     // Log slow RPC calls
     if duration > std::time::Duration::from_millis(100) {
         warn!("Slow RPC call: {} took {:?}", method, duration);
@@ -235,7 +262,9 @@ async fn setup_signal_handler() -> Arc<AtomicBool> {
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown_requested.clone();
     tokio::spawn(async move {
-        signal::ctrl_c().await.expect("Failed to install CTRL+C signal handler");
+        signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C signal handler");
         shutdown_clone.store(true, Ordering::SeqCst);
         info!("Shutdown signal received, initiating graceful shutdown...");
     });
@@ -299,22 +328,25 @@ where
             let mut block_count = 0u64;
             let mut total_processing_time = std::time::Duration::ZERO;
             let start_time = Instant::now();
-            
+
             loop {
                 let block_start = Instant::now();
                 let mut engine = sync_engine_clone.write().await;
-                
+
                 match engine.process_next_block().await {
                     Ok(Some(height)) => {
                         let block_duration = block_start.elapsed();
                         block_count += 1;
                         total_processing_time += block_duration;
-                        
+
                         // Log performance metrics
                         if block_duration > std::time::Duration::from_millis(500) {
-                            warn!("Slow block processing at height {}: {:?}", height, block_duration);
+                            warn!(
+                                "Slow block processing at height {}: {:?}",
+                                height, block_duration
+                            );
                         }
-                        
+
                         // Log periodic performance summary
                         if block_count % 100 == 0 {
                             let avg_time = total_processing_time / block_count as u32;
@@ -325,7 +357,7 @@ where
                                 block_count, avg_time, blocks_per_sec
                             );
                         }
-                        
+
                         debug!("Processed block {} in {:?}", height, block_duration);
 
                         // Log prefix roots
@@ -333,7 +365,6 @@ where
                         if let Err(e) = runtime_adapter.log_prefix_roots().await {
                             error!("Failed to log prefix roots: {}", e);
                         }
-
 
                         if Some(height) == engine.config.exit_at {
                             break;
@@ -382,16 +413,16 @@ where
             App::new()
                 .wrap(cors)
                 .app_data(app_state.clone())
-                .service(
-                    web::resource("/")
-                        .route(web::post().to(handle_jsonrpc::<N, S, R>))
-                )
+                .service(web::resource("/").route(web::post().to(handle_jsonrpc::<N, S, R>)))
         })
         .bind((args.host.as_str(), args.port))?
         .run()
     });
 
-    info!("JSON-RPC server running at http://{}:{}", args.host, args.port);
+    info!(
+        "JSON-RPC server running at http://{}:{}",
+        args.host, args.port
+    );
     info!("Indexer is ready and processing blocks.");
 
     let shutdown_signal = setup_signal_handler().await;
@@ -428,8 +459,7 @@ use hex::FromHex;
 
 /// Production-specific run function.
 pub async fn run_prod(args: Args) -> Result<()> {
-    let (rpc_url, bypass_ssl, tunnel_config) =
-        parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
+    let (rpc_url, bypass_ssl, tunnel_config) = parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
 
     info!("Initializing RocksDB with performance-optimized configuration");
     info!("Database path: {}", args.db_path.display());
@@ -459,11 +489,15 @@ pub async fn run_prod(args: Args) -> Result<()> {
     )?;
 
     let db = {
-        let context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+        let context = runtime
+            .context
+            .lock()
+            .map_err(|_| anyhow!("Failed to lock context"))?;
         context.db.db.clone()
     };
 
-    let node_adapter = BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
+    let node_adapter =
+        BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
     let storage_adapter = RocksDBStorageAdapter::new(db.clone());
     let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
 
@@ -471,21 +505,23 @@ pub async fn run_prod(args: Args) -> Result<()> {
     if args.enable_view_pool {
         let pool_size = args.view_pool_size.unwrap_or_else(num_cpus::get);
         let max_concurrent = args.view_pool_max_concurrent.unwrap_or(pool_size * 2);
-        
+
         let view_pool_config = ViewPoolConfig {
             pool_size,
             max_concurrent_requests: Some(max_concurrent),
             enable_logging: args.view_pool_logging,
         };
-        
-        info!("Initializing view pool with {} runtimes, max {} concurrent requests",
-              pool_size, max_concurrent);
-        
+
+        info!(
+            "Initializing view pool with {} runtimes, max {} concurrent requests",
+            pool_size, max_concurrent
+        );
+
         if let Err(e) = runtime_adapter.initialize_view_pool(view_pool_config).await {
             error!("Failed to initialize view pool: {}", e);
             return Err(e);
         }
-        
+
         info!("View pool initialized successfully - using stateful view runtimes for parallel execution");
     } else {
         // Disable stateful views to ensure we use non-stateful async wasmtime

@@ -113,7 +113,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapt
         Self { runtime }
     }
 
-    pub fn get_context(&self) -> Arc<std::sync::Mutex<metashrew_runtime::MetashrewRuntimeContext<T>>> {
+    pub fn get_context(
+        &self,
+    ) -> Arc<std::sync::Mutex<metashrew_runtime::MetashrewRuntimeContext<T>>> {
         self.runtime.blocking_lock().context.clone()
     }
 }
@@ -141,9 +143,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
             context.height = height;
             context.db.set_height(height);
         }
-        runtime.run().map_err(|e| {
-            SyncError::Runtime(format!("Runtime execution failed: {}", e))
-        })?;
+        runtime
+            .run()
+            .map_err(|e| SyncError::Runtime(format!("Runtime execution failed: {}", e)))?;
         Ok(())
     }
 
@@ -154,15 +156,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
         let mut runtime = self.runtime.lock().await;
-        match runtime.process_block_atomic(height, block_data, block_hash).await {
-            Ok(result) => {
-                Ok(AtomicBlockResult {
-                    state_root: result.state_root,
-                    batch_data: result.batch_data,
-                    height: result.height,
-                    block_hash: result.block_hash,
-                })
-            }
+        match runtime
+            .process_block_atomic(height, block_data, block_hash)
+            .await
+        {
+            Ok(result) => Ok(AtomicBlockResult {
+                state_root: result.state_root,
+                batch_data: result.batch_data,
+                height: result.height,
+                block_hash: result.block_hash,
+            }),
             Err(e) => Err(SyncError::Runtime(format!(
                 "Atomic block processing failed: {}",
                 e
@@ -195,18 +198,20 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
         let runtime = self.runtime.lock().await;
-        runtime
-            .get_state_root(height)
-            .await
-            .map_err(|e| SyncError::Runtime(format!("Failed to get state root for height {}: {}", height, e)))
+        runtime.get_state_root(height).await.map_err(|e| {
+            SyncError::Runtime(format!(
+                "Failed to get state root for height {}: {}",
+                height, e
+            ))
+        })
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {
         log::info!("Memory refresh requested (typically during chain reorganization)");
         let mut runtime = self.runtime.lock().await;
-        runtime.refresh_memory().map_err(|e| {
-            SyncError::Runtime(format!("Failed to refresh runtime memory: {}", e))
-        })?;
+        runtime
+            .refresh_memory()
+            .map_err(|e| SyncError::Runtime(format!("Failed to refresh runtime memory: {}", e)))?;
         Ok(())
     }
 

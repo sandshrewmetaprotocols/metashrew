@@ -1,9 +1,7 @@
 //! RocksDB implementation of KeyValueStoreLike trait
 
 use anyhow::Result;
-use metashrew_runtime::{
-    BatchLike, KVTrackerFn, KeyValueStoreLike, TIP_HEIGHT_KEY,
-};
+use metashrew_runtime::{BatchLike, KVTrackerFn, KeyValueStoreLike, TIP_HEIGHT_KEY};
 use rocksdb::{Options, WriteBatch, WriteBatchIterator, DB};
 use std::sync::{Arc, Mutex};
 
@@ -132,7 +130,6 @@ impl RocksDBRuntimeAdapter {
     pub fn write_atomic_batch(&self, batch: WriteBatch) -> Result<(), rocksdb::Error> {
         self.db.write(batch)
     }
-
 }
 
 pub struct RocksDBBatch(pub WriteBatch);
@@ -222,7 +219,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         } else {
             false
         };
-        
+
         if should_track {
             self.track_kv_update(key_slice.to_vec(), value_slice.to_vec());
         }

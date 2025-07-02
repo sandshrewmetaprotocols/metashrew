@@ -10,14 +10,16 @@ pub mod proto;
 pub mod runtime;
 pub mod smt;
 pub mod traits;
+pub mod view_pool;
 
 #[cfg(test)]
 pub mod tests;
 
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;
-pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
+pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY, StatefulViewRuntime};
 pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
+pub use view_pool::{ViewRuntimePool, ViewPoolConfig, ViewPoolStats, ViewPoolSupport};
 
 // Re-export helper types
 pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};

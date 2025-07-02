@@ -2783,9 +2783,11 @@ version = "9.0.0"
 dependencies = [
  "anyhow",
  "env_logger",
+ "futures",
  "hex",
  "itertools 0.12.1",
  "log",
+ "num_cpus",
  "protobuf 3.7.2",
  "protobuf-codegen 3.7.2",
  "protoc-bin-vendored",

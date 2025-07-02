@@ -211,8 +211,9 @@ impl State {
 ///
 /// # Memory Management
 ///
-/// The runtime now supports persistent memory between blocks:
+/// The runtime supports persistent memory between blocks and view calls:
 /// - **Memory persistence**: WASM memory state is retained between normal block processing
+/// - **Stateful views**: WASM memory persists between view calls (enabled by default)
 /// - **Resource limits**: Pre-allocated maximum memory to avoid growth
 /// - **LRU cache**: metashrew-core redesign prevents unbounded memory growth
 /// - **Reorg refresh**: Memory is only refreshed during chain reorganizations
@@ -304,10 +305,13 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
 
     /// Stateful view runtime for retaining WASM memory between view calls
     ///
-    /// This optional field contains a persistent WASM runtime that retains
-    /// its memory and instance state between view function calls. When present,
-    /// view functions will reuse this runtime instead of creating new instances.
+    /// This field contains a persistent WASM runtime that retains its memory
+    /// and instance state between view function calls. When present, view
+    /// functions will reuse this runtime instead of creating new instances.
     /// This enables stateful view operations where WASM memory persists.
+    ///
+    /// **DEFAULT BEHAVIOR**: Stateful views are now enabled by default for
+    /// better performance and to support stateful operations.
     pub stateful_view_runtime: Option<StatefulViewRuntime<T>>,
 }
 
@@ -535,7 +539,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let instance = linker
             .instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
-        Ok(MetashrewRuntime {
+        let mut runtime = MetashrewRuntime {
             wasmstore,
             async_engine,
             engine,
@@ -545,7 +549,18 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context,
             instance,
             stateful_view_runtime: None,
-        })
+        };
+        
+        // Enable stateful views by default
+        // This allows WASM memory to persist between view calls for better performance
+        // and stateful operations
+        log::info!("Enabling stateful views by default for persistent WASM memory");
+        if let Err(e) = runtime.enable_stateful_views_sync() {
+            log::warn!("Failed to enable stateful views by default: {}", e);
+            // Continue without stateful views if initialization fails
+        }
+        
+        Ok(runtime)
     }
 
     pub fn new(
@@ -1394,7 +1409,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let instance = linker
             .instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
-        Ok(MetashrewRuntime {
+        let mut runtime = MetashrewRuntime {
             wasmstore,
             engine: engine.clone(),
             async_engine: engine,
@@ -1404,7 +1419,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context,
             instance,
             stateful_view_runtime: None,
-        })
+        };
+        
+        // Enable stateful views by default for preview/internal runtimes too
+        log::debug!("Enabling stateful views by default for internal runtime");
+        if let Err(e) = runtime.enable_stateful_views_sync() {
+            log::warn!("Failed to enable stateful views for internal runtime: {}", e);
+            // Continue without stateful views if initialization fails
+        }
+        
+        Ok(runtime)
     }
 
     async fn new_with_db_async(
@@ -1437,7 +1461,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .instantiate_async(&mut wasmstore, &module)
             .await
             .context("Failed to instantiate WASM module")?;
-        Ok(MetashrewRuntime {
+        let mut runtime = MetashrewRuntime {
             wasmstore,
             engine: engine.clone(),
             async_engine: engine,
@@ -1447,7 +1471,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context,
             instance,
             stateful_view_runtime: None,
-        })
+        };
+        
+        // Enable stateful views by default for async runtimes too
+        log::debug!("Enabling stateful views by default for async runtime");
+        if let Err(e) = runtime.enable_stateful_views().await {
+            log::warn!("Failed to enable stateful views for async runtime: {}", e);
+            // Continue without stateful views if initialization fails
+        }
+        
+        Ok(runtime)
     }
 
     fn setup_linker_preview(
@@ -2151,6 +2184,39 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
         self.stateful_view_runtime = Some(stateful_runtime);
         log::info!("Stateful view mode enabled - WASM memory will persist between view calls");
+        Ok(())
+    }
+
+    /// Enable stateful view mode synchronously (used during initialization)
+    ///
+    /// This is a synchronous version of `enable_stateful_views` that can be called
+    /// during runtime initialization. It uses `tokio::task::block_in_place` to
+    /// handle the async operations within a sync context.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the stateful runtime was successfully created,
+    /// or an error if initialization failed.
+    pub fn enable_stateful_views_sync(&mut self) -> Result<()> {
+        let db = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+
+        // Use block_in_place to handle async operations in sync context
+        let stateful_runtime = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                StatefulViewRuntime::new(
+                    db,
+                    0, // Initial height, will be updated per view call
+                    self.async_engine.clone(),
+                    self.async_module.clone(),
+                ).await
+            })
+        })?;
+
+        self.stateful_view_runtime = Some(stateful_runtime);
+        log::info!("Stateful view mode enabled synchronously - WASM memory will persist between view calls");
         Ok(())
     }
 

@@ -4,6 +4,8 @@ use metashrew_support::index_pointer::KeyValuePointer;
 use std::io::Cursor;
 use std::sync::Arc;
 
+pub mod benchmark;
+
 #[metashrew_core::main]
 pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     // Store the block data
@@ -20,9 +22,11 @@ pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>>
     new_tracker.extend((&[parsed_block.header.block_hash()[0]]).to_vec());
     tracker.set(Arc::new(new_tracker));
     
-    // Add a simple test value to ensure something gets flushed
-    let mut test_pointer = IndexPointer::from_keyword(format!("/test/{}", height).as_str());
-    test_pointer.set(Arc::new(b"test_value".to_vec()));
+    // Benchmark: Create 1000 storage entries for benchmarking view function performance
+    let storage_pointer = IndexPointer::from_keyword("/storage");
+    for _i in 0u32..1000 {
+        storage_pointer.append(Arc::new(vec![0x01]));
+    }
     
     Ok(())
 }
@@ -46,4 +50,18 @@ pub fn blocktracker(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>>
         .clone();
     
     Ok(tracker_data)
+}
+
+#[metashrew_core::view]
+pub fn benchmark_view(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // Read all 1000 storage values and concatenate them into a single bytearray
+    let mut result = Vec::new();
+    
+    let storage_pointer = IndexPointer::from_keyword("/storage");
+    for i in 0u32..1000 {
+        let value = storage_pointer.select_index(i).get();
+        result.extend_from_slice(value.as_ref());
+    }
+    
+    Ok(result)
 }

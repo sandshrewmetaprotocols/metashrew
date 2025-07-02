@@ -18,7 +18,11 @@ itertools = "0.12.1"
 protobuf = "3"
 wasmtime = "18.0.2"
 tempfile = "3.8.1"
-tokio = { version = "1.0", features = ["sync"] }
+tokio = { version = "1.0", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
+num_cpus = "1.16"
+
+[dev-dependencies]
+futures = "0.3"
 
 [build-dependencies]
 protobuf-codegen = "3.4.0"

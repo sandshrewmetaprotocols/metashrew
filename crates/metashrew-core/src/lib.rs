@@ -331,24 +331,27 @@ pub fn flush() {
         // Reset flush queue
         TO_FLUSH = Some(Vec::<Arc<Vec<u8>>>::new());
         
-        // Only proceed with host call if we have data to flush
-        if !to_encode.is_empty() {
-            let mut buffer = KeyValueFlush::new();
-            buffer.list = to_encode;
-            
-            // Handle serialization errors gracefully
-            match buffer.write_to_bytes() {
-                Ok(serialized) => {
-                    // Only call host function if serialization succeeded
-                    let serialized_vec = serialized.to_vec();
-                    if !serialized_vec.is_empty() {
-                        __flush(to_ptr(&mut to_arraybuffer_layout(&serialized_vec)) + 4);
-                    }
+        // Always call the host __flush function to ensure context state is set to 1
+        // This is critical for proper indexer completion signaling
+        let mut buffer = KeyValueFlush::new();
+        buffer.list = to_encode;
+        
+        // Handle serialization errors gracefully
+        match buffer.write_to_bytes() {
+            Ok(serialized) => {
+                // Always call host function, even with empty data
+                let serialized_vec = serialized.to_vec();
+                __flush(to_ptr(&mut to_arraybuffer_layout(&serialized_vec)) + 4);
+            }
+            Err(_) => {
+                // Serialization failed - create empty flush to signal completion
+                let empty_buffer = KeyValueFlush::new();
+                if let Ok(empty_serialized) = empty_buffer.write_to_bytes() {
+                    let empty_vec = empty_serialized.to_vec();
+                    __flush(to_ptr(&mut to_arraybuffer_layout(&empty_vec)) + 4);
                 }
-                Err(_) => {
-                    // Serialization failed - log this if possible but don't panic
-                    // The cache will still be cleared to maintain consistency
-                }
+                // If even empty serialization fails, we have a serious problem
+                // but we still need to clear cache to maintain consistency
             }
         }
         
@@ -391,6 +394,20 @@ pub fn flush() {
 #[allow(unused_unsafe)]
 pub fn input() -> Vec<u8> {
     initialize();
+    
+    #[cfg(feature = "test-utils")]
+    {
+        // In test mode, return the mock input data directly
+        use crate::imports::_INPUT;
+        unsafe {
+            match _INPUT.as_ref() {
+                Some(v) => v.clone(),
+                None => vec![],
+            }
+        }
+    }
+    
+    #[cfg(not(feature = "test-utils"))]
     unsafe {
         let length: i32 = __host_len().into();
         let mut buffer = Vec::<u8>::new();

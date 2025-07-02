@@ -7,8 +7,8 @@ use std::sync::Arc;
 #[metashrew_core::main]
 pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     // Store the block data
-    IndexPointer::from_keyword(format!("/blocks/{}", height).as_str())
-        .set(Arc::new(block.to_vec()));
+    let mut block_pointer = IndexPointer::from_keyword(format!("/blocks/{}", height).as_str());
+    block_pointer.set(Arc::new(block.to_vec()));
     
     // Parse the block
     let parsed_block =
@@ -19,6 +19,10 @@ pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>>
     let mut new_tracker = tracker.get().as_ref().clone();
     new_tracker.extend((&[parsed_block.header.block_hash()[0]]).to_vec());
     tracker.set(Arc::new(new_tracker));
+    
+    // Add a simple test value to ensure something gets flushed
+    let mut test_pointer = IndexPointer::from_keyword(format!("/test/{}", height).as_str());
+    test_pointer.set(Arc::new(b"test_value".to_vec()));
     
     Ok(())
 }

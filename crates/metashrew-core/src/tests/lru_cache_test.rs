@@ -172,18 +172,18 @@ mod tests {
         clear();
         initialize();
         
-        let key = Arc::new(b"stats_test_key".to_vec());
+        let key = Arc::new(b"stats_test_key_unique".to_vec());
         let value = Arc::new(b"stats_test_value".to_vec());
         
-        // Initial stats
-        let initial_stats = lru_cache_stats();
-        let initial_hits = initial_stats.hits;
-        let initial_misses = initial_stats.misses;
+        // Get baseline stats (other tests may have run)
+        let baseline_stats = lru_cache_stats();
+        let baseline_hits = baseline_stats.hits;
+        let baseline_misses = baseline_stats.misses;
         
         // Cache miss should increment misses
         get(key.clone());
         let after_miss = lru_cache_stats();
-        assert_eq!(after_miss.misses, initial_misses + 1);
+        assert_eq!(after_miss.misses, baseline_misses + 1);
         
         // Set value and access should increment hits
         set(key.clone(), value);
@@ -191,7 +191,7 @@ mod tests {
         get(key.clone()); // Should hit LRU cache
         
         let after_hit = lru_cache_stats();
-        assert_eq!(after_hit.hits, initial_hits + 1);
+        assert_eq!(after_hit.hits, baseline_hits + 1);
         assert!(after_hit.items > 0);
     }
 

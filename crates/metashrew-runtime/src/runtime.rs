@@ -1008,15 +1008,23 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
         let execution_result = match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
-                if self.context.lock().map_err(lock_err)?.state != 1
-                    && !self.wasmstore.data().had_failure
-                {
+                let context_state = self.context.lock().map_err(lock_err)?.state;
+                let had_failure = self.wasmstore.data().had_failure;
+                
+                log::debug!("WASM execution completed: context_state={}, had_failure={}", context_state, had_failure);
+                
+                if context_state != 1 && !had_failure {
+                    log::error!("Indexer exited unexpectedly: context_state={}, had_failure={}", context_state, had_failure);
                     Err(anyhow!("indexer exited unexpectedly"))
                 } else {
+                    log::debug!("Indexer completed successfully: context_state={}", context_state);
                     Ok(())
                 }
             }
-            Err(e) => Err(e).context("Error calling _start function"),
+            Err(e) => {
+                log::error!("Error calling _start function: {}", e);
+                Err(e).context("Error calling _start function")
+            }
         };
 
         // ALWAYS refresh memory after block execution for deterministic behavior
@@ -1772,9 +1780,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     // Set completion state
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
+                            log::debug!("Host __flush function called, setting context state to 1");
                             ctx.state = 1;
                         }
                         Err(_) => {
+                            log::error!("Failed to lock context in __flush function");
                             caller.data_mut().had_failure = true;
                             return;
                         }

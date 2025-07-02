@@ -3,10 +3,6 @@ name = "rockshrew-mono"
 version = "9.0.0"
 edition = "2021"
 
-[lib]
-name = "rockshrew_mono"
-path = "src/lib.rs"
-
 [dependencies]
 async-trait = "0.1"
 rand = "0.8"

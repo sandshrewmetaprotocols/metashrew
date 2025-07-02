@@ -8,7 +8,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use hex;
-use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
+use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime, ViewRuntimePool, ViewPoolConfig, ViewPoolSupport, ViewPoolStats};
 use metashrew_sync::{
     AtomicBlockResult, BitcoinNodeAdapter, BlockInfo, ChainTip, PreviewCall, RuntimeAdapter,
     RuntimeStats, SyncError, SyncResult, ViewCall, ViewResult,
@@ -222,9 +222,11 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 }
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime and is snapshot-aware.
+/// Now includes a parallelized view pool for concurrent view execution.
 pub struct MetashrewRuntimeAdapter {
     runtime: Arc<RwLock<MetashrewRuntime<RocksDBKeyValueAdapter>>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
+    view_pool: Arc<RwLock<Option<ViewRuntimePool<RocksDBKeyValueAdapter>>>>,
 }
 
 impl MetashrewRuntimeAdapter {
@@ -232,6 +234,29 @@ impl MetashrewRuntimeAdapter {
         Self {
             runtime,
             snapshot_manager: Arc::new(RwLock::new(None)),
+            view_pool: Arc::new(RwLock::new(None)),
+        }
+    }
+    
+    /// Initialize the view pool with the specified configuration
+    pub async fn initialize_view_pool(&self, config: ViewPoolConfig) -> Result<()> {
+        let runtime = self.runtime.read().await;
+        let pool = runtime.create_view_pool(config).await
+            .map_err(|e| anyhow::anyhow!("Failed to create view pool: {}", e))?;
+        
+        let mut view_pool_guard = self.view_pool.write().await;
+        *view_pool_guard = Some(pool);
+        
+        log::info!("View pool initialized successfully");
+        Ok(())
+    }
+    
+    /// Get view pool statistics for monitoring
+    pub async fn get_view_pool_stats(&self) -> Option<ViewPoolStats> {
+        if let Some(pool) = self.view_pool.read().await.as_ref() {
+            Some(pool.get_stats().await)
+        } else {
+            None
         }
     }
 
@@ -340,12 +365,24 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.read().await;
-        let result = runtime
-            .view(call.function_name, &call.input_data, call.height)
-            .await
-            .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
-        Ok(ViewResult { data: result })
+        // Try to use view pool first if available
+        if let Some(pool) = self.view_pool.read().await.as_ref() {
+            log::debug!("Using view pool for function: {}", call.function_name);
+            let result = pool
+                .view(call.function_name, &call.input_data, call.height)
+                .await
+                .map_err(|e| SyncError::ViewFunction(format!("View pool execution failed: {}", e)))?;
+            Ok(ViewResult { data: result })
+        } else {
+            // Fallback to direct runtime execution
+            log::debug!("Using direct runtime for function: {}", call.function_name);
+            let runtime = self.runtime.read().await;
+            let result = runtime
+                .view(call.function_name, &call.input_data, call.height)
+                .await
+                .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
+            Ok(ViewResult { data: result })
+        }
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {

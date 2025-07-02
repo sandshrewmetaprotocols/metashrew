@@ -68,7 +68,7 @@ use tracing::{debug, instrument};
 
 use crate::adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter};
 use crate::ssh_tunnel::parse_daemon_rpc_url;
-use metashrew_runtime::{set_label, MetashrewRuntime};
+use metashrew_runtime::{set_label, MetashrewRuntime, ViewPoolConfig};
 use metashrew_sync::{
     BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync,
     SnapshotProvider, StorageAdapter, SyncConfig, SyncMode, SnapshotSyncEngine,
@@ -113,6 +113,18 @@ pub struct Args {
     pub reorg_check_threshold: u32,
     #[arg(long)]
     pub prefixroot: Vec<String>,
+    /// Enable view pool for parallel view execution
+    #[arg(long)]
+    pub enable_view_pool: bool,
+    /// Number of view runtimes in the pool (default: number of CPU cores)
+    #[arg(long)]
+    pub view_pool_size: Option<usize>,
+    /// Maximum concurrent view requests (default: pool_size * 2)
+    #[arg(long)]
+    pub view_pool_max_concurrent: Option<usize>,
+    /// Enable view pool logging for debugging
+    #[arg(long)]
+    pub view_pool_logging: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -454,6 +466,30 @@ pub async fn run_prod(args: Args) -> Result<()> {
     let node_adapter = BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
     let storage_adapter = RocksDBStorageAdapter::new(db.clone());
     let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+
+    // Initialize view pool if enabled
+    if args.enable_view_pool {
+        let pool_size = args.view_pool_size.unwrap_or_else(num_cpus::get);
+        let max_concurrent = args.view_pool_max_concurrent.unwrap_or(pool_size * 2);
+        
+        let view_pool_config = ViewPoolConfig {
+            pool_size,
+            max_concurrent_requests: Some(max_concurrent),
+            enable_logging: args.view_pool_logging,
+        };
+        
+        info!("Initializing view pool with {} runtimes, max {} concurrent requests",
+              pool_size, max_concurrent);
+        
+        if let Err(e) = runtime_adapter.initialize_view_pool(view_pool_config).await {
+            error!("Failed to initialize view pool: {}", e);
+            return Err(e);
+        }
+        
+        info!("View pool initialized successfully");
+    } else {
+        info!("View pool disabled, using direct runtime execution");
+    }
 
     run(args, node_adapter, storage_adapter, runtime_adapter, None).await
 }

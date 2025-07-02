@@ -31,7 +31,9 @@ impl KeyValueStoreLike for InMemoryStore {
     type Batch = InMemoryBatch;
 
     fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
-        let mut data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let mut data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         for (key, value_opt) in batch.operations {
             match value_opt {
                 Some(value) => {
@@ -46,12 +48,16 @@ impl KeyValueStoreLike for InMemoryStore {
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         Ok(data.get(key.as_ref()).cloned())
     }
 
     fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         Ok(data.get(key.as_ref()).cloned())
     }
 
@@ -60,13 +66,17 @@ impl KeyValueStoreLike for InMemoryStore {
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
     {
-        let mut data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let mut data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         data.insert(key.as_ref().to_vec(), value.as_ref().to_vec());
         Ok(())
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
-        let mut data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let mut data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         data.remove(key.as_ref());
         Ok(())
     }
@@ -75,7 +85,9 @@ impl KeyValueStoreLike for InMemoryStore {
         &self,
         prefix: K,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         let prefix_bytes = prefix.as_ref();
         Ok(data
             .iter()
@@ -89,7 +101,9 @@ impl KeyValueStoreLike for InMemoryStore {
     }
 
     fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
-        let data = self.data.lock().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e)))?;
+        let data = self.data.lock().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("Lock error: {}", e))
+        })?;
         let keys: Vec<Vec<u8>> = data.keys().cloned().collect();
         Ok(Box::new(keys.into_iter()))
     }
@@ -120,7 +134,8 @@ impl InMemoryBatch {
 
 impl crate::traits::BatchLike for InMemoryBatch {
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
-        self.operations.push((key.as_ref().to_vec(), Some(value.as_ref().to_vec())));
+        self.operations
+            .push((key.as_ref().to_vec(), Some(value.as_ref().to_vec())));
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
@@ -142,13 +157,13 @@ impl Default for InMemoryBatch {
 fn create_test_block() -> Vec<u8> {
     // Create a minimal valid Bitcoin block
     let mut block = Vec::new();
-    
+
     // Block header (80 bytes)
     block.extend_from_slice(&[0u8; 80]);
-    
+
     // Transaction count (1 transaction)
     block.push(1);
-    
+
     // Transaction (minimal coinbase transaction)
     // Version
     block.extend_from_slice(&1u32.to_le_bytes());
@@ -166,7 +181,7 @@ fn create_test_block() -> Vec<u8> {
     block.push(0);
     // Lock time
     block.extend_from_slice(&0u32.to_le_bytes());
-    
+
     block
 }
 
@@ -212,8 +227,10 @@ impl BenchmarkResult {
         println!("Total Duration: {:?}", self.total_duration);
         println!("Average per Call: {:?}", self.average_per_call);
         println!("Data Size: {} bytes", self.data_size);
-        println!("Throughput: {:.2} calls/sec", 
-                 self.view_calls as f64 / self.total_duration.as_secs_f64());
+        println!(
+            "Throughput: {:.2} calls/sec",
+            self.view_calls as f64 / self.total_duration.as_secs_f64()
+        );
         println!();
     }
 }
@@ -225,19 +242,21 @@ async fn run_benchmark_test(
     view_calls: usize,
 ) -> Result<BenchmarkResult> {
     // Load the WASM module using absolute path
-    let wasm_path = std::path::PathBuf::from("/home/ubuntu/metashrew-9.0.0-rc13/target/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
-    
+    let wasm_path = std::path::PathBuf::from(
+        "../../target/wasm32-unknown-unknown/release/metashrew_minimal.wasm",
+    );
+
     // Check if the WASM file exists
     if !wasm_path.exists() {
         return Err(anyhow::anyhow!("WASM file not found at {:?}. Please run: cargo build --target wasm32-unknown-unknown --release --package metashrew-minimal", wasm_path));
     }
-    
+
     // Create storage backend
     let store = InMemoryStore::new();
-    
+
     // Create runtime
     let mut runtime = MetashrewRuntime::load(wasm_path, store, vec![])?;
-    
+
     // Configure stateful views
     if stateful_enabled {
         runtime.enable_stateful_views().await?;
@@ -246,10 +265,10 @@ async fn run_benchmark_test(
         runtime.disable_stateful_views();
         log::info!("Stateful views disabled for benchmark");
     }
-    
+
     // Process block 0 with benchmark data (creates 1000 storage entries)
     let block_data = create_test_block();
-    
+
     // Set up the runtime to use the benchmark_main_impl function
     // We need to call the benchmark version that creates 1000 storage entries
     {
@@ -258,36 +277,50 @@ async fn run_benchmark_test(
         guard.height = 0;
         guard.state = 0;
     }
-    
+
     // Execute the benchmark main function to populate storage
     runtime.run()?;
     log::info!("Populated storage with 1000 entries for benchmark");
-    
+
     // Benchmark view function calls
     let start_time = Instant::now();
     let mut total_data_size = 0;
-    
+
     for i in 0..view_calls {
         let input = vec![]; // Empty input for benchmark view
-        let result = runtime.view("benchmark_view".to_string(), &input, 0).await?;
+        let result = runtime
+            .view("benchmark_view".to_string(), &input, 0)
+            .await?;
         total_data_size = result.len(); // All calls should return the same size
-        
+
         if i == 0 {
             log::info!("First view call returned {} bytes", result.len());
             // Verify we got the expected data (1000 bytes of 0x01)
-            assert_eq!(result.len(), 1000, "Expected 1000 bytes from benchmark view");
-            assert!(result.iter().all(|&b| b == 0x01), "Expected all bytes to be 0x01");
+            assert_eq!(
+                result.len(),
+                1000,
+                "Expected 1000 bytes from benchmark view"
+            );
+            assert!(
+                result.iter().all(|&b| b == 0x01),
+                "Expected all bytes to be 0x01"
+            );
         }
-        
+
         // Log progress every 10 calls
         if (i + 1) % 10 == 0 {
             let elapsed = start_time.elapsed();
-            log::info!("Completed {}/{} view calls in {:?}", i + 1, view_calls, elapsed);
+            log::info!(
+                "Completed {}/{} view calls in {:?}",
+                i + 1,
+                view_calls,
+                elapsed
+            );
         }
     }
-    
+
     let total_duration = start_time.elapsed();
-    
+
     Ok(BenchmarkResult::new(
         test_name.to_string(),
         stateful_enabled,
@@ -300,45 +333,50 @@ async fn run_benchmark_test(
 /// Compare performance between stateful and non-stateful view modes
 pub async fn compare_stateful_performance() -> Result<()> {
     println!("=== Stateful vs Non-Stateful View Performance Benchmark ===\n");
-    
+
     // Test parameters
     let view_calls = 50; // Number of view calls to benchmark
-    
+
     // Run benchmark with stateful views disabled
     println!("Running benchmark with stateful views DISABLED...");
-    let non_stateful_result = run_benchmark_test(
-        "Non-Stateful Views",
-        false,
-        view_calls,
-    ).await?;
-    
+    let non_stateful_result = run_benchmark_test("Non-Stateful Views", false, view_calls).await?;
+
     // Run benchmark with stateful views enabled
     println!("Running benchmark with stateful views ENABLED...");
-    let stateful_result = run_benchmark_test(
-        "Stateful Views",
-        true,
-        view_calls,
-    ).await?;
-    
+    let stateful_result = run_benchmark_test("Stateful Views", true, view_calls).await?;
+
     // Print results
     non_stateful_result.print_summary();
     stateful_result.print_summary();
-    
+
     // Calculate performance improvement
-    let speedup = non_stateful_result.total_duration.as_nanos() as f64 
-                  / stateful_result.total_duration.as_nanos() as f64;
-    
+    let speedup = non_stateful_result.total_duration.as_nanos() as f64
+        / stateful_result.total_duration.as_nanos() as f64;
+
     println!("=== Performance Comparison ===");
-    println!("Stateful views are {:.2}x faster than non-stateful views", speedup);
-    println!("Time saved per call: {:?}", 
-             non_stateful_result.average_per_call.saturating_sub(stateful_result.average_per_call));
-    println!("Total time saved: {:?}", 
-             non_stateful_result.total_duration.saturating_sub(stateful_result.total_duration));
-    
+    println!(
+        "Stateful views are {:.2}x faster than non-stateful views",
+        speedup
+    );
+    println!(
+        "Time saved per call: {:?}",
+        non_stateful_result
+            .average_per_call
+            .saturating_sub(stateful_result.average_per_call)
+    );
+    println!(
+        "Total time saved: {:?}",
+        non_stateful_result
+            .total_duration
+            .saturating_sub(stateful_result.total_duration)
+    );
+
     // Verify stateful views are faster (they should be)
-    assert!(stateful_result.total_duration < non_stateful_result.total_duration,
-            "Stateful views should be faster than non-stateful views");
-    
+    assert!(
+        stateful_result.total_duration < non_stateful_result.total_duration,
+        "Stateful views should be faster than non-stateful views"
+    );
+
     Ok(())
 }
 
@@ -354,10 +392,10 @@ mod tests {
             .filter_level(log::LevelFilter::Info)
             .is_test(true)
             .try_init();
-        
+
         // Run the benchmark comparison
         let result = compare_stateful_performance().await;
-        
+
         match result {
             Ok(()) => {
                 println!("Benchmark completed successfully!");
@@ -368,7 +406,7 @@ mod tests {
             }
         }
     }
-    
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_single_stateful_view_call() {
         // Initialize logging
@@ -376,10 +414,10 @@ mod tests {
             .filter_level(log::LevelFilter::Info)
             .is_test(true)
             .try_init();
-        
+
         // Test a single view call with stateful views enabled
         let result = run_benchmark_test("Single Stateful Call", true, 1).await;
-        
+
         match result {
             Ok(benchmark_result) => {
                 benchmark_result.print_summary();
@@ -393,7 +431,7 @@ mod tests {
             }
         }
     }
-    
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_single_non_stateful_view_call() {
         // Initialize logging
@@ -401,10 +439,10 @@ mod tests {
             .filter_level(log::LevelFilter::Info)
             .is_test(true)
             .try_init();
-        
+
         // Test a single view call with stateful views disabled
         let result = run_benchmark_test("Single Non-Stateful Call", false, 1).await;
-        
+
         match result {
             Ok(benchmark_result) => {
                 benchmark_result.print_summary();

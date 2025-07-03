@@ -66,3 +66,19 @@ pub fn benchmark_view(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error
 
     Ok(result)
 }
+
+#[metashrew_core::view]
+pub fn benchmark_view_with_set(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    // Read all 1000 storage values and concatenate them into a single bytearray
+    let mut result = Vec::new();
+
+    let storage_pointer = IndexPointer::from_keyword("/storage");
+    for i in 0u32..1000 {
+        let mut ptr = storage_pointer.select_index(i);
+        ptr.set(Arc::new(vec![0x02]));
+        let value = ptr.get();
+        result.extend_from_slice(value.as_ref());
+    }
+
+    Ok(result)
+}

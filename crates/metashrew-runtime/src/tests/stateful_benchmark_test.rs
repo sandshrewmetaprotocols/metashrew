@@ -240,6 +240,7 @@ async fn run_benchmark_test(
     test_name: &str,
     stateful_enabled: bool,
     view_calls: usize,
+    test_set: bool,
 ) -> Result<BenchmarkResult> {
     // Load the WASM module using absolute path
     let wasm_path = std::path::PathBuf::from(
@@ -281,6 +282,21 @@ async fn run_benchmark_test(
     // Execute the benchmark main function to populate storage
     runtime.run()?;
     log::info!("Populated storage with 1000 entries for benchmark");
+
+    if test_set {
+        let result = runtime
+            .view("benchmark_view_with_set".to_string(), &vec![], 0)
+            .await?;
+        assert_eq!(
+            result.len(),
+            1000,
+            "Expected 1000 bytes from benchmark view"
+        );
+        assert!(
+            result.iter().all(|&b| b == 0x02),
+            "Expected all bytes to be 0x02"
+        );
+    }
 
     // Benchmark view function calls
     let start_time = Instant::now();
@@ -339,11 +355,12 @@ pub async fn compare_stateful_performance() -> Result<()> {
 
     // Run benchmark with stateful views disabled
     println!("Running benchmark with stateful views DISABLED...");
-    let non_stateful_result = run_benchmark_test("Non-Stateful Views", false, view_calls).await?;
+    let non_stateful_result =
+        run_benchmark_test("Non-Stateful Views", false, view_calls, false).await?;
 
     // Run benchmark with stateful views enabled
     println!("Running benchmark with stateful views ENABLED...");
-    let stateful_result = run_benchmark_test("Stateful Views", true, view_calls).await?;
+    let stateful_result = run_benchmark_test("Stateful Views", true, view_calls, false).await?;
 
     // Print results
     non_stateful_result.print_summary();
@@ -373,8 +390,8 @@ pub async fn compare_stateful_performance() -> Result<()> {
 
     // Verify stateful views are faster (they should be)
     assert!(
-        stateful_result.total_duration < non_stateful_result.total_duration,
-        "Stateful views should be faster than non-stateful views"
+        stateful_result.total_duration * 4 < non_stateful_result.total_duration,
+        "Stateful views should be at least 4x faster than non-stateful views"
     );
 
     Ok(())
@@ -416,7 +433,32 @@ mod tests {
             .try_init();
 
         // Test a single view call with stateful views enabled
-        let result = run_benchmark_test("Single Stateful Call", true, 1).await;
+        let result = run_benchmark_test("Single Stateful Call", true, 1, false).await;
+
+        match result {
+            Ok(benchmark_result) => {
+                benchmark_result.print_summary();
+                assert_eq!(benchmark_result.view_calls, 1);
+                assert_eq!(benchmark_result.data_size, 1000);
+                assert!(benchmark_result.stateful_enabled);
+            }
+            Err(e) => {
+                eprintln!("Single stateful view test failed: {}", e);
+                panic!("Single stateful view test failed: {}", e);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_single_stateful_view_call_cannot_modify() {
+        // Initialize logging
+        let _ = env_logger::builder()
+            .filter_level(log::LevelFilter::Info)
+            .is_test(true)
+            .try_init();
+
+        // Test a single view call with stateful views enabled
+        let result = run_benchmark_test("Single Stateful Call", true, 1, true).await;
 
         match result {
             Ok(benchmark_result) => {
@@ -441,7 +483,7 @@ mod tests {
             .try_init();
 
         // Test a single view call with stateful views disabled
-        let result = run_benchmark_test("Single Non-Stateful Call", false, 1).await;
+        let result = run_benchmark_test("Single Non-Stateful Call", false, 1, false).await;
 
         match result {
             Ok(benchmark_result) => {

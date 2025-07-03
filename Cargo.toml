@@ -21,7 +21,6 @@ edition = "2021"
 
 [features]
 default = []
-logs = ["metashrew-runtime/logs", "rockshrew-mono/logs"]
 
 [dependencies]
 # Core dependencies

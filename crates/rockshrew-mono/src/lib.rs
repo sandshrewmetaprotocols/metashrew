@@ -128,6 +128,9 @@ pub struct Args {
     /// Disable LRU cache and refresh memory for each WASM invocation
     #[arg(long)]
     pub disable_lru_cache: bool,
+    /// Disable WASM __log host function (silently ignore WASM log calls)
+    #[arg(long)]
+    pub disable_wasmtime_log: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -547,11 +550,16 @@ pub async fn run_prod(args: Args) -> Result<()> {
         .collect::<Result<Vec<(String, Vec<u8>)>>>()?;
 
     // Use the optimized configuration from rockshrew-runtime based on performance analysis
-    let runtime = MetashrewRuntime::load(
+    let mut runtime = MetashrewRuntime::load(
         args.indexer.clone(),
         RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
         prefix_configs,
     )?;
+
+    // Set the disable wasmtime log flag if requested
+    if args.disable_wasmtime_log {
+        runtime.set_disable_wasmtime_log(true);
+    }
 
     let db = {
         let context = runtime

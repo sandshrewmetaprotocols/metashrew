@@ -82,7 +82,6 @@ use crate::traits::{BatchLike, KeyValueStoreLike};
 /// Only emits logs when built with --features logs.
 macro_rules! alkane_wasmi_log {
     ($($arg:tt)*) => {
-        #[cfg(feature = "logs")]
         {
             print!("ALKANE_WASM: {}", format!($($arg)*));
         }
@@ -327,6 +326,13 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     /// **DEFAULT BEHAVIOR**: Stateful views are now enabled by default for
     /// better performance and to support stateful operations.
     pub stateful_view_runtime: Option<StatefulViewRuntime<T>>,
+
+    /// Flag to disable WASM __log host function
+    ///
+    /// When true, the __log host function will silently ignore all WASM log calls.
+    /// This provides the same behavior as the old --features logs flag but controlled
+    /// at runtime instead of compile time.
+    pub disable_wasmtime_log: bool,
 }
 
 /// Stateful view runtime that retains WASM memory and instance between calls
@@ -541,7 +547,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             wasmstore.limiter(|state| &mut state.limits)
         }
         {
-            Self::setup_linker(context.clone(), &mut linker)
+            Self::setup_linker_with_log_flag(context.clone(), &mut linker, false)
                 .context("Failed to setup basic linker")?;
             Self::setup_linker_indexer(context.clone(), &mut linker)
                 .context("Failed to setup indexer linker")?;
@@ -560,6 +566,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context,
             instance,
             stateful_view_runtime: None,
+            disable_wasmtime_log: false,
         };
 
         // Enable stateful views by default
@@ -619,7 +626,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             wasmstore.limiter(|state| &mut state.limits)
         }
         {
-            Self::setup_linker(context.clone(), &mut linker)
+            Self::setup_linker_with_log_flag(context.clone(), &mut linker, false)
                 .context("Failed to setup basic linker")?;
             Self::setup_linker_indexer(context.clone(), &mut linker)
                 .context("Failed to setup indexer linker")?;
@@ -638,6 +645,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context,
             instance,
             stateful_view_runtime: None,
+            disable_wasmtime_log: false,
         })
     }
 
@@ -777,6 +785,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 context: view_context,
                 instance,
                 stateful_view_runtime: None,
+                disable_wasmtime_log: false,
             }
         };
 
@@ -1181,6 +1190,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
+        Self::setup_linker_with_log_flag(context, linker, false)
+    }
+
+    pub fn setup_linker_with_log_flag(
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        linker: &mut Linker<State>,
+        disable_wasmtime_log: bool,
+    ) -> Result<()> {
         let context_ref_len = context.clone();
         let context_ref_input = context.clone();
 
@@ -1252,8 +1269,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .func_wrap(
                 "env",
                 "__log",
-                #[cfg(feature = "logs")]
-                |mut caller: Caller<'_, State>, data_start: i32| {
+                move |mut caller: Caller<'_, State>, data_start: i32| {
+                    // Check the runtime flag to determine if logging should be disabled
+                    if disable_wasmtime_log {
+                        // Silently ignore WASM log calls when wasmtime logging is disabled
+                        return;
+                    }
+
                     let mem = match caller.get_export("memory") {
                         Some(export) => match export.into_memory() {
                             Some(memory) => memory,
@@ -1271,10 +1293,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     if let Ok(text) = std::str::from_utf8(&bytes) {
                         alkane_wasmi_log!("{}", text);
                     }
-                },
-                #[cfg(not(feature = "logs"))]
-                |_caller: Caller<'_, State>, _data_start: i32| {
-                    // Silently ignore WASM log calls when logs feature is disabled
                 },
             )
             .map_err(|e| anyhow!("Failed to wrap __log: {:?}", e))?;
@@ -1450,6 +1468,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context,
             instance,
             stateful_view_runtime: None,
+            disable_wasmtime_log: false,
         };
 
         // Enable stateful views by default for preview/internal runtimes too
@@ -1502,6 +1521,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             context,
             instance,
             stateful_view_runtime: None,
+            disable_wasmtime_log: false,
         };
 
         // Enable stateful views by default for async runtimes too
@@ -2292,6 +2312,69 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// `true` if stateful view mode is enabled, `false` otherwise.
     pub fn is_stateful_views_enabled(&self) -> bool {
         self.stateful_view_runtime.is_some()
+    }
+
+    /// Set the disable wasmtime log flag
+    ///
+    /// When set to true, the __log host function will silently ignore all WASM log calls.
+    /// This provides the same behavior as the old --features logs flag but controlled
+    /// at runtime instead of compile time.
+    ///
+    /// # Parameters
+    ///
+    /// - `disable`: Whether to disable WASM logging
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Disable WASM logging
+    /// runtime.set_disable_wasmtime_log(true);
+    /// ```
+    pub fn set_disable_wasmtime_log(&mut self, disable: bool) {
+        self.disable_wasmtime_log = disable;
+        if disable {
+            log::info!("WASM __log host function disabled - WASM log calls will be silently ignored");
+        } else {
+            log::info!("WASM __log host function enabled - WASM log calls will be processed");
+        }
+        
+        // Rebuild the linker and instance with the new log setting
+        if let Err(e) = self.rebuild_linker_with_log_setting() {
+            log::error!("Failed to rebuild linker with new log setting: {}", e);
+        }
+    }
+
+    /// Rebuild the linker and instance with the current log setting
+    fn rebuild_linker_with_log_setting(&mut self) -> Result<()> {
+        let mut linker = Linker::<State>::new(&self.engine);
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        
+        wasmstore.limiter(|state| &mut state.limits);
+        
+        Self::setup_linker_with_log_flag(self.context.clone(), &mut linker, self.disable_wasmtime_log)
+            .context("Failed to setup basic linker with log flag")?;
+        Self::setup_linker_indexer(self.context.clone(), &mut linker)
+            .context("Failed to setup indexer linker")?;
+        linker.define_unknown_imports_as_traps(&self.module)?;
+        
+        let instance = linker
+            .instantiate(&mut wasmstore, &self.module)
+            .context("Failed to instantiate WASM module with new log setting")?;
+        
+        self.linker = linker;
+        self.wasmstore = wasmstore;
+        self.instance = instance;
+        
+        Ok(())
+    }
+
+    /// Check if WASM logging is disabled
+    ///
+    /// # Returns
+    ///
+    /// `true` if WASM logging is disabled, `false` otherwise.
+    pub fn is_wasmtime_log_disabled(&self) -> bool {
+        self.disable_wasmtime_log
     }
 
     /// Execute a view function using the stateful runtime

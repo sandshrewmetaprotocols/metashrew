@@ -789,7 +789,8 @@ pub fn is_lru_cache_available() -> bool {
 /// # Example
 ///
 /// ```rust,no_run
-/// use metashrew_core::{initialize, set_cache_mode, CacheAllocationMode};
+/// use metashrew_core::{initialize, set_cache_mode};
+/// use metashrew_support::lru_cache::CacheAllocationMode;
 ///
 /// initialize();
 /// set_cache_mode(CacheAllocationMode::View);

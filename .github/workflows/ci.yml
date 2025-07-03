@@ -60,7 +60,15 @@ jobs:
       
     - name: Run tests
       continue-on-error: true
-      run: cargo test --all-features
+      run: cargo test
+      
+    - name: Run metashrew runtime tests
+      continue-on-error: true
+      run: cargo test -p metashrew-runtime
+      
+    - name: Run metashrew core tests
+      continue-on-error: true
+      run: cargo test -p metashrew-core
       
     - name: Run doc tests
       run: cargo test --doc --all-features

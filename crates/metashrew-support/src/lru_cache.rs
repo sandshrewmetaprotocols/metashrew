@@ -140,8 +140,17 @@ impl From<CacheValue> for Arc<Vec<u8>> {
 
 impl HeapSize for CacheValue {
     fn heap_size(&self) -> usize {
-        // Size of the Arc wrapper + size of the Vec + size of the data
-        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
+        // More accurate memory calculation:
+        // - Arc overhead (reference counting, etc.)
+        // - Vec overhead (capacity, length, pointer)
+        // - Actual data size
+        // - Additional overhead for heap allocation alignment
+        let arc_overhead = std::mem::size_of::<Arc<Vec<u8>>>() * 2; // Conservative estimate
+        let vec_overhead = std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<usize>(); // capacity overhead
+        let data_size = self.0.len();
+        let alignment_overhead = (data_size + 7) & !7; // 8-byte alignment padding
+        
+        arc_overhead + vec_overhead + alignment_overhead
     }
 }
 
@@ -163,8 +172,13 @@ impl From<CacheKey> for Arc<Vec<u8>> {
 
 impl HeapSize for CacheKey {
     fn heap_size(&self) -> usize {
-        // Size of the Arc wrapper + size of the Vec + size of the data
-        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
+        // More accurate memory calculation for keys
+        let arc_overhead = std::mem::size_of::<Arc<Vec<u8>>>() * 2; // Conservative estimate
+        let vec_overhead = std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<usize>(); // capacity overhead
+        let data_size = self.0.len();
+        let alignment_overhead = (data_size + 7) & !7; // 8-byte alignment padding
+        
+        arc_overhead + vec_overhead + alignment_overhead
     }
 }
 
@@ -697,17 +711,38 @@ pub fn force_evict_to_target() {
             // In indexer mode, only the main LRU cache should be large
             let mut cache_guard = LRU_CACHE.write().unwrap();
             if let Some(cache) = cache_guard.as_mut() {
-                // Force eviction if over 1GB
-                while cache.mem_size() > LRU_CACHE_MEMORY_LIMIT {
-                    if cache.is_empty() {
-                        break; // Safety check to prevent infinite loop
+                let current_size = cache.mem_size();
+                let current_items = cache.len();
+                
+                // Only evict if significantly over limit to avoid thrashing
+                let eviction_threshold = LRU_CACHE_MEMORY_LIMIT + (LRU_CACHE_MEMORY_LIMIT / 10); // 10% buffer
+                
+                if current_size > eviction_threshold {
+                    println!("LRU Cache eviction triggered: {} bytes, {} items, limit: {} bytes",
+                             current_size, current_items, LRU_CACHE_MEMORY_LIMIT);
+                    
+                    // Evict down to 90% of limit to provide breathing room
+                    let target_size = (LRU_CACHE_MEMORY_LIMIT * 9) / 10;
+                    let mut evicted_count = 0;
+                    
+                    while cache.mem_size() > target_size && !cache.is_empty() {
+                        cache.remove_lru();
+                        evicted_count += 1;
+                        
+                        // Safety check to prevent infinite loop
+                        if evicted_count > current_items / 2 {
+                            println!("LRU Cache eviction safety limit reached, stopping");
+                            break;
+                        }
                     }
-                    cache.remove_lru();
+                    
+                    println!("LRU Cache eviction completed: evicted {} items, {} bytes remaining, {} items remaining",
+                             evicted_count, cache.mem_size(), cache.len());
                     
                     // Update eviction statistics
                     {
                         let mut stats = CACHE_STATS.write().unwrap();
-                        stats.evictions += 1;
+                        stats.evictions += evicted_count as u64;
                         stats.items = cache.len();
                         stats.memory_usage = cache.mem_size();
                     }

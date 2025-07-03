@@ -23,9 +23,12 @@ num_cpus = "1.16"
 
 [dev-dependencies]
 futures = "0.3"
+wat = "1.235.0"
 
 [build-dependencies]
 protobuf-codegen = "3.4.0"
 protoc-rust = { version = "2.28.0" }
 protoc-bin-vendored = "3.0.0"
 
+[features]
+logs = []

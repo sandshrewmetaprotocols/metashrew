@@ -75,6 +75,20 @@ use crate::context::MetashrewRuntimeContext;
 use crate::smt::SMTHelper;
 use crate::traits::{BatchLike, KeyValueStoreLike};
 
+/// Special macro for WASM logs that distinguishes them from alkanes-rs system logs
+///
+/// This macro prefixes WASM logs with "ALKANE_WASM:" to clearly identify that the log
+/// is coming from user WASM code interpreted in the system, not from alkanes-rs itself.
+/// Only emits logs when built with --features logs.
+macro_rules! alkane_wasmi_log {
+    ($($arg:tt)*) => {
+        #[cfg(feature = "logs")]
+        {
+            print!("ALKANE_WASM: {}", format!($($arg)*));
+        }
+    };
+}
+
 /// Internal key used to store the current blockchain tip height
 ///
 /// This key is used internally by the runtime to track the highest block
@@ -1238,6 +1252,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .func_wrap(
                 "env",
                 "__log",
+                #[cfg(feature = "logs")]
                 |mut caller: Caller<'_, State>, data_start: i32| {
                     let mem = match caller.get_export("memory") {
                         Some(export) => match export.into_memory() {
@@ -1254,8 +1269,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     if let Ok(text) = std::str::from_utf8(&bytes) {
-                        print!("{}", text);
+                        alkane_wasmi_log!("{}", text);
                     }
+                },
+                #[cfg(not(feature = "logs"))]
+                |_caller: Caller<'_, State>, _data_start: i32| {
+                    // Silently ignore WASM log calls when logs feature is disabled
                 },
             )
             .map_err(|e| anyhow!("Failed to wrap __log: {:?}", e))?;

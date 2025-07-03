@@ -260,17 +260,50 @@ where
     Ok(HttpResponse::Ok().json(response))
 }
 
-/// Sets up a signal handler for graceful shutdown.
+/// Sets up a robust signal handler for graceful and forceful shutdown.
+///
+/// First Ctrl-C: Initiates graceful shutdown
+/// Second Ctrl-C: Forces immediate process termination
 async fn setup_signal_handler() -> Arc<AtomicBool> {
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown_requested.clone();
+    
     tokio::spawn(async move {
-        signal::ctrl_c()
-            .await
-            .expect("Failed to install CTRL+C signal handler");
-        shutdown_clone.store(true, Ordering::SeqCst);
-        info!("Shutdown signal received, initiating graceful shutdown...");
+        let mut ctrl_c_count = 0;
+        
+        loop {
+            match signal::ctrl_c().await {
+                Ok(()) => {
+                    ctrl_c_count += 1;
+                    
+                    if ctrl_c_count == 1 {
+                        info!("First Ctrl-C received, initiating graceful shutdown...");
+                        info!("Press Ctrl-C again to force immediate termination");
+                        shutdown_clone.store(true, Ordering::SeqCst);
+                        
+                        // Start a timeout for graceful shutdown
+                        let shutdown_timeout = shutdown_clone.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            if shutdown_timeout.load(Ordering::SeqCst) {
+                                warn!("Graceful shutdown timeout reached, forcing termination...");
+                                std::process::exit(1);
+                            }
+                        });
+                    } else {
+                        warn!("Second Ctrl-C received, forcing immediate termination!");
+                        warn!("Terminating process forcefully...");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to listen for Ctrl-C signal: {}", e);
+                    break;
+                }
+            }
+        }
     });
+    
     shutdown_requested
 }
 
@@ -324,103 +357,111 @@ where
         sync_engine: sync_engine_arc.clone(),
     });
 
-    let indexer_handle = tokio::spawn({
-        let sync_engine_clone = sync_engine_arc.clone();
-        async move {
-            info!("Starting block indexing process...");
-            let mut block_count = 0u64;
-            let mut total_processing_time = std::time::Duration::ZERO;
-            let start_time = Instant::now();
+    let (indexer_handle, indexer_abort_handle) = {
+        let task = tokio::spawn({
+            let sync_engine_clone = sync_engine_arc.clone();
+            async move {
+                info!("Starting block indexing process...");
+                let mut block_count = 0u64;
+                let mut total_processing_time = std::time::Duration::ZERO;
+                let start_time = Instant::now();
 
-            loop {
-                let block_start = Instant::now();
-                let mut engine = sync_engine_clone.write().await;
+                loop {
+                    let block_start = Instant::now();
+                    let mut engine = sync_engine_clone.write().await;
 
-                match engine.process_next_block().await {
-                    Ok(Some(height)) => {
-                        let block_duration = block_start.elapsed();
-                        block_count += 1;
-                        total_processing_time += block_duration;
+                    match engine.process_next_block().await {
+                        Ok(Some(height)) => {
+                            let block_duration = block_start.elapsed();
+                            block_count += 1;
+                            total_processing_time += block_duration;
 
-                        // Log performance metrics
-                        if block_duration > std::time::Duration::from_millis(500) {
-                            warn!(
-                                "Slow block processing at height {}: {:?}",
-                                height, block_duration
-                            );
+                            // Log performance metrics
+                            if block_duration > std::time::Duration::from_millis(500) {
+                                warn!(
+                                    "Slow block processing at height {}: {:?}",
+                                    height, block_duration
+                                );
+                            }
+
+                            // Log periodic performance summary
+                            if block_count % 100 == 0 {
+                                let avg_time = total_processing_time / block_count as u32;
+                                let elapsed = start_time.elapsed();
+                                let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
+                                info!(
+                                    "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
+                                    block_count, avg_time, blocks_per_sec
+                                );
+                            }
+
+                            debug!("Processed block {} in {:?}", height, block_duration);
+
+                            // Log prefix roots
+                            let runtime_adapter = engine.runtime.read().await;
+                            if let Err(e) = runtime_adapter.log_prefix_roots().await {
+                                error!("Failed to log prefix roots: {}", e);
+                            }
+
+                            if Some(height) == engine.config.exit_at {
+                                break;
+                            }
+                            // Successfully processed a block, continue immediately
+                            continue;
                         }
-
-                        // Log periodic performance summary
-                        if block_count % 100 == 0 {
-                            let avg_time = total_processing_time / block_count as u32;
-                            let elapsed = start_time.elapsed();
-                            let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
-                            info!(
-                                "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
-                                block_count, avg_time, blocks_per_sec
-                            );
+                        Ok(None) => {
+                            // No more blocks to process, wait for new blocks
+                            debug!("No new blocks available, waiting...");
+                            drop(engine); // Release the lock before sleeping
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         }
-
-                        debug!("Processed block {} in {:?}", height, block_duration);
-
-                        // Log prefix roots
-                        let runtime_adapter = engine.runtime.read().await;
-                        if let Err(e) = runtime_adapter.log_prefix_roots().await {
-                            error!("Failed to log prefix roots: {}", e);
+                        Err(e) => {
+                            // CRITICAL FIX: Don't advance to next block on error!
+                            // The process_next_block() method internally manages height,
+                            // but on error we need to retry the SAME block, not skip it.
+                            let error_duration = block_start.elapsed();
+                            error!("Indexer error after {:?}: {}", error_duration, e);
+                            drop(engine); // Release the lock before sleeping
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            // Continue the loop to retry the same block
                         }
-
-                        if Some(height) == engine.config.exit_at {
-                            break;
-                        }
-                        // Successfully processed a block, continue immediately
-                        continue;
-                    }
-                    Ok(None) => {
-                        // No more blocks to process, wait for new blocks
-                        debug!("No new blocks available, waiting...");
-                        drop(engine); // Release the lock before sleeping
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                    Err(e) => {
-                        // CRITICAL FIX: Don't advance to next block on error!
-                        // The process_next_block() method internally manages height,
-                        // but on error we need to retry the SAME block, not skip it.
-                        let error_duration = block_start.elapsed();
-                        error!("Indexer error after {:?}: {}", error_duration, e);
-                        drop(engine); // Release the lock before sleeping
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        // Continue the loop to retry the same block
                     }
                 }
             }
-        }
-    });
+        });
+        let abort_handle = task.abort_handle();
+        (task, abort_handle)
+    };
 
-    let server_handle = tokio::spawn({
-        let args_clone = Arc::new(args.clone());
-        HttpServer::new(move || {
-            let cors = match &args_clone.cors {
-                Some(cors_value) if cors_value == "*" => Cors::default()
-                    .allow_any_origin()
-                    .allow_any_method()
-                    .allow_any_header(),
-                Some(cors_value) => {
-                    let mut cors_builder = Cors::default();
-                    for origin in cors_value.split(',') {
-                        cors_builder = cors_builder.allowed_origin(origin.trim());
+    let (server_handle, server_abort_handle) = {
+        let task = tokio::spawn({
+            let args_clone = Arc::new(args.clone());
+            HttpServer::new(move || {
+                let cors = match &args_clone.cors {
+                    Some(cors_value) if cors_value == "*" => Cors::default()
+                        .allow_any_origin()
+                        .allow_any_method()
+                        .allow_any_header(),
+                    Some(cors_value) => {
+                        let mut cors_builder = Cors::default();
+                        for origin in cors_value.split(',') {
+                            cors_builder = cors_builder.allowed_origin(origin.trim());
+                        }
+                        cors_builder
                     }
-                    cors_builder
-                }
-                None => Cors::default().allowed_origin("http://localhost:8080"),
-            };
-            App::new()
-                .wrap(cors)
-                .app_data(app_state.clone())
-                .service(web::resource("/").route(web::post().to(handle_jsonrpc::<N, S, R>)))
-        })
-        .bind((args.host.as_str(), args.port))?
-        .run()
-    });
+                    None => Cors::default().allowed_origin("http://localhost:8080"),
+                };
+                App::new()
+                    .wrap(cors)
+                    .app_data(app_state.clone())
+                    .service(web::resource("/").route(web::post().to(handle_jsonrpc::<N, S, R>)))
+            })
+            .bind((args.host.as_str(), args.port))?
+            .run()
+        });
+        let abort_handle = task.abort_handle();
+        (task, abort_handle)
+    };
 
     info!(
         "JSON-RPC server running at http://{}:{}",
@@ -429,25 +470,46 @@ where
     info!("Indexer is ready and processing blocks.");
 
     let shutdown_signal = setup_signal_handler().await;
+    
+    // Enhanced shutdown handling with proper task cleanup
     tokio::select! {
         result = indexer_handle => {
             if let Err(e) = result {
                 error!("Indexer task failed: {}", e);
+            } else {
+                info!("Indexer task completed successfully");
             }
         }
         result = server_handle => {
             if let Err(e) = result {
                 error!("Server task failed: {}", e);
+            } else {
+                info!("Server task completed successfully");
             }
         }
         _ = async {
             loop {
                 if shutdown_signal.load(Ordering::SeqCst) {
+                    info!("Shutdown signal detected, beginning graceful shutdown...");
                     break;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         } => {
+            info!("Initiating graceful shutdown of all services...");
+            
+            // Give tasks a moment to finish current operations
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            
+            // Abort all tasks
+            info!("Stopping indexer task...");
+            indexer_abort_handle.abort();
+            
+            info!("Stopping server task...");
+            server_abort_handle.abort();
+            
+            // Wait a bit for cleanup
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             info!("Graceful shutdown complete.");
         }
     }

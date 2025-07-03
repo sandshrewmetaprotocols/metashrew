@@ -104,10 +104,11 @@ use metashrew_support::{
     compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
-        get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
-        get_total_memory_usage, get_view_height, initialize_lru_cache, is_lru_cache_initialized,
-        set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache, set_view_height,
-        CacheAllocationMode, CacheStats,
+        force_evict_to_target, get_cache_allocation_mode, get_cache_stats,
+        get_height_partitioned_cache, get_lru_cache, get_total_memory_usage, get_view_height,
+        initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
+        set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,
+        CacheStats,
     },
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
@@ -356,6 +357,12 @@ pub fn flush() {
         // Always clear the immediate cache after flushing, regardless of success
         // This maintains consistency and prevents accumulation of stale data
         CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
+        
+        // Force eviction if memory usage exceeds 1GB limit
+        // This ensures we don't accumulate too much memory over time
+        if is_lru_cache_initialized() {
+            force_evict_to_target();
+        }
     }
 }
 

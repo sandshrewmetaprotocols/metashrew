@@ -131,7 +131,7 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
             let input_vec = metashrew_support::utils::consume_to_end(&mut host_input)
                 .expect("failed to parse bytearray from input after height");
             #fn_name(height, &input_vec).expect("failed to run indexer");
-            // metashrew_core::flush_to_lru();
+            metashrew_core::flush_to_lru();
             metashrew_core::flush();
         }
     };

@@ -684,6 +684,77 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
     }
 }
 
+/// Force eviction if memory usage exceeds the limit
+///
+/// This function checks if the total memory usage exceeds the 1GB limit and
+/// forces eviction if necessary. This should be called at the end of indexer
+/// runs to ensure memory stays within bounds.
+pub fn force_evict_to_target() {
+    let allocation_mode = *CACHE_ALLOCATION_MODE.read().unwrap();
+    
+    match allocation_mode {
+        CacheAllocationMode::Indexer => {
+            // In indexer mode, only the main LRU cache should be large
+            let mut cache_guard = LRU_CACHE.write().unwrap();
+            if let Some(cache) = cache_guard.as_mut() {
+                // Force eviction if over 1GB
+                while cache.mem_size() > LRU_CACHE_MEMORY_LIMIT {
+                    if cache.is_empty() {
+                        break; // Safety check to prevent infinite loop
+                    }
+                    cache.remove_lru();
+                    
+                    // Update eviction statistics
+                    {
+                        let mut stats = CACHE_STATS.write().unwrap();
+                        stats.evictions += 1;
+                        stats.items = cache.len();
+                        stats.memory_usage = cache.mem_size();
+                    }
+                }
+            }
+        },
+        CacheAllocationMode::View => {
+            // In view mode, check both height-partitioned and API caches
+            {
+                let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
+                if let Some(cache) = cache_guard.as_mut() {
+                    let target_size = LRU_CACHE_MEMORY_LIMIT / 2;
+                    while cache.mem_size() > target_size {
+                        if cache.is_empty() {
+                            break;
+                        }
+                        cache.remove_lru();
+                        
+                        {
+                            let mut stats = CACHE_STATS.write().unwrap();
+                            stats.evictions += 1;
+                        }
+                    }
+                }
+            }
+            
+            {
+                let mut cache_guard = API_CACHE.write().unwrap();
+                if let Some(cache) = cache_guard.as_mut() {
+                    let target_size = LRU_CACHE_MEMORY_LIMIT / 2;
+                    while cache.mem_size() > target_size {
+                        if cache.is_empty() {
+                            break;
+                        }
+                        cache.remove_lru();
+                        
+                        {
+                            let mut stats = CACHE_STATS.write().unwrap();
+                            stats.evictions += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Flush CACHE contents to LRU_CACHE
 ///
 /// This function moves all entries from the immediate CACHE to the persistent
@@ -739,8 +810,17 @@ mod tests {
 
     #[test]
     fn test_api_cache_operations() {
+        // Clear all caches first to ensure clean state
+        clear_lru_cache();
+        
         // Set to View mode to ensure API cache gets proper allocation
         set_cache_allocation_mode(CacheAllocationMode::View);
+        
+        // Force reinitialization by clearing and reinitializing
+        {
+            let mut api_cache = API_CACHE.write().unwrap();
+            *api_cache = None;
+        }
         initialize_lru_cache();
 
         let key = "test_api_key".to_string();
@@ -762,9 +842,9 @@ mod tests {
         // Verify removal
         let after_remove = api_cache_get(&key);
         assert_eq!(after_remove, None);
-
-        // Reset to default mode
+        // Reset to default mode and clear caches
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
+        clear_lru_cache();
     }
 
     #[test]

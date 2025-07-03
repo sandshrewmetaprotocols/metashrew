@@ -722,7 +722,7 @@ pub fn force_evict_to_target() {
                              current_size, current_items, LRU_CACHE_MEMORY_LIMIT);
                     
                     // Evict down to 90% of limit to provide breathing room
-                    let target_size = (LRU_CACHE_MEMORY_LIMIT * 9) / 10;
+                    let target_size = LRU_CACHE_MEMORY_LIMIT - (LRU_CACHE_MEMORY_LIMIT / 10);
                     let mut evicted_count = 0;
                     
                     while cache.mem_size() > target_size && !cache.is_empty() {

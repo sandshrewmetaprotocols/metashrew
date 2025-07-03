@@ -236,6 +236,7 @@ pub struct MetashrewRuntimeAdapter {
     runtime: Arc<RwLock<MetashrewRuntime<RocksDBKeyValueAdapter>>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
     view_pool: Arc<RwLock<Option<ViewRuntimePool<RocksDBKeyValueAdapter>>>>,
+    disable_lru_cache: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MetashrewRuntimeAdapter {
@@ -244,6 +245,7 @@ impl MetashrewRuntimeAdapter {
             runtime,
             snapshot_manager: Arc::new(RwLock::new(None)),
             view_pool: Arc::new(RwLock::new(None)),
+            disable_lru_cache: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -282,6 +284,21 @@ impl MetashrewRuntimeAdapter {
     pub async fn is_stateful_views_enabled(&self) -> bool {
         let runtime = self.runtime.read().await;
         runtime.is_stateful_views_enabled()
+    }
+
+    /// Set the disable LRU cache flag
+    pub fn set_disable_lru_cache(&self, disable: bool) {
+        self.disable_lru_cache.store(disable, std::sync::atomic::Ordering::SeqCst);
+        if disable {
+            log::info!("LRU cache disabled - will refresh memory for each WASM invocation");
+        } else {
+            log::info!("LRU cache enabled - memory will persist between blocks");
+        }
+    }
+
+    /// Check if LRU cache is disabled
+    pub fn is_lru_cache_disabled(&self) -> bool {
+        self.disable_lru_cache.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub async fn set_snapshot_manager(
@@ -339,6 +356,14 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                     .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
                 context.db.set_kv_tracker(None);
             }
+            
+            // Refresh memory after each block if LRU cache is disabled
+            if self.is_lru_cache_disabled() {
+                log::debug!("Refreshing WASM memory after block {} (LRU cache disabled)", height);
+                runtime
+                    .refresh_memory()
+                    .map_err(|e| SyncError::Runtime(format!("Failed to refresh memory after block: {}", e)))?;
+            }
         } else {
             let mut runtime = self.runtime.write().await;
             {
@@ -353,6 +378,14 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             runtime
                 .run()
                 .map_err(|e| SyncError::Runtime(format!("Runtime execution failed: {}", e)))?;
+            
+            // Refresh memory after each block if LRU cache is disabled
+            if self.is_lru_cache_disabled() {
+                log::debug!("Refreshing WASM memory after block {} (LRU cache disabled)", height);
+                runtime
+                    .refresh_memory()
+                    .map_err(|e| SyncError::Runtime(format!("Failed to refresh memory after block: {}", e)))?;
+            }
         }
         Ok(())
     }

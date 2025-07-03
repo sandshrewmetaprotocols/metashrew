@@ -125,6 +125,9 @@ pub struct Args {
     /// Enable view pool logging for debugging
     #[arg(long)]
     pub view_pool_logging: bool,
+    /// Disable LRU cache and refresh memory for each WASM invocation
+    #[arg(long)]
+    pub disable_lru_cache: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -501,8 +504,14 @@ pub async fn run_prod(args: Args) -> Result<()> {
     let storage_adapter = RocksDBStorageAdapter::new(db.clone());
     let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
 
+    // Set the disable LRU cache flag if requested
+    if args.disable_lru_cache {
+        runtime_adapter.set_disable_lru_cache(true);
+    }
+
     // Configure view execution based on view pool setting
-    if args.enable_view_pool {
+    // Disable view pool if LRU cache is disabled
+    if args.enable_view_pool && !args.disable_lru_cache {
         let pool_size = args.view_pool_size.unwrap_or_else(num_cpus::get);
         let max_concurrent = args.view_pool_max_concurrent.unwrap_or(pool_size * 2);
 
@@ -526,7 +535,11 @@ pub async fn run_prod(args: Args) -> Result<()> {
     } else {
         // Disable stateful views to ensure we use non-stateful async wasmtime
         runtime_adapter.disable_stateful_views().await;
-        info!("View pool disabled - using non-stateful async wasmtime for view execution");
+        if args.disable_lru_cache {
+            info!("LRU cache disabled - view pool disabled, will refresh memory for each WASM invocation");
+        } else {
+            info!("View pool disabled - using non-stateful async wasmtime for view execution");
+        }
     }
 
     run(args, node_adapter, storage_adapter, runtime_adapter, None).await

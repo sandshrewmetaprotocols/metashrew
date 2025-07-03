@@ -19,6 +19,10 @@ name = "metashrew-tests"
 version = "9.0.0"
 edition = "2021"
 
+[features]
+default = []
+logs = ["metashrew-runtime/logs", "rockshrew-mono/logs"]
+
 [dependencies]
 # Core dependencies
 anyhow = "1.0.86"

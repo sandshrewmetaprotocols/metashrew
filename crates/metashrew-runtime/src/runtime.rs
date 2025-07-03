@@ -75,18 +75,6 @@ use crate::context::MetashrewRuntimeContext;
 use crate::smt::SMTHelper;
 use crate::traits::{BatchLike, KeyValueStoreLike};
 
-/// Special macro for WASM logs that distinguishes them from alkanes-rs system logs
-///
-/// This macro prefixes WASM logs with "ALKANE_WASM:" to clearly identify that the log
-/// is coming from user WASM code interpreted in the system, not from alkanes-rs itself.
-/// Only emits logs when built with --features logs.
-macro_rules! alkane_wasmi_log {
-    ($($arg:tt)*) => {
-        {
-            print!("ALKANE_WASM: {}", format!($($arg)*));
-        }
-    };
-}
 
 /// Internal key used to store the current blockchain tip height
 ///
@@ -1291,7 +1279,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     if let Ok(text) = std::str::from_utf8(&bytes) {
-                        alkane_wasmi_log!("{}", text);
+                        print!("{}", text);
                     }
                 },
             )

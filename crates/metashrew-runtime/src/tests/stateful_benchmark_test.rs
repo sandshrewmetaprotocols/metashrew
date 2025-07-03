@@ -154,7 +154,7 @@ impl Default for InMemoryBatch {
 }
 
 /// Create a simple Bitcoin block for testing
-fn create_test_block() -> Vec<u8> {
+pub fn create_test_block() -> Vec<u8> {
     // Create a minimal valid Bitcoin block
     let mut block = Vec::new();
 

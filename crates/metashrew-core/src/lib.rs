@@ -323,13 +323,33 @@ pub fn flush() {
 
         let mut to_encode: Vec<Vec<u8>> = Vec::<Vec<u8>>::new();
 
-        // Safely access TO_FLUSH and CACHE with defensive checks
-        if let (Some(to_flush), Some(cache)) = (TO_FLUSH.as_ref(), CACHE.as_ref()) {
+        // Safely access TO_FLUSH and try to get values from CACHE first, then LRU cache
+        if let Some(to_flush) = TO_FLUSH.as_ref() {
             for item in to_flush {
-                if let Some(value) = cache.get(item) {
-                    // Safely clone the Arc contents
-                    to_encode.push(item.as_ref().clone());
-                    to_encode.push(value.as_ref().clone());
+                let mut value_found = false;
+                
+                // First try immediate CACHE
+                if let Some(cache) = CACHE.as_ref() {
+                    if let Some(value) = cache.get(item) {
+                        to_encode.push(item.as_ref().clone());
+                        to_encode.push(value.as_ref().clone());
+                        value_found = true;
+                    }
+                }
+                
+                // If not in immediate cache, try LRU cache (after flush_to_lru() was called)
+                if !value_found && is_lru_cache_initialized() {
+                    if let Some(value) = get_lru_cache(item) {
+                        to_encode.push(item.as_ref().clone());
+                        to_encode.push(value.as_ref().clone());
+                        value_found = true;
+                    }
+                }
+                
+                // If still not found, this is an error condition
+                if !value_found {
+                    panic!("flush(): Key in TO_FLUSH not found in any cache: {:?}",
+                           String::from_utf8_lossy(item.as_ref()));
                 }
             }
         }
@@ -565,10 +585,10 @@ pub fn flush_to_lru() {
                          stats.items, stats.memory_usage);
             }
 
-            // Clear the immediate cache and flush queue
-            // This prevents flush() from trying to access keys that are no longer in CACHE
+            // DO NOT clear TO_FLUSH here - the subsequent flush() call needs it to write data to the database
+            // Only clear the immediate cache since the data is now in LRU_CACHE
+            // The flush() function will clear TO_FLUSH after writing to the database
             CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
-            TO_FLUSH = Some(Vec::<Arc<Vec<u8>>>::new());
         }
     }
 }

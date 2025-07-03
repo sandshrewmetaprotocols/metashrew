@@ -541,30 +541,6 @@ pub fn is_lru_cache_initialized() -> bool {
     main_cache.is_some() && api_cache.is_some()
 }
 
-/// Get the current memory usage of both caches combined
-///
-/// This function returns the total memory usage in bytes of both the main
-/// LRU cache and the API cache.
-pub fn get_total_memory_usage() -> usize {
-    let mut total = 0;
-
-    {
-        let cache_guard = LRU_CACHE.read().unwrap();
-        if let Some(cache) = cache_guard.as_ref() {
-            total += cache.mem_size();
-        }
-    }
-
-    {
-        let cache_guard = API_CACHE.read().unwrap();
-        if let Some(cache) = cache_guard.as_ref() {
-            total += cache.mem_size();
-        }
-    }
-
-    total
-}
-
 /// Set the current view height for height-partitioned caching
 ///
 /// This function sets the current view height, which causes subsequent get()

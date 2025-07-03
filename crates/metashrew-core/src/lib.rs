@@ -105,9 +105,9 @@ use metashrew_support::{
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
         get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
-        get_view_height, initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
-        set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,
-        CacheStats,
+        get_total_memory_usage, get_view_height, initialize_lru_cache, is_lru_cache_initialized,
+        set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache, set_view_height,
+        CacheAllocationMode, CacheStats,
     },
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
@@ -646,6 +646,28 @@ pub fn clear_view_cache() {
 /// ```
 pub fn lru_cache_stats() -> CacheStats {
     get_cache_stats()
+}
+
+/// Get the total memory usage of the LRU cache system
+///
+/// This function returns the total memory usage in bytes of both the main
+/// LRU cache and the API cache.
+///
+/// # Returns
+///
+/// Total memory usage in bytes.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, lru_cache_memory_usage};
+///
+/// initialize();
+/// let memory_usage = lru_cache_memory_usage();
+/// println!("LRU cache using {} bytes", memory_usage);
+/// ```
+pub fn lru_cache_memory_usage() -> usize {
+    get_total_memory_usage()
 }
 
 /// Store a value in the API cache

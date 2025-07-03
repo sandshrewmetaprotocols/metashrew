@@ -7,7 +7,8 @@
 use anyhow::Result;
 use metashrew_support::lru_cache::{
     api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, get_cache_stats,
-    get_lru_cache, initialize_lru_cache, is_lru_cache_initialized, set_lru_cache,
+    get_lru_cache, get_total_memory_usage, initialize_lru_cache, is_lru_cache_initialized,
+    set_lru_cache,
 };
 use std::sync::Arc;
 
@@ -79,6 +80,30 @@ async fn test_api_cache_functionality() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_memory_usage_tracking() -> Result<()> {
+    clear_lru_cache();
+    initialize_lru_cache();
+
+    // Initial memory usage should be minimal
+    let initial_usage = get_total_memory_usage();
+
+    // Add some data
+    let key1 = Arc::new(vec![1u8; 1000]); // 1KB key
+    let value1 = Arc::new(vec![2u8; 10000]); // 10KB value
+    set_lru_cache(key1, value1);
+
+    // Memory usage should have increased
+    let after_usage = get_total_memory_usage();
+    assert!(after_usage > initial_usage);
+
+    // Clear should reset memory usage
+    clear_lru_cache();
+    let final_usage = get_total_memory_usage();
+    assert!(final_usage <= initial_usage);
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_cache_stats_accuracy() -> Result<()> {
     clear_lru_cache();
     initialize_lru_cache();
@@ -131,5 +156,9 @@ async fn test_clear_functionality() -> Result<()> {
     // Stats should be reset
     let stats = get_cache_stats();
     assert_eq!(stats.items, 0);
+
+    // Memory usage should be minimal
+    let memory_usage = get_total_memory_usage();
+    assert!(memory_usage < 1000); // Should be very small
     Ok(())
 }

@@ -122,6 +122,7 @@ WARN Failed to enable stateful views by default: <error>
 The runtime will continue to work with non-stateful views as fallback.
 
 ### Memory Issues
+- Monitor memory usage with `lru_cache_memory_usage()`
 - Check cache statistics with `lru_cache_stats()`
 - LRU eviction will automatically manage memory pressure
 

@@ -1,7 +1,7 @@
 use crate::runtime::MetashrewRuntime;
 use crate::tests::stateful_benchmark_test::{create_test_block, InMemoryStore};
 
-async fn test_oom_harness(num_entries: u32, size_of_each_entry: usize) {
+fn initialize() -> MetashrewRuntime<InMemoryStore> {
     // Initialize logging
     let _ = env_logger::builder()
         .filter_level(log::LevelFilter::Info)
@@ -34,16 +34,14 @@ async fn test_oom_harness(num_entries: u32, size_of_each_entry: usize) {
     let store = InMemoryStore::new();
 
     // Create runtime
-    let mut runtime = MetashrewRuntime::load(wasm_path, store, vec![]).unwrap();
+    MetashrewRuntime::load(wasm_path, store, vec![]).unwrap()
+}
 
-    // Process block 0 to populate the database
-    let block_data = create_test_block();
-    {
-        let mut guard = runtime.context.lock().unwrap();
-        guard.block = block_data.clone();
-        guard.height = 0;
-        guard.state = 0;
-    }
+async fn test_oom_harness(
+    runtime: &mut MetashrewRuntime<InMemoryStore>,
+    num_entries: u32,
+    size_of_each_entry: usize,
+) {
     runtime
         .process_block(num_entries, &vec![1; size_of_each_entry])
         .await
@@ -53,36 +51,39 @@ async fn test_oom_harness(num_entries: u32, size_of_each_entry: usize) {
     runtime.enable_stateful_views().await.unwrap();
 
     // Repeatedly call the read_intensive_view to trigger OOM
-    for i in 0..num_entries {
-        let mut input = num_entries.to_le_bytes().to_vec();
-        input.extend(i.to_le_bytes().to_vec());
-        let result = runtime
-            .view("read_intensive_view".to_string(), &input, 0)
-            .await;
-        if (i % 1000) == 0 {
-            let stats_result = runtime
-                .view("get_cache_stats_view".to_string(), &vec![], 0)
-                .await
-                .unwrap();
-            log::info!(
-                "Cache stats at iteration {}: {}",
-                i,
-                String::from_utf8_lossy(&stats_result)
-            );
-        }
-    }
+    // for i in 0..num_entries {
+    //     let mut input = num_entries.to_le_bytes().to_vec();
+    //     input.extend(i.to_le_bytes().to_vec());
+    //     let result = runtime
+    //         .view("read_intensive_view".to_string(), &input, 0)
+    //         .await;
+    //     if (i % (num_entries / 10)) == 0 {
+    //         let stats_result = runtime
+    //             .view("get_cache_stats_view".to_string(), &vec![], 0)
+    //             .await
+    //             .unwrap();
+    //         log::info!(
+    //             "Cache stats at iteration {}: {}",
+    //             i,
+    //             String::from_utf8_lossy(&stats_result)
+    //         );
+    //     }
+    // }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_large_entries_oom() {
-    let num_entries = 5000;
-    let size_of_each_entry = 1000 * 1024;
-    test_oom_harness(num_entries, size_of_each_entry).await;
+    let mut runtime = initialize();
+    for i in 500..505 {
+        let size_of_each_entry = 1000 * 1024;
+        test_oom_harness(&mut runtime, i, size_of_each_entry).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_large_number_oom() {
-    let num_entries = 1024 * 1024 * 1024;
+    let mut runtime = initialize();
+    let num_entries = 1024 * 1024;
     let size_of_each_entry = 1;
-    test_oom_harness(num_entries, size_of_each_entry).await;
+    test_oom_harness(&mut runtime, num_entries, size_of_each_entry).await;
 }

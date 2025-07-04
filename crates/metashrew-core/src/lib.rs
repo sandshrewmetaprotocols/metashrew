@@ -685,7 +685,10 @@ pub fn clear_view_cache() {
 /// println!("Cache hits: {}, misses: {}", stats.hits, stats.misses);
 /// ```
 pub fn lru_cache_stats() -> CacheStats {
-    get_cache_stats()
+    // Get the cached stats but update memory_usage with current actual usage
+    let mut stats = get_cache_stats();
+    stats.memory_usage = get_total_memory_usage();
+    stats
 }
 
 /// Get the total memory usage of the LRU cache system

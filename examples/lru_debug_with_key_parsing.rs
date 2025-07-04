@@ -1,0 +1,153 @@
+//! LRU Cache Debugging with Key Parsing Example
+//!
+//! This example demonstrates the enhanced LRU cache debugging functionality
+//! with intelligent key parsing that shows human-readable cache key formats.
+
+use metashrew_core::{
+    initialize, get, set, flush,
+    enable_lru_debug_mode, disable_lru_debug_mode,
+    set_prefix_analysis_config, generate_lru_debug_report,
+    parse_cache_key, parse_cache_key_enhanced,
+    PrefixAnalysisConfig, key_parser::KeyParseConfig
+};
+use std::sync::Arc;
+
+fn main() {
+    println!("🔍 LRU Cache Debugging with Key Parsing Example");
+    println!("═══════════════════════════════════════════════════════════════\n");
+
+    // Initialize the cache system
+    initialize();
+    
+    // Enable debug mode
+    enable_lru_debug_mode();
+    println!("✅ LRU debug mode enabled\n");
+    
+    // Configure prefix analysis for shorter prefixes to capture more patterns
+    let config = PrefixAnalysisConfig {
+        min_prefix_length: 2,
+        max_prefix_length: 12,
+        min_keys_per_prefix: 1, // Lower threshold for demo
+    };
+    set_prefix_analysis_config(config);
+    
+    println!("📝 Simulating realistic cache operations with various key patterns...\n");
+    
+    // Simulate blockchain indexer key patterns
+    
+    // 1. Block hash by height keys
+    for height in 800000..800010 {
+        let key = format!("/blockhash/byheight/{}", height);
+        let key_bytes = Arc::new(key.into_bytes());
+        let value = Arc::new(format!("block_hash_{}", height).into_bytes());
+        set(key_bytes.clone(), value);
+        
+        // Access some keys multiple times
+        if height % 3 == 0 {
+            let _ = get(key_bytes);
+        }
+    }
+    
+    // 2. Transaction index keys with binary data
+    for i in 0..8 {
+        let mut key = b"/tx/index/".to_vec();
+        key.extend_from_slice(&(i as u32).to_le_bytes()); // 4-byte little-endian
+        let key_arc = Arc::new(key);
+        let value = Arc::new(format!("tx_data_{}", i).into_bytes());
+        set(key_arc.clone(), value);
+        
+        // Access all transaction keys
+        let _ = get(key_arc);
+    }
+    
+    // 3. UTXO keys with transaction hash + output index
+    for i in 0..5 {
+        let mut key = b"/utxo/".to_vec();
+        // Simulate 32-byte transaction hash
+        let tx_hash = [i as u8; 32];
+        key.extend_from_slice(&tx_hash);
+        key.push(b'/');
+        key.extend_from_slice(&(i as u32).to_le_bytes()); // output index
+        
+        let key_arc = Arc::new(key);
+        let value = Arc::new(format!("utxo_data_{}", i).into_bytes());
+        set(key_arc.clone(), value);
+        
+        if i % 2 == 0 {
+            let _ = get(key_arc);
+        }
+    }
+    
+    // 4. Address balance keys
+    for i in 0..6 {
+        let address = format!("bc1q{:020}", i); // Simulate bech32 address
+        let key = format!("/balance/address/{}", address);
+        let key_arc = Arc::new(key.into_bytes());
+        let value = Arc::new(format!("{}", i * 100000).into_bytes()); // satoshi amount
+        set(key_arc.clone(), value);
+        
+        let _ = get(key_arc);
+    }
+    
+    // 5. Ordinal inscription keys
+    for i in 0..4 {
+        let mut key = b"/ordinal/inscription/".to_vec();
+        key.extend_from_slice(&(i as u64).to_le_bytes()); // 8-byte inscription ID
+        let key_arc = Arc::new(key);
+        let value = Arc::new(format!("inscription_data_{}", i).into_bytes());
+        set(key_arc.clone(), value);
+        
+        let _ = get(key_arc);
+    }
+    
+    // Some cache misses to show miss patterns
+    for i in 0..3 {
+        let key = format!("/missing/data/{}", i);
+        let key_arc = Arc::new(key.into_bytes());
+        let _ = get(key_arc);
+    }
+    
+    println!("✅ Cache operations completed\n");
+    
+    // Demonstrate key parsing functionality
+    println!("🔑 KEY PARSING EXAMPLES");
+    println!("─────────────────────────────────────────────────────────────\n");
+    
+    // Example keys to parse
+    let example_keys = vec![
+        b"/blockhash/byheight/\x40\x42\x0f\x00".to_vec(), // height 1000000 in little-endian
+        b"/tx/index/\x01\x00\x00\x00".to_vec(),           // index 1
+        b"/balance/address/bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4".to_vec(),
+        b"/utxo/\x12\x34\x56\x78\x9a\xbc\xde\xf0\x12\x34\x56\x78\x9a\xbc\xde\xf0\x12\x34\x56\x78\x9a\xbc\xde\xf0\x12\x34\x56\x78\x9a\xbc\xde\xf0/\x02\x00\x00\x00".to_vec(),
+    ];
+    
+    for (i, key) in example_keys.iter().enumerate() {
+        println!("Example {}:", i + 1);
+        println!("  Raw hex: {}", hex::encode(key));
+        println!("  Basic:   {}", parse_cache_key(key));
+        println!("  Enhanced: {}", parse_cache_key_enhanced(key));
+        println!();
+    }
+    
+    // Generate and display the debug report with readable keys
+    println!("📋 COMPREHENSIVE DEBUG REPORT WITH READABLE KEYS");
+    println!("═══════════════════════════════════════════════════════════════\n");
+    
+    let report = generate_lru_debug_report();
+    println!("{}", report);
+    
+    // Flush changes to database
+    flush();
+    println!("✅ Changes flushed to database");
+    
+    // Disable debug mode
+    disable_lru_debug_mode();
+    println!("✅ LRU debug mode disabled");
+    
+    println!("\n🎉 LRU Cache Debugging with Key Parsing Example completed successfully!");
+    println!("\n💡 Key Insights:");
+    println!("   • Keys are now displayed in human-readable format");
+    println!("   • Binary data is intelligently parsed (little-endian integers, hashes)");
+    println!("   • Path-like structures are preserved and easy to understand");
+    println!("   • This makes cache analysis much more intuitive for developers");
+}

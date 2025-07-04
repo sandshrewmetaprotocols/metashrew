@@ -108,7 +108,10 @@ use metashrew_support::{
         get_height_partitioned_cache, get_lru_cache, get_total_memory_usage, get_view_height,
         initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
         set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,
-        CacheStats,
+        CacheStats, enable_lru_debug_mode, disable_lru_debug_mode, is_lru_debug_mode_enabled,
+        set_prefix_analysis_config, get_prefix_analysis_config, clear_prefix_hit_stats,
+        get_lru_debug_stats, generate_lru_debug_report, LruDebugStats, KeyPrefixStats,
+        PrefixAnalysisConfig, key_parser,
     },
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
@@ -859,4 +862,195 @@ pub fn set_cache_mode(mode: CacheAllocationMode) {
 /// ```
 pub fn get_cache_mode() -> CacheAllocationMode {
     get_cache_allocation_mode()
+}
+
+// LRU Cache Debugging API Functions
+
+/// Enable LRU cache debugging mode
+///
+/// When enabled, the cache will track key prefix statistics for analysis.
+/// This adds some overhead but provides valuable insights into cache usage patterns.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, enable_lru_debug_mode, generate_lru_debug_report};
+///
+/// initialize();
+/// enable_lru_debug_mode();
+///
+/// // ... perform cache operations ...
+///
+/// let report = generate_lru_debug_report();
+/// println!("{}", report);
+/// ```
+pub fn enable_lru_debug_mode() {
+    metashrew_support::lru_cache::enable_lru_debug_mode();
+}
+
+/// Disable LRU cache debugging mode
+pub fn disable_lru_debug_mode() {
+    metashrew_support::lru_cache::disable_lru_debug_mode();
+}
+
+/// Check if LRU cache debugging mode is enabled
+pub fn is_lru_debug_mode_enabled() -> bool {
+    metashrew_support::lru_cache::is_lru_debug_mode_enabled()
+}
+
+/// Set the prefix analysis configuration
+///
+/// # Arguments
+///
+/// * `config` - Configuration for prefix analysis including min/max prefix lengths
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{set_prefix_analysis_config, PrefixAnalysisConfig};
+///
+/// let config = PrefixAnalysisConfig {
+///     min_prefix_length: 8,
+///     max_prefix_length: 20,
+///     min_keys_per_prefix: 3,
+/// };
+/// set_prefix_analysis_config(config);
+/// ```
+pub fn set_prefix_analysis_config(config: PrefixAnalysisConfig) {
+    metashrew_support::lru_cache::set_prefix_analysis_config(config);
+}
+
+/// Get the current prefix analysis configuration
+pub fn get_prefix_analysis_config() -> PrefixAnalysisConfig {
+    metashrew_support::lru_cache::get_prefix_analysis_config()
+}
+
+/// Clear all prefix hit statistics
+///
+/// This resets all collected prefix statistics. Useful when you want to start
+/// fresh analysis for a new period.
+pub fn clear_prefix_hit_stats() {
+    metashrew_support::lru_cache::clear_prefix_hit_stats();
+}
+
+/// Get comprehensive LRU debug statistics
+///
+/// Returns detailed statistics about cache usage and key prefix patterns.
+///
+/// # Returns
+///
+/// `LruDebugStats` containing overall cache stats and prefix analysis
+pub fn get_lru_debug_stats() -> LruDebugStats {
+    metashrew_support::lru_cache::get_lru_debug_stats()
+}
+
+/// Generate a formatted debug report
+///
+/// Creates a human-readable report of LRU cache usage patterns and key prefix analysis.
+/// This is useful for understanding which parts of your key space are being accessed most.
+///
+/// # Returns
+///
+/// A formatted string containing the debug report
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, enable_lru_debug_mode, generate_lru_debug_report};
+///
+/// initialize();
+/// enable_lru_debug_mode();
+///
+/// // ... perform cache operations ...
+///
+/// let report = generate_lru_debug_report();
+/// println!("{}", report);
+/// ```
+pub fn generate_lru_debug_report() -> String {
+    metashrew_support::lru_cache::generate_lru_debug_report()
+}
+
+/// Parse a cache key into human-readable format
+///
+/// This function intelligently parses cache keys that contain mixed UTF-8 and binary data,
+/// formatting them in a human-readable way. Keys are expected to follow patterns like
+/// "/path/segments/binary_data" where path segments are UTF-8 strings separated by '/'
+/// and binary data is displayed as hexadecimal.
+///
+/// # Arguments
+///
+/// * `key` - The raw key bytes to parse
+///
+/// # Returns
+///
+/// A formatted string representation of the key
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::parse_cache_key;
+///
+/// let key = b"/blockhash/byheight/\x01\x00\x00\x00";
+/// let formatted = parse_cache_key(key);
+/// // Result: "/blockhash/byheight/01000000"
+/// ```
+pub fn parse_cache_key(key: &[u8]) -> String {
+    key_parser::parse_key_default(key)
+}
+
+/// Parse a cache key with enhanced pattern recognition
+///
+/// This function applies additional heuristics to detect common patterns like
+/// little-endian integers, hash-like data, and timestamps.
+///
+/// # Arguments
+///
+/// * `key` - The raw key bytes to parse
+///
+/// # Returns
+///
+/// A formatted string with enhanced pattern recognition
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::parse_cache_key_enhanced;
+///
+/// let key = b"/blockhash/byheight/\x01\x00\x00\x00";
+/// let formatted = parse_cache_key_enhanced(key);
+/// // Result: "/blockhash/byheight/00000001" (recognizes as little-endian u32)
+/// ```
+pub fn parse_cache_key_enhanced(key: &[u8]) -> String {
+    key_parser::parse_key_enhanced(key, &key_parser::KeyParseConfig::default())
+}
+
+/// Parse a cache key with custom configuration
+///
+/// This function allows full control over the parsing behavior through configuration.
+///
+/// # Arguments
+///
+/// * `key` - The raw key bytes to parse
+/// * `config` - Configuration for parsing behavior
+///
+/// # Returns
+///
+/// A formatted string representation of the key
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{parse_cache_key_with_config, key_parser::KeyParseConfig};
+///
+/// let config = KeyParseConfig {
+///     max_utf8_segment_length: 20,
+///     max_binary_segment_length: 8,
+///     show_full_short_binary: true,
+///     min_utf8_segment_length: 3,
+/// };
+/// let key = b"/very/long/path/segment/\x01\x02\x03\x04";
+/// let formatted = parse_cache_key_with_config(key, &config);
+/// ```
+pub fn parse_cache_key_with_config(key: &[u8], config: &key_parser::KeyParseConfig) -> String {
+    key_parser::parse_key_readable(key, config)
 }

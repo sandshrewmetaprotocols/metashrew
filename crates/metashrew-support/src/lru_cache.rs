@@ -440,18 +440,18 @@ pub struct PrefixAnalysisConfig {
 impl Default for PrefixAnalysisConfig {
     fn default() -> Self {
         Self {
-            min_prefix_length: 4,
-            max_prefix_length: 16,
-            min_keys_per_prefix: 2,
+            min_prefix_length: 8,
+            max_prefix_length: 64,
+            min_keys_per_prefix: 3,
         }
     }
 }
 
 /// Global prefix analysis configuration
 static PREFIX_ANALYSIS_CONFIG: RwLock<PrefixAnalysisConfig> = RwLock::new(PrefixAnalysisConfig {
-    min_prefix_length: 4,
-    max_prefix_length: 16,
-    min_keys_per_prefix: 2,
+    min_prefix_length: 8,
+    max_prefix_length: 64,
+    min_keys_per_prefix: 3,
 });
 
 /// Cache statistics for monitoring and debugging
@@ -1301,11 +1301,9 @@ fn track_prefix_stats(key: &[u8], is_hit: bool) {
     let config = get_prefix_analysis_config();
     let mut stats = PREFIX_HIT_STATS.write().unwrap();
 
-    // Analyze prefixes of different lengths
-    for prefix_len in config.min_prefix_length..=config.max_prefix_length.min(key.len()) {
-        let prefix = key[..prefix_len].to_vec();
-        
-        let entry = stats.entry(prefix).or_insert((0, 0, HashSet::new()));
+    // Find the longest meaningful UTF-8 prefix for this key
+    if let Some(meaningful_prefix) = find_longest_meaningful_prefix(key, &config) {
+        let entry = stats.entry(meaningful_prefix).or_insert((0, 0, HashSet::new()));
         
         // Update hit/miss counts
         if is_hit {
@@ -1317,6 +1315,102 @@ fn track_prefix_stats(key: &[u8], is_hit: bool) {
         // Track unique keys for this prefix
         entry.2.insert(key.to_vec());
     }
+}
+
+/// Find the longest meaningful UTF-8 prefix for a key
+///
+/// This function analyzes a key to find the longest prefix that:
+/// 1. Is valid UTF-8
+/// 2. Ends at a logical boundary (like '/' or before binary data)
+/// 3. Is within the configured length limits
+fn find_longest_meaningful_prefix(key: &[u8], config: &PrefixAnalysisConfig) -> Option<Vec<u8>> {
+    if key.len() < config.min_prefix_length {
+        return None;
+    }
+
+    let max_len = config.max_prefix_length.min(key.len());
+    let mut best_prefix_len = 0;
+    
+    // Start from the minimum length and find the longest valid UTF-8 prefix
+    for len in config.min_prefix_length..=max_len {
+        let candidate = &key[..len];
+        
+        // Check if this candidate is valid UTF-8
+        if let Ok(utf8_str) = std::str::from_utf8(candidate) {
+            // Check if it's reasonable UTF-8 (not just control characters)
+            if is_reasonable_utf8_prefix(utf8_str) {
+                best_prefix_len = len;
+            }
+        } else {
+            // If we hit binary data, stop here and use the last good prefix
+            break;
+        }
+    }
+    
+    // If we found a good prefix, try to extend it to a logical boundary
+    if best_prefix_len >= config.min_prefix_length {
+        let extended_len = find_logical_boundary(key, best_prefix_len, max_len);
+        if extended_len > best_prefix_len {
+            // Verify the extended prefix is still valid UTF-8
+            if std::str::from_utf8(&key[..extended_len]).is_ok() {
+                best_prefix_len = extended_len;
+            }
+        }
+        
+        Some(key[..best_prefix_len].to_vec())
+    } else {
+        None
+    }
+}
+
+/// Check if a UTF-8 string is reasonable for prefix analysis
+///
+/// This filters out prefixes that are just control characters or very short segments
+fn is_reasonable_utf8_prefix(s: &str) -> bool {
+    // Must have some printable characters
+    let printable_count = s.chars()
+        .filter(|c| c.is_ascii_graphic() || *c == '/' || *c == '_' || *c == '-')
+        .count();
+    
+    // At least 70% should be reasonable characters, and we need at least 2 printable chars
+    printable_count >= 2 && (printable_count as f64 / s.len() as f64) >= 0.7
+}
+
+/// Find a logical boundary to extend the prefix to
+///
+/// This looks for natural breakpoints like '/' separators or before binary data
+fn find_logical_boundary(key: &[u8], start_len: usize, max_len: usize) -> usize {
+    let mut best_len = start_len;
+    
+    // Look for the next '/' separator within reasonable distance
+    for i in (start_len + 1)..=max_len {
+        if i >= key.len() {
+            break;
+        }
+        
+        // If we hit a '/' separator, this is a good boundary
+        if key[i] == b'/' {
+            // Include the '/' in the prefix
+            best_len = i + 1;
+            continue;
+        }
+        
+        // If we hit what looks like binary data, stop
+        if key[i] < 32 || key[i] > 126 {
+            break;
+        }
+        
+        // If this character extends a reasonable UTF-8 sequence, include it
+        if let Ok(utf8_str) = std::str::from_utf8(&key[..i + 1]) {
+            if is_reasonable_utf8_prefix(utf8_str) {
+                best_len = i + 1;
+            }
+        } else {
+            break;
+        }
+    }
+    
+    best_len
 }
 
 /// Generate comprehensive LRU debug statistics
@@ -1339,7 +1433,8 @@ pub fn get_lru_debug_stats() -> LruDebugStats {
     let stats = PREFIX_HIT_STATS.read().unwrap();
     let total_hits = debug_stats.cache_stats.hits as f64;
     
-    // Filter prefixes that have enough unique keys and convert to KeyPrefixStats
+    // Collect all qualifying prefixes
+    let mut candidate_stats = Vec::new();
     for (prefix, (hits, misses, unique_keys)) in stats.iter() {
         if unique_keys.len() >= config.min_keys_per_prefix {
             let hit_percentage = if total_hits > 0.0 {
@@ -1351,9 +1446,9 @@ pub fn get_lru_debug_stats() -> LruDebugStats {
             // Parse the prefix into human-readable format
             let prefix_readable = key_parser::parse_key_enhanced(prefix, &key_parser::KeyParseConfig::default());
 
-            debug_stats.prefix_stats.push(KeyPrefixStats {
+            candidate_stats.push(KeyPrefixStats {
                 prefix: hex::encode(prefix),
-                prefix_readable,
+                prefix_readable: prefix_readable.clone(),
                 hits: *hits,
                 misses: *misses,
                 unique_keys: unique_keys.len(),
@@ -1362,11 +1457,82 @@ pub fn get_lru_debug_stats() -> LruDebugStats {
         }
     }
 
-    // Sort by hit count (descending)
-    debug_stats.prefix_stats.sort_by(|a, b| b.hits.cmp(&a.hits));
+    // Remove redundant prefixes - keep only the most specific ones
+    let filtered_stats = filter_redundant_prefixes(candidate_stats);
+    
+    // Sort by total accesses (hits + misses) descending to show most active prefixes first
+    debug_stats.prefix_stats = filtered_stats;
+    debug_stats.prefix_stats.sort_by(|a, b| {
+        let total_a = a.hits + a.misses;
+        let total_b = b.hits + b.misses;
+        total_b.cmp(&total_a)
+    });
+    
     debug_stats.total_prefixes = debug_stats.prefix_stats.len();
 
     debug_stats
+}
+
+/// Filter out redundant prefixes, keeping only the most specific meaningful ones
+///
+/// This function removes shorter prefixes when longer, more specific prefixes exist
+/// that cover the same key space with similar access patterns.
+fn filter_redundant_prefixes(mut stats: Vec<KeyPrefixStats>) -> Vec<KeyPrefixStats> {
+    // Sort by prefix length (longest first) to prioritize more specific prefixes
+    stats.sort_by(|a, b| {
+        let len_a = a.prefix_readable.len();
+        let len_b = b.prefix_readable.len();
+        len_b.cmp(&len_a)
+    });
+    
+    let mut filtered = Vec::new();
+    
+    for candidate in stats {
+        let mut is_redundant = false;
+        
+        // Check if this candidate is redundant with any already accepted prefix
+        for accepted in &filtered {
+            if is_prefix_redundant(&candidate, accepted) {
+                is_redundant = true;
+                break;
+            }
+        }
+        
+        if !is_redundant {
+            filtered.push(candidate);
+        }
+    }
+    
+    filtered
+}
+
+/// Check if one prefix is redundant compared to another
+///
+/// A prefix is considered redundant if:
+/// 1. It's a substring of a longer prefix
+/// 2. The longer prefix has similar or higher access counts
+/// 3. The access patterns are similar (hit rates within reasonable range)
+fn is_prefix_redundant(candidate: &KeyPrefixStats, existing: &KeyPrefixStats) -> bool {
+    // If candidate is longer or same length, it's not redundant
+    if candidate.prefix_readable.len() >= existing.prefix_readable.len() {
+        return false;
+    }
+    
+    // Check if candidate is a prefix of existing
+    if !existing.prefix_readable.starts_with(&candidate.prefix_readable) {
+        return false;
+    }
+    
+    // If the existing prefix has significantly more accesses, candidate is redundant
+    let candidate_total = candidate.hits + candidate.misses;
+    let existing_total = existing.hits + existing.misses;
+    
+    // If existing has at least 80% of candidate's accesses, consider candidate redundant
+    if existing_total as f64 >= (candidate_total as f64 * 0.8) {
+        return true;
+    }
+    
+    false
 }
 
 /// Generate a formatted debug report

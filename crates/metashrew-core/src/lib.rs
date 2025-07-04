@@ -104,7 +104,7 @@ use metashrew_support::{
     compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
-        force_evict_to_target, get_cache_allocation_mode, get_cache_stats,
+        ensure_preallocated_memory, force_evict_to_target, get_cache_allocation_mode, get_cache_stats,
         get_height_partitioned_cache, get_lru_cache, get_total_memory_usage, get_view_height,
         initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
         set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,
@@ -470,6 +470,15 @@ pub fn input() -> Vec<u8> {
 /// ```
 #[allow(static_mut_refs)]
 pub fn initialize() -> () {
+    // CRITICAL: Set cache mode to indexer for deterministic memory layout
+    // metashrew-core is used for indexer operations which need consistent memory layout
+    set_cache_allocation_mode(CacheAllocationMode::Indexer);
+    
+    // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
+    // This must happen before any other memory allocations to guarantee
+    // consistent memory layout for WASM execution in indexer mode
+    ensure_preallocated_memory();
+    
     unsafe {
         if CACHE.is_none() {
             reset();
@@ -481,6 +490,8 @@ pub fn initialize() -> () {
 
     // Initialize LRU cache if not already initialized
     // This is safe to call multiple times
+    // Note: ensure_preallocated_memory() is called above and also within initialize_lru_cache()
+    // for redundancy to guarantee memory preallocation in indexer mode
     initialize_lru_cache();
 }
 

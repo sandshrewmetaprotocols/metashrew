@@ -75,6 +75,7 @@ pub mod byte_view;
 pub mod compat;
 pub mod index_pointer;
 pub mod lru_cache;
+pub mod lru_cache_preallocation_test;
 pub mod proto;
 pub mod utils;
 
@@ -83,7 +84,7 @@ pub use byte_view::ByteView;
 pub use index_pointer::KeyValuePointer;
 pub use lru_cache::{
     api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
-    flush_to_lru, force_evict_to_target, get_cache_allocation_mode, get_cache_stats,
+    ensure_preallocated_memory, flush_to_lru, force_evict_to_target, get_cache_allocation_mode, get_cache_stats,
     get_height_partitioned_cache, get_lru_cache, get_total_memory_usage, get_view_height,
     initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
     set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,

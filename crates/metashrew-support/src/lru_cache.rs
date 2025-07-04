@@ -58,6 +58,68 @@ use std::collections::{HashMap, HashSet};
 /// Memory limit for the LRU cache (1GB)
 const LRU_CACHE_MEMORY_LIMIT: usize = 1024 * 1024 * 1024; // 1GB
 
+/// Preallocated memory region for LRU cache to ensure consistent memory layout
+/// This is allocated at startup to guarantee the same memory addresses regardless
+/// of whether the cache is actually used or not.
+static PREALLOCATED_CACHE_MEMORY: std::sync::LazyLock<Vec<u8>> =
+    std::sync::LazyLock::new(|| {
+        // Preallocate exactly 1GB of memory at startup
+        // This ensures that this memory region is always occupied at the same
+        // virtual address, providing consistent memory layout for WASM execution
+        let mut memory = Vec::with_capacity(LRU_CACHE_MEMORY_LIMIT);
+        
+        // Actually allocate the memory by filling it with zeros
+        // This forces the OS to commit the memory pages immediately
+        memory.resize(LRU_CACHE_MEMORY_LIMIT, 0);
+        
+        log::info!(
+            "Preallocated 1GB LRU cache memory region at address: {:p}, size: {} bytes",
+            memory.as_ptr(),
+            memory.len()
+        );
+        
+        memory
+    });
+
+/// Ensure the preallocated memory is initialized (only in indexer mode)
+/// This function forces the lazy static to initialize, ensuring the memory
+/// is allocated before any other operations that might affect memory layout.
+///
+/// **IMPORTANT**: Memory preallocation only happens in indexer mode.
+/// View mode does not need deterministic memory layout.
+pub fn ensure_preallocated_memory() {
+    // Only preallocate memory in indexer mode
+    // View mode doesn't need deterministic memory layout
+    let allocation_mode = *CACHE_ALLOCATION_MODE.read().unwrap();
+    
+    match allocation_mode {
+        CacheAllocationMode::Indexer => {
+            // Access the lazy static to force initialization
+            let memory_ptr = PREALLOCATED_CACHE_MEMORY.as_ptr();
+            let memory_size = PREALLOCATED_CACHE_MEMORY.len();
+            
+            log::debug!(
+                "LRU cache preallocated memory confirmed (indexer mode): ptr={:p}, size={} bytes",
+                memory_ptr,
+                memory_size
+            );
+            
+            // Verify the memory is actually allocated by touching the first and last pages
+            unsafe {
+                // Touch first page
+                std::ptr::read_volatile(memory_ptr);
+                // Touch last page
+                std::ptr::read_volatile(memory_ptr.add(memory_size - 1));
+            }
+            
+            log::info!("LRU cache memory preallocation verified and committed (indexer mode)");
+        }
+        CacheAllocationMode::View => {
+            log::debug!("Skipping LRU cache memory preallocation (view mode - deterministic memory layout not required)");
+        }
+    }
+}
+
 /// Key parser for intelligent formatting of cache keys
 ///
 /// This module provides functionality to parse cache keys that contain
@@ -620,12 +682,20 @@ impl HeapSize for HeightPartitionedKey {
 /// for user-defined caching, and the height-partitioned cache for view functions.
 /// Memory allocation depends on the current cache allocation mode.
 ///
+/// **IMPORTANT**: This function ensures that 1GB of memory is preallocated at startup
+/// to guarantee consistent memory layout, but only in indexer mode.
+///
 /// # Thread Safety
 ///
 /// This function is thread-safe and can be called multiple times. Subsequent
 /// calls will be no-ops if the cache is already initialized.
 pub fn initialize_lru_cache() {
     let allocation_mode = *CACHE_ALLOCATION_MODE.read().unwrap();
+    
+    // CRITICAL: Ensure preallocated memory is initialized FIRST (only in indexer mode)
+    // This must happen before any other memory allocations to guarantee
+    // consistent memory layout for WASM execution in indexer mode
+    ensure_preallocated_memory();
 
     match allocation_mode {
         CacheAllocationMode::Indexer => {

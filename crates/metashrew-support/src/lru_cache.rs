@@ -1320,97 +1320,63 @@ fn track_prefix_stats(key: &[u8], is_hit: bool) {
 /// Find the longest meaningful UTF-8 prefix for a key
 ///
 /// This function analyzes a key to find the longest prefix that:
-/// 1. Is valid UTF-8
-/// 2. Ends at a logical boundary (like '/' or before binary data)
+/// 1. Contains only word characters and slashes [0-9a-zA-Z/]
+/// 2. Must end with a '/' character
 /// 3. Is within the configured length limits
+/// 4. Stops at the last valid '/' before any invalid characters
 fn find_longest_meaningful_prefix(key: &[u8], config: &PrefixAnalysisConfig) -> Option<Vec<u8>> {
     if key.len() < config.min_prefix_length {
         return None;
     }
 
-    let max_len = config.max_prefix_length.min(key.len());
-    let mut best_prefix_len = 0;
+    // Convert to string to work with characters
+    let key_str = match std::str::from_utf8(key) {
+        Ok(s) => s,
+        Err(_) => {
+            // If the key contains binary data, try to find the longest valid UTF-8 prefix
+            let mut valid_len = 0;
+            for i in 1..=key.len() {
+                if std::str::from_utf8(&key[..i]).is_ok() {
+                    valid_len = i;
+                } else {
+                    break;
+                }
+            }
+            if valid_len == 0 {
+                return None;
+            }
+            std::str::from_utf8(&key[..valid_len]).unwrap()
+        }
+    };
+
+    // Find the longest valid prefix that ends with '/'
+    let mut last_slash_pos = 0;
+    let max_len = config.max_prefix_length.min(key_str.len());
     
-    // Start from the minimum length and find the longest valid UTF-8 prefix
-    for len in config.min_prefix_length..=max_len {
-        let candidate = &key[..len];
+    // Scan through the string to find valid characters and track the last '/' position
+    for (i, c) in key_str.char_indices() {
+        if i >= max_len {
+            break;
+        }
         
-        // Check if this candidate is valid UTF-8
-        if let Ok(utf8_str) = std::str::from_utf8(candidate) {
-            // Check if it's reasonable UTF-8 (not just control characters)
-            if is_reasonable_utf8_prefix(utf8_str) {
-                best_prefix_len = len;
+        // Check if character is valid [0-9a-zA-Z/]
+        if c.is_ascii_alphanumeric() || c == '/' {
+            // Track the position after each '/' character
+            if c == '/' {
+                last_slash_pos = i + 1; // Position after the '/'
             }
         } else {
-            // If we hit binary data, stop here and use the last good prefix
+            // Invalid character found - stop here and use the last valid '/' position
             break;
         }
     }
     
-    // If we found a good prefix, try to extend it to a logical boundary
-    if best_prefix_len >= config.min_prefix_length {
-        let extended_len = find_logical_boundary(key, best_prefix_len, max_len);
-        if extended_len > best_prefix_len {
-            // Verify the extended prefix is still valid UTF-8
-            if std::str::from_utf8(&key[..extended_len]).is_ok() {
-                best_prefix_len = extended_len;
-            }
-        }
-        
-        Some(key[..best_prefix_len].to_vec())
+    // Only return a prefix if we found a '/' and the prefix is long enough
+    if last_slash_pos >= config.min_prefix_length && last_slash_pos <= max_len {
+        Some(key_str[..last_slash_pos].as_bytes().to_vec())
     } else {
         None
     }
-}
-
-/// Check if a UTF-8 string is reasonable for prefix analysis
-///
-/// This filters out prefixes that are just control characters or very short segments
-fn is_reasonable_utf8_prefix(s: &str) -> bool {
-    // Must have some printable characters
-    let printable_count = s.chars()
-        .filter(|c| c.is_ascii_graphic() || *c == '/' || *c == '_' || *c == '-')
-        .count();
-    
-    // At least 70% should be reasonable characters, and we need at least 2 printable chars
-    printable_count >= 2 && (printable_count as f64 / s.len() as f64) >= 0.7
-}
-
-/// Find a logical boundary to extend the prefix to
-///
-/// This looks for natural breakpoints like '/' separators or before binary data
-fn find_logical_boundary(key: &[u8], start_len: usize, max_len: usize) -> usize {
-    let mut best_len = start_len;
-    
-    // Look for the next '/' separator within reasonable distance
-    for i in (start_len + 1)..=max_len {
-        if i >= key.len() {
-            break;
-        }
-        
-        // If we hit a '/' separator, this is a good boundary
-        if key[i] == b'/' {
-            // Include the '/' in the prefix
-            best_len = i + 1;
-            continue;
-        }
-        
-        // If we hit what looks like binary data, stop
-        if key[i] < 32 || key[i] > 126 {
-            break;
-        }
-        
-        // If this character extends a reasonable UTF-8 sequence, include it
-        if let Ok(utf8_str) = std::str::from_utf8(&key[..i + 1]) {
-            if is_reasonable_utf8_prefix(utf8_str) {
-                best_len = i + 1;
-            }
-        } else {
-            break;
-        }
-    }
-    
-    best_len
 }
 
 /// Generate comprehensive LRU debug statistics

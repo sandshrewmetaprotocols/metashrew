@@ -51,7 +51,7 @@
 //! }
 //! ```
 
-use lru_mem::{HeapSize, LruCache, MemSize};
+use lru_mem::{HeapSize, LruCache};
 use std::sync::{Arc, RwLock};
 
 /// Memory limit for the LRU cache (1GB)
@@ -334,7 +334,7 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
                             stats.misses += 1;
                         }
                         stats.items = cache.len();
-                        stats.memory_usage = cache.mem_size();
+                        stats.memory_usage = cache.current_size();
                     }
 
                     return result;
@@ -381,7 +381,7 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
         {
             let mut stats = CACHE_STATS.write().unwrap();
             stats.items = cache.len();
-            stats.memory_usage = cache.mem_size();
+            stats.memory_usage = cache.current_size();
 
             // If cache size decreased, items were evicted
             if cache.len() < old_len {
@@ -555,24 +555,31 @@ pub fn is_lru_cache_initialized() -> bool {
     main_cache.is_some() && api_cache.is_some()
 }
 
-/// Get the current memory usage of both caches combined
+/// Get the current memory usage of all caches combined
 ///
-/// This function returns the total memory usage in bytes of both the main
-/// LRU cache and the API cache.
+/// This function returns the total memory usage in bytes of the main
+/// LRU cache, API cache, and height-partitioned cache.
 pub fn get_total_memory_usage() -> usize {
     let mut total = 0;
 
     {
         let cache_guard = LRU_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
-            total += cache.mem_size();
+            total += cache.current_size();
         }
     }
 
     {
         let cache_guard = API_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
-            total += cache.mem_size();
+            total += cache.current_size();
+        }
+    }
+
+    {
+        let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
+        if let Some(cache) = cache_guard.as_ref() {
+            total += cache.current_size();
         }
     }
 
@@ -647,7 +654,7 @@ pub fn get_height_partitioned_cache(height: u32, key: &Arc<Vec<u8>>) -> Option<A
                             stats.misses += 1;
                         }
                         stats.items = cache.len();
-                        stats.memory_usage = cache.mem_size();
+                        stats.memory_usage = cache.current_size();
                     }
 
                     return result;
@@ -688,7 +695,7 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
         {
             let mut stats = CACHE_STATS.write().unwrap();
             stats.items = cache.len();
-            stats.memory_usage = cache.mem_size();
+            stats.memory_usage = cache.current_size();
 
             // If cache size decreased, items were evicted
             if cache.len() < old_len {
@@ -711,7 +718,7 @@ pub fn force_evict_to_target() {
             // In indexer mode, only the main LRU cache should be large
             let mut cache_guard = LRU_CACHE.write().unwrap();
             if let Some(cache) = cache_guard.as_mut() {
-                let current_size = cache.mem_size();
+                let current_size = cache.current_size();
                 let current_items = cache.len();
                 
                 // Only evict if significantly over limit to avoid thrashing
@@ -725,7 +732,7 @@ pub fn force_evict_to_target() {
                     let target_size = LRU_CACHE_MEMORY_LIMIT - (LRU_CACHE_MEMORY_LIMIT / 10);
                     let mut evicted_count = 0;
                     
-                    while cache.mem_size() > target_size && !cache.is_empty() {
+                    while cache.current_size() > target_size && !cache.is_empty() {
                         cache.remove_lru();
                         evicted_count += 1;
                         
@@ -737,14 +744,14 @@ pub fn force_evict_to_target() {
                     }
                     
                     println!("LRU Cache eviction completed: evicted {} items, {} bytes remaining, {} items remaining",
-                             evicted_count, cache.mem_size(), cache.len());
+                             evicted_count, cache.current_size(), cache.len());
                     
                     // Update eviction statistics
                     {
                         let mut stats = CACHE_STATS.write().unwrap();
                         stats.evictions += evicted_count as u64;
                         stats.items = cache.len();
-                        stats.memory_usage = cache.mem_size();
+                        stats.memory_usage = cache.current_size();
                     }
                 }
             }
@@ -755,7 +762,7 @@ pub fn force_evict_to_target() {
                 let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
                 if let Some(cache) = cache_guard.as_mut() {
                     let target_size = LRU_CACHE_MEMORY_LIMIT / 2;
-                    while cache.mem_size() > target_size {
+                    while cache.current_size() > target_size {
                         if cache.is_empty() {
                             break;
                         }
@@ -773,7 +780,7 @@ pub fn force_evict_to_target() {
                 let mut cache_guard = API_CACHE.write().unwrap();
                 if let Some(cache) = cache_guard.as_mut() {
                     let target_size = LRU_CACHE_MEMORY_LIMIT / 2;
-                    while cache.mem_size() > target_size {
+                    while cache.current_size() > target_size {
                         if cache.is_empty() {
                             break;
                         }
@@ -933,5 +940,155 @@ mod tests {
         assert!(
             small_size >= 3 + std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>()
         );
+    }
+
+    #[test]
+    fn test_total_memory_usage_reporting() {
+        // Test that get_total_memory_usage() correctly reports memory usage
+        set_cache_allocation_mode(CacheAllocationMode::Indexer);
+        initialize_lru_cache();
+        clear_lru_cache();
+
+        // Get initial memory usage - should be minimal
+        let initial_memory = get_total_memory_usage();
+        println!("Initial memory usage: {} bytes", initial_memory);
+
+        // Add some data to the main LRU cache
+        let test_data = vec![
+            (b"key1".to_vec(), vec![0u8; 1000]), // 1KB value
+            (b"key2".to_vec(), vec![1u8; 2000]), // 2KB value
+            (b"key3".to_vec(), vec![2u8; 3000]), // 3KB value
+        ];
+
+        for (key, value) in &test_data {
+            set_lru_cache(Arc::new(key.clone()), Arc::new(value.clone()));
+        }
+
+        // Get memory usage after adding data
+        let after_data_memory = get_total_memory_usage();
+        println!("After adding data: {} bytes", after_data_memory);
+
+        // Memory usage should have increased significantly
+        assert!(after_data_memory > initial_memory + 5000,
+                "Memory usage should have increased significantly. Initial: {}, After: {}",
+                initial_memory, after_data_memory);
+
+        // Memory usage should be reasonable (not just 4 or 8 bytes)
+        assert!(after_data_memory > 1000,
+                "Memory usage should be substantial, got: {}", after_data_memory);
+
+        println!("✅ Total memory usage reporting test passed!");
+    }
+
+    #[test]
+    fn test_cache_stats_memory_consistency() {
+        // Test that cached stats and get_total_memory_usage() are consistent
+        set_cache_allocation_mode(CacheAllocationMode::Indexer);
+        initialize_lru_cache();
+        clear_lru_cache();
+
+        // Add some test data
+        let key = Arc::new(b"test_key_for_consistency".to_vec());
+        let value = Arc::new(vec![42u8; 5000]); // 5KB value
+        
+        set_lru_cache(key.clone(), value.clone());
+
+        // Get stats and direct memory usage
+        let stats = get_cache_stats();
+        let direct_memory = get_total_memory_usage();
+
+        println!("Stats memory usage: {} bytes", stats.memory_usage);
+        println!("Direct memory usage: {} bytes", direct_memory);
+
+        // They should be reasonably close (within some margin for overhead differences)
+        let difference = if direct_memory > stats.memory_usage {
+            direct_memory - stats.memory_usage
+        } else {
+            stats.memory_usage - direct_memory
+        };
+
+        // Allow for some difference due to different calculation methods
+        assert!(difference < 1000,
+                "Memory usage reporting should be consistent. Stats: {}, Direct: {}, Difference: {}",
+                stats.memory_usage, direct_memory, difference);
+
+        // Both should be substantial (not just a few bytes)
+        assert!(stats.memory_usage > 1000,
+                "Stats memory usage should be substantial, got: {}", stats.memory_usage);
+        assert!(direct_memory > 1000,
+                "Direct memory usage should be substantial, got: {}", direct_memory);
+
+        println!("✅ Cache stats memory consistency test passed!");
+    }
+
+    #[test]
+    fn test_heap_size_implementation() {
+        // Test that our HeapSize implementations are working correctly
+        let small_data = Arc::new(vec![1, 2, 3]);
+        let large_data = Arc::new(vec![0u8; 1000]);
+
+        let small_cache_value = CacheValue::from(small_data.clone());
+        let large_cache_value = CacheValue::from(large_data.clone());
+
+        let small_heap_size = small_cache_value.heap_size();
+        let large_heap_size = large_cache_value.heap_size();
+
+        println!("Small data (3 bytes): heap_size = {}", small_heap_size);
+        println!("Large data (1000 bytes): heap_size = {}", large_heap_size);
+
+        // Large should be bigger than small
+        assert!(large_heap_size > small_heap_size,
+                "Large heap size ({}) should be greater than small heap size ({})",
+                large_heap_size, small_heap_size);
+
+        // Both should be reasonable (not zero)
+        assert!(small_heap_size > 0, "Small heap size should be greater than 0");
+        assert!(large_heap_size > 0, "Large heap size should be greater than 0");
+
+        // Test with cache
+        set_cache_allocation_mode(CacheAllocationMode::Indexer);
+        initialize_lru_cache();
+        clear_lru_cache();
+
+        let key = Arc::new(b"test_key".to_vec());
+        set_lru_cache(key, large_data);
+
+        let cache_guard = LRU_CACHE.read().unwrap();
+        if let Some(cache) = cache_guard.as_ref() {
+            let cache_mem_size = cache.current_size();
+            println!("Cache mem_size after adding large data: {}", cache_mem_size);
+            assert!(cache_mem_size > 0, "Cache mem_size should be greater than 0");
+        }
+
+        println!("✅ HeapSize implementation test passed!");
+    }
+
+    #[test]
+    fn test_lru_cache_methods() {
+        // Test what methods are available on LruCache
+        set_cache_allocation_mode(CacheAllocationMode::Indexer);
+        initialize_lru_cache();
+        clear_lru_cache();
+
+        let key = Arc::new(b"test_key".to_vec());
+        let value = Arc::new(vec![0u8; 1000]);
+        set_lru_cache(key, value);
+
+        let cache_guard = LRU_CACHE.read().unwrap();
+        if let Some(cache) = cache_guard.as_ref() {
+            println!("Cache len: {}", cache.len());
+            
+            // Try different method names that might exist
+            // Let's see what methods are available by trying to call them
+            
+            // This should work if the method exists
+            let current_size = cache.current_size();
+            println!("Cache current_size: {}", current_size);
+            
+            let max_size = cache.max_size();
+            println!("Cache max_size: {}", max_size);
+        }
+
+        println!("✅ LRU cache methods test passed!");
     }
 }

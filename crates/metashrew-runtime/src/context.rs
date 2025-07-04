@@ -24,7 +24,9 @@
 //! 4. **Completion**: State updated to reflect successful processing
 //! 5. **Cleanup**: Context prepared for next block or operation
 
+use crate::smt::BatchedSMTHelper;
 use crate::traits::KeyValueStoreLike;
+use std::collections::HashMap;
 
 /// Execution context for WebAssembly indexer modules
 ///
@@ -81,7 +83,7 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// The generic design allows different storage implementations (RocksDB,
     /// in-memory, etc.) to be used based on deployment requirements.
     pub db: T,
-    
+
     /// Current block height being processed
     ///
     /// This height is used for:
@@ -90,14 +92,14 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// - Chain reorganization detection
     /// - State root calculations
     pub height: u32,
-    
+
     /// Raw block data available to WASM modules
     ///
     /// Contains the complete block data that WASM indexers can access through
     /// host functions. The format depends on the specific blockchain and
     /// indexer requirements.
     pub block: Vec<u8>,
-    
+
     /// WASM execution state tracking
     ///
     /// Tracks the progress of WASM module execution:
@@ -105,6 +107,12 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// - `1`: Execution completed successfully
     /// - Other values may indicate error conditions
     pub state: u32,
+
+    /// Configurations for prefix-based SMT roots
+    pub prefix_configs: Vec<(String, Vec<u8>)>,
+
+    /// Calculated SMT roots for each configured prefix
+    pub prefix_smts: HashMap<String, BatchedSMTHelper<T>>,
 }
 
 impl<T: KeyValueStoreLike> Clone for MetashrewRuntimeContext<T>
@@ -117,11 +125,13 @@ where
             height: self.height,
             block: self.block.clone(),
             state: self.state,
+            prefix_configs: self.prefix_configs.clone(),
+            prefix_smts: self.prefix_smts.clone(),
         }
     }
 }
 
-impl<T: KeyValueStoreLike> MetashrewRuntimeContext<T> {
+impl<T: KeyValueStoreLike + Clone> MetashrewRuntimeContext<T> {
     /// Create a new runtime context with the specified parameters
     ///
     /// Initializes a new execution context for WASM indexer modules with
@@ -166,12 +176,18 @@ impl<T: KeyValueStoreLike> MetashrewRuntimeContext<T> {
     ///     MetashrewRuntimeContext::new(storage, height, block_data)
     /// ));
     /// ```
-    pub fn new(db: T, height: u32, block: Vec<u8>) -> Self {
+    pub fn new(db: T, height: u32, block: Vec<u8>, prefix_configs: Vec<(String, Vec<u8>)>) -> Self {
+        let mut prefix_smts = HashMap::new();
+        for (name, _) in prefix_configs.iter() {
+            prefix_smts.insert(name.clone(), BatchedSMTHelper::new(db.clone()));
+        }
         Self {
             db,
             height,
             block,
             state: 0,
+            prefix_configs,
+            prefix_smts,
         }
     }
 }

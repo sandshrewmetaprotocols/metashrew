@@ -202,8 +202,8 @@ impl KeyValueStoreLike for MemStoreAdapter {
         self.deep_copy()
     }
 }
-use metashrew_sync::{StorageAdapter, StorageStats, SyncResult};
 use async_trait::async_trait;
+use metashrew_sync::{StorageAdapter, StorageStats, SyncResult};
 
 #[async_trait]
 impl StorageAdapter for MemStoreAdapter {
@@ -215,47 +215,55 @@ impl StorageAdapter for MemStoreAdapter {
         Ok(())
     }
     async fn store_block_hash(&mut self, height: u32, hash: &[u8]) -> SyncResult<()> {
-        self.put(format!("block_hash_{}", height).as_bytes(), hash).unwrap();
+        self.put(format!("block_hash_{}", height).as_bytes(), hash)
+            .unwrap();
         Ok(())
     }
     async fn get_block_hash(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        Ok(self.get_immutable(format!("block_hash_{}", height).as_bytes()).unwrap())
+        Ok(self
+            .get_immutable(format!("block_hash_{}", height).as_bytes())
+            .unwrap())
     }
     async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
-        self.put(format!("state_root_{}", height).as_bytes(), root).unwrap();
+        self.put(format!("state_root_{}", height).as_bytes(), root)
+            .unwrap();
         Ok(())
     }
     async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        Ok(self.get_immutable(format!("state_root_{}", height).as_bytes()).unwrap())
+        Ok(self
+            .get_immutable(format!("state_root_{}", height).as_bytes())
+            .unwrap())
     }
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         let mut db = self.db.lock().unwrap();
-    
+
         // --- Part 1: Rollback Append-Only Data ---
         let all_keys: Vec<Vec<u8>> = db.keys().cloned().collect();
         let length_suffix = b"/length";
         let mut base_keys = std::collections::HashSet::new();
-    
+
         // Find all "base" keys by looking for keys ending in "/length"
         for k in &all_keys {
             if k.ends_with(length_suffix) {
                 base_keys.insert(k[..k.len() - length_suffix.len()].to_vec());
             }
         }
-    
+
         for base_key in base_keys {
             let length_key = {
                 let mut key = base_key.clone();
                 key.extend_from_slice(length_suffix);
                 key
             };
-    
+
             let old_length = if let Some(length_bytes) = db.get(&length_key).cloned() {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+                String::from_utf8_lossy(&length_bytes)
+                    .parse::<u32>()
+                    .unwrap_or(0)
             } else {
                 continue;
             };
-    
+
             let mut valid_updates = Vec::new();
             for i in 0..old_length {
                 let update_key_suffix = format!("/{}", i);
@@ -273,7 +281,7 @@ impl StorageAdapter for MemStoreAdapter {
                     }
                 }
             }
-    
+
             // Atomically remove old entries and re-insert valid ones
             for i in 0..old_length {
                 let update_key_suffix = format!("/{}", i);
@@ -281,14 +289,14 @@ impl StorageAdapter for MemStoreAdapter {
                 update_key.extend_from_slice(update_key_suffix.as_bytes());
                 db.remove(&update_key);
             }
-    
+
             for (i, update_data) in valid_updates.iter().enumerate() {
                 let update_key_suffix = format!("/{}", i);
                 let mut update_key = base_key.clone();
                 update_key.extend_from_slice(update_key_suffix.as_bytes());
                 db.insert(update_key, update_data.clone());
             }
-    
+
             let new_length = valid_updates.len() as u32;
             if new_length > 0 {
                 db.insert(length_key, new_length.to_string().into_bytes());
@@ -296,22 +304,24 @@ impl StorageAdapter for MemStoreAdapter {
                 db.remove(&length_key);
             }
         }
-    
+
         // --- Part 2: Rollback Metadata ---
         db.retain(|key, _| {
             let key_str = String::from_utf8_lossy(key);
-            
+
             // Check for metadata keys and parse their height
             let get_height_from_key = |prefix: &str| -> Option<u32> {
                 let binding = to_labeled_key(&prefix.as_bytes().to_vec());
                 let full_prefix = String::from_utf8_lossy(&binding);
-                key_str.strip_prefix(&*full_prefix).and_then(|h_str| h_str.parse::<u32>().ok())
+                key_str
+                    .strip_prefix(&*full_prefix)
+                    .and_then(|h_str| h_str.parse::<u32>().ok())
             };
-    
+
             let metadata_height = get_height_from_key("block_hash_")
                 .or_else(|| get_height_from_key("state_root_"))
                 .or_else(|| get_height_from_key("smt:root:"));
-    
+
             if let Some(h) = metadata_height {
                 // Keep if height is less than or equal to the rollback height
                 h <= height
@@ -320,7 +330,7 @@ impl StorageAdapter for MemStoreAdapter {
                 true
             }
         });
-    
+
         drop(db);
         self.set_height(height);
         Ok(())

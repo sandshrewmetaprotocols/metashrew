@@ -260,9 +260,12 @@ pub struct SMTHelper<T: KeyValueStoreLike> {
 ///
 /// This struct is not thread-safe due to internal mutable caches.
 /// Use separate instances for concurrent operations.
+#[derive(Clone)]
 pub struct BatchedSMTHelper<T: KeyValueStoreLike> {
     /// Storage backend for persisting SMT nodes and data
     pub storage: T,
+    /// The current root of this SMT instance.
+    root: [u8; 32],
     /// In-memory cache for SMT nodes during current block processing
     ///
     /// This cache stores frequently accessed nodes to reduce database I/O.
@@ -279,9 +282,24 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
     pub fn new(storage: T) -> Self {
         Self {
             storage,
+            root: EMPTY_NODE_HASH,
             node_cache: HashMap::new(),
             key_hash_cache: HashMap::new(),
         }
+    }
+
+    /// Returns the current SMT root.
+    pub fn root(&self) -> [u8; 32] {
+        self.root
+    }
+
+    /// Incrementally updates the SMT with a batch of key-values.
+    pub fn update(&mut self, key_values: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        if key_values.is_empty() {
+            return Ok(());
+        }
+        self.root = self.compute_minimal_smt_root(self.root, key_values)?;
+        Ok(())
     }
 
     /// Clear caches after block processing (no persistent state between blocks)
@@ -318,8 +336,11 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         // Load from storage and cache
         let node_key = make_smt_node_key(PREFIXES.smt_node, node_hash);
-        match self.storage.get_immutable(&node_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+        match self
+            .storage
+            .get_immutable(&node_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
             Some(node_data) => {
                 let node = SMTHelper::<T>::deserialize_node(&node_data)?;
                 self.node_cache.insert(*node_hash, node.clone());
@@ -351,14 +372,15 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             let mut batch = self.storage.create_batch();
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
             batch.put(root_key, prev_root.to_vec());
-            self.storage.write(batch)
+            self.storage
+                .write(batch)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
         }
 
         // Create a batch for all operations
         let mut batch = self.storage.create_batch();
-        
+
         // Use a map to track key lengths within this batch to handle multiple
         // updates to the same key correctly.
         let mut key_lengths: HashMap<Vec<u8>, u32> = HashMap::new();
@@ -373,15 +395,20 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                 // If not in our map, fetch from storage.
                 let length_key = [key.as_slice(), b"/length".as_slice()].concat();
                 match self.storage.get_immutable(&length_key)? {
-                    Some(length_bytes) => {
-                        String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-                    }
+                    Some(length_bytes) => String::from_utf8_lossy(&length_bytes)
+                        .parse::<u32>()
+                        .unwrap_or(0),
                     None => 0,
                 }
             };
 
             // Append the new value.
-            let update_key = [key.as_slice(), b"/".as_slice(), length.to_string().as_bytes()].concat();
+            let update_key = [
+                key.as_slice(),
+                b"/".as_slice(),
+                length.to_string().as_bytes(),
+            ]
+            .concat();
             let value_hex = hex::encode(value);
             let update_value = format!("{}:{}", height, value_hex);
             batch.put(&update_key, update_value.as_bytes());
@@ -392,7 +419,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             batch.put(&length_key, new_length.to_string().as_bytes());
             key_lengths.insert(key.clone(), new_length);
         }
-        
+
         // MINIMAL SMT: Only compute and store the final root, not intermediate nodes
         let new_root = self.compute_minimal_smt_root(prev_root, key_values)?;
 
@@ -407,7 +434,8 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         );
 
         // Write entire batch at once
-        self.storage.write(batch)
+        self.storage
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         // Clear caches after block processing
@@ -416,15 +444,25 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         Ok(new_root)
     }
 
+    /// Calculate SMT root for a subset of keys (for prefix roots) without storing anything.
+    pub fn calculate_prefix_root(&mut self, key_values: &[(Vec<u8>, Vec<u8>)]) -> Result<[u8; 32]> {
+        // For a prefix root, we always start from an empty tree.
+        let initial_root = EMPTY_NODE_HASH;
+        self.compute_minimal_smt_root(initial_root, key_values)
+    }
+
     /// Fast lookup using the new append-only approach with binary search
     pub fn get_at_height_fast(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
         // 1. Get the length of updates for this key
         let length_key = [key, b"/length"].concat();
-        let length = match self.storage.get_immutable(&length_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+        let length = match self
+            .storage
+            .get_immutable(&length_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            Some(length_bytes) => String::from_utf8_lossy(&length_bytes)
+                .parse::<u32>()
+                .unwrap_or(0),
             None => return Ok(None), // Key doesn't exist
         };
 
@@ -440,9 +478,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         while left < right {
             let mid = (left + right) / 2;
             let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
-            
-            match self.storage.get_immutable(&update_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+
+            match self
+                .storage
+                .get_immutable(&update_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+            {
                 Some(update_data) => {
                     let update_str = String::from_utf8_lossy(&update_data);
                     if let Some(colon_pos) = update_str.find(':') {
@@ -538,9 +579,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             };
 
             match node {
-                SMTNode::Leaf { key: ref existing_key, .. } => {
+                SMTNode::Leaf {
+                    key: ref existing_key,
+                    ..
+                } => {
                     let existing_key_hash = self.get_key_hash(existing_key);
-                    
+
                     if existing_key_hash == key_hash {
                         path_nodes.push((depth, node, true)); // replacement
                         break;
@@ -549,9 +593,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                         break;
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     path_nodes.push((depth, node, false));
-                    
+
                     let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
                     current_hash = if bit == 0 { left_child } else { right_child };
                     depth += 1;
@@ -568,7 +615,10 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
             match node {
-                SMTNode::Leaf { key: existing_key, value_index } => {
+                SMTNode::Leaf {
+                    key: existing_key,
+                    value_index,
+                } => {
                     if is_replacement {
                         // Simple replacement
                         new_child_hash = new_child_hash;
@@ -589,7 +639,10 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                         )?;
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     // Create new internal node hash
                     let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
                     let new_internal = if bit == 0 {
@@ -680,13 +733,8 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         // Process all keys in batch
         for (key, value) in key_values {
-            working_root = self.update_smt_for_key_batched(
-                working_root,
-                key,
-                value,
-                height,
-                batch,
-            )?;
+            working_root =
+                self.update_smt_for_key_batched(working_root, key, value, height, batch)?;
         }
 
         Ok(working_root)
@@ -726,12 +774,8 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         }
 
         // Compute path updates using cached nodes
-        let path_updates = self.compute_path_updates_batched(
-            current_root,
-            key_hash,
-            new_leaf_hash,
-            batch,
-        )?;
+        let path_updates =
+            self.compute_path_updates_batched(current_root, key_hash, new_leaf_hash, batch)?;
 
         if let Some((_, new_root_hash)) = path_updates.last() {
             Ok(*new_root_hash)
@@ -761,9 +805,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             };
 
             match node {
-                SMTNode::Leaf { key: ref existing_key, .. } => {
+                SMTNode::Leaf {
+                    key: ref existing_key,
+                    ..
+                } => {
                     let existing_key_hash = self.get_key_hash(existing_key);
-                    
+
                     if existing_key_hash == key_hash {
                         path_nodes.push((depth, node, true));
                         break;
@@ -772,9 +819,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                         break;
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     path_nodes.push((depth, node, false));
-                    
+
                     let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
                     current_hash = if bit == 0 { left_child } else { right_child };
                     depth += 1;
@@ -791,7 +841,10 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
             match node {
-                SMTNode::Leaf { key: existing_key, value_index } => {
+                SMTNode::Leaf {
+                    key: existing_key,
+                    value_index,
+                } => {
                     if is_replacement {
                         updates.push((node_depth, new_child_hash));
                     } else {
@@ -812,7 +865,10 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                         updates.push((node_depth, new_child_hash));
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     let bit = (key_hash[node_depth / 8] >> (7 - (depth % 8))) & 1;
                     let new_internal = if bit == 0 {
                         SMTNode::Internal {
@@ -923,9 +979,11 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
     pub fn get_smt_root_at_height(&self, height: u32) -> Result<[u8; 32]> {
         // Use the storage directly instead of cloning
         let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, height).into_bytes();
-        if let Some(root_data) = self.storage
+        if let Some(root_data) = self
+            .storage
             .get_immutable(&root_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
             if root_data.len() == 32 {
                 let mut root = [0u8; 32];
                 root.copy_from_slice(&root_data);
@@ -937,10 +995,13 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         if height > 0 {
             let mut target_height = height - 1;
             loop {
-                let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, target_height).into_bytes();
-                if let Some(root_data) = self.storage
+                let root_key =
+                    format!("{}{}", crate::smt::SMT_ROOT_PREFIX, target_height).into_bytes();
+                if let Some(root_data) = self
+                    .storage
                     .get_immutable(&root_key)
-                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+                {
                     if root_data.len() == 32 {
                         let mut root = [0u8; 32];
                         root.copy_from_slice(&root_data);
@@ -1242,7 +1303,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Get a leaf node from the SMT
-    pub fn get_smt_leaf(&self, root: [u8; 32], key_hash: [u8; 32], _height: u32) -> Result<Option<SMTNode>> {
+    pub fn get_smt_leaf(
+        &self,
+        root: [u8; 32],
+        key_hash: [u8; 32],
+        _height: u32,
+    ) -> Result<Option<SMTNode>> {
         if root == EMPTY_NODE_HASH {
             return Ok(None);
         }
@@ -1493,24 +1559,40 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     pub fn put(&mut self, key: &[u8], value: &[u8], height: u32) -> Result<()> {
         let mut batch = self.storage.create_batch();
         self.put_to_batch(&mut batch, key, value, height)?;
-        self.storage.write(batch)
+        self.storage
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         Ok(())
     }
 
     /// Store a key-value pair using an existing batch
-    pub fn put_batched(&mut self, batch: &mut T::Batch, key: &[u8], value: &[u8], height: u32) -> Result<()> {
+    pub fn put_batched(
+        &mut self,
+        batch: &mut T::Batch,
+        key: &[u8],
+        value: &[u8],
+        height: u32,
+    ) -> Result<()> {
         self.put_to_batch(batch, key, value, height)
     }
 
     /// Internal method to add put operations to a batch using the new append-only approach
-    pub fn put_to_batch(&self, batch: &mut T::Batch, key: &[u8], value: &[u8], height: u32) -> Result<()> {
+    pub fn put_to_batch(
+        &self,
+        batch: &mut T::Batch,
+        key: &[u8],
+        value: &[u8],
+        height: u32,
+    ) -> Result<()> {
         let length_key = [key, b"/length"].concat();
-        let current_length = match self.storage.get_immutable(&length_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+        let current_length = match self
+            .storage
+            .get_immutable(&length_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            Some(length_bytes) => String::from_utf8_lossy(&length_bytes)
+                .parse::<u32>()
+                .unwrap_or(0),
             None => 0,
         };
 
@@ -1531,11 +1613,14 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     /// Get the value of a key at a specific height using binary search through the flat list
     pub fn get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
         let length_key = [key, b"/length"].concat();
-        let length = match self.storage.get_immutable(&length_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+        let length = match self
+            .storage
+            .get_immutable(&length_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            Some(length_bytes) => String::from_utf8_lossy(&length_bytes)
+                .parse::<u32>()
+                .unwrap_or(0),
             None => return Ok(None), // Key doesn't exist
         };
 
@@ -1551,9 +1636,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         while left < right {
             let mid = (left + right) / 2;
             let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
-            
-            match self.storage.get_immutable(&update_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+
+            match self
+                .storage
+                .get_immutable(&update_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+            {
                 Some(update_data) => {
                     let update_str = String::from_utf8_lossy(&update_data);
                     if let Some(colon_pos) = update_str.find(':') {
@@ -1591,11 +1679,14 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     /// Get the current (most recent) value of a key across all heights
     pub fn get_current(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         let length_key = [key, b"/length"].concat();
-        let length = match self.storage.get_immutable(&length_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+        let length = match self
+            .storage
+            .get_immutable(&length_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            Some(length_bytes) => String::from_utf8_lossy(&length_bytes)
+                .parse::<u32>()
+                .unwrap_or(0),
             None => return Ok(None), // Key doesn't exist
         };
 
@@ -1605,8 +1696,11 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
         // Get the most recent update (length - 1)
         let update_key = [key, b"/", (length - 1).to_string().as_bytes()].concat();
-        match self.storage.get_immutable(&update_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+        match self
+            .storage
+            .get_immutable(&update_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
             Some(update_data) => {
                 let update_str = String::from_utf8_lossy(&update_data);
                 if let Some(colon_pos) = update_str.find(':') {
@@ -1627,21 +1721,27 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     /// Get all heights at which a key was updated
     pub fn get_heights_for_key(&self, key: &[u8]) -> Result<Vec<u32>> {
         let length_key = [key, b"/length"].concat();
-        let length = match self.storage.get_immutable(&length_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+        let length = match self
+            .storage
+            .get_immutable(&length_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            Some(length_bytes) => String::from_utf8_lossy(&length_bytes)
+                .parse::<u32>()
+                .unwrap_or(0),
             None => return Ok(Vec::new()), // Key doesn't exist
         };
 
         let mut heights = Vec::new();
-        
+
         // Iterate through all updates and extract heights
         for i in 0..length {
             let update_key = [key, b"/", i.to_string().as_bytes()].concat();
-            if let Some(update_data) = self.storage.get_immutable(&update_key)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+            if let Some(update_data) = self
+                .storage
+                .get_immutable(&update_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+            {
                 let update_str = String::from_utf8_lossy(&update_data);
                 if let Some(colon_pos) = update_str.find(':') {
                     let height_str = &update_str[..colon_pos];
@@ -1660,14 +1760,17 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     pub fn get_keys_at_height(&self, height: u32) -> Result<Vec<Vec<u8>>> {
         let mut keys = Vec::new();
         let length_suffix = "/length";
-        
+
         // Scan for all keys with "/length" suffix to find all keys in the database
-        for (stored_key, _) in self.storage.scan_prefix(b"")
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+        for (stored_key, _) in self
+            .storage
+            .scan_prefix(b"")
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
             if stored_key.ends_with(length_suffix.as_bytes()) {
                 // Extract the original key by removing the "/length" suffix
                 let original_key = &stored_key[..stored_key.len() - length_suffix.len()];
-                
+
                 // Check if this key was updated at the specified height
                 let heights = self.get_heights_for_key(original_key)?;
                 if heights.contains(&height) {
@@ -1686,33 +1789,52 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     pub fn rollback_key(&mut self, key: &[u8], target_height: u32) -> Result<()> {
         let mut batch = self.storage.create_batch();
         self.rollback_key_to_batch(&mut batch, key, target_height)?;
-        self.storage.write(batch)
+        self.storage
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         Ok(())
     }
 
     /// Rollback a key to its state before a specific height using an existing batch
-    pub fn rollback_key_batched(&mut self, batch: &mut T::Batch, key: &[u8], target_height: u32) -> Result<()> {
+    pub fn rollback_key_batched(
+        &mut self,
+        batch: &mut T::Batch,
+        key: &[u8],
+        target_height: u32,
+    ) -> Result<()> {
         self.rollback_key_to_batch(batch, key, target_height)
     }
 
     /// Internal method to add rollback operations to a batch using the new append-only approach
-    fn rollback_key_to_batch(&self, batch: &mut T::Batch, key: &[u8], target_height: u32) -> Result<()> {
+    fn rollback_key_to_batch(
+        &self,
+        batch: &mut T::Batch,
+        key: &[u8],
+        target_height: u32,
+    ) -> Result<()> {
         let _heights = self.get_heights_for_key(key)?;
 
         // For the new append-only approach, we need to remove updates after target_height
         let length_key = [key, b"/length"].concat();
-        
-        if let Some(length_bytes) = self.storage.get_immutable(&length_key)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            let length = String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0);
-            
+
+        if let Some(length_bytes) = self
+            .storage
+            .get_immutable(&length_key)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
+            let length = String::from_utf8_lossy(&length_bytes)
+                .parse::<u32>()
+                .unwrap_or(0);
+
             let mut new_length = 0;
             // Find the last valid update at or before target_height
             for i in 0..length {
                 let update_key = [key, b"/", i.to_string().as_bytes()].concat();
-                if let Some(update_data) = self.storage.get_immutable(&update_key)
-                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                if let Some(update_data) = self
+                    .storage
+                    .get_immutable(&update_key)
+                    .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+                {
                     let update_str = String::from_utf8_lossy(&update_data);
                     if let Some(colon_pos) = update_str.find(':') {
                         let height_str = &update_str[..colon_pos];
@@ -1727,7 +1849,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                     }
                 }
             }
-            
+
             // Update the length
             batch.put(&length_key, new_length.to_string().as_bytes());
         }
@@ -1742,13 +1864,18 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     pub fn rollback_to_height(&mut self, target_height: u32) -> Result<()> {
         let mut batch = self.storage.create_batch();
         self.rollback_to_height_to_batch(&mut batch, target_height)?;
-        self.storage.write(batch)
+        self.storage
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
         Ok(())
     }
 
     /// Rollback all keys to their state before a specific height using an existing batch
-    pub fn rollback_to_height_batched(&mut self, batch: &mut T::Batch, target_height: u32) -> Result<()> {
+    pub fn rollback_to_height_batched(
+        &mut self,
+        batch: &mut T::Batch,
+        target_height: u32,
+    ) -> Result<()> {
         self.rollback_to_height_to_batch(batch, target_height)
     }
 
@@ -1757,20 +1884,23 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // For the new append-only approach, we need to scan all keys and rollback each one
         // This is more complex since we don't have a height index anymore
         // We'll need to scan all keys that have a "/length" suffix
-        
+
         let length_suffix = "/length";
         let mut keys_to_rollback = Vec::new();
-        
+
         // Scan for all keys with "/length" suffix to find all keys in the database
-        for (stored_key, _) in self.storage.scan_prefix(b"")
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+        for (stored_key, _) in self
+            .storage
+            .scan_prefix(b"")
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?
+        {
             if stored_key.ends_with(length_suffix.as_bytes()) {
                 // Extract the original key by removing the "/length" suffix
                 let original_key = &stored_key[..stored_key.len() - length_suffix.len()];
                 keys_to_rollback.push(original_key.to_vec());
             }
         }
-        
+
         // Rollback each key
         for key in keys_to_rollback {
             self.rollback_key_to_batch(batch, &key, target_height)?;
@@ -1780,11 +1910,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
     }
 
     /// Iterate backwards through all values of a key from most recent using the new append-only approach
-    pub fn iterate_backwards(
-        &self,
-        key: &[u8],
-        from_height: u32,
-    ) -> Result<Vec<(u32, Vec<u8>)>> {
+    pub fn iterate_backwards(&self, key: &[u8], from_height: u32) -> Result<Vec<(u32, Vec<u8>)>> {
         let heights = self.get_heights_for_key(key)?;
         let mut results = Vec::new();
 
@@ -1826,7 +1952,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             let mut batch = self.storage.create_batch();
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
             batch.put(root_key, prev_root.to_vec());
-            self.storage.write(batch)
+            self.storage
+                .write(batch)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
         }
@@ -1838,7 +1965,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let mut batch = self.storage.create_batch();
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         batch.put(root_key, new_root.to_vec());
-        self.storage.write(batch)
+        self.storage
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         Ok(new_root)
@@ -1863,14 +1991,15 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             let mut batch = self.storage.create_batch();
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
             batch.put(root_key, prev_root.to_vec());
-            self.storage.write(batch)
+            self.storage
+                .write(batch)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
         }
 
         // Create a batch for all operations
         let mut batch = self.storage.create_batch();
-        
+
         // Get all values in batch
         let mut key_values = Vec::new();
         for key in updated_keys {
@@ -1880,19 +2009,15 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         // Process all updates in a single pass
-        let new_root = self.compute_batched_smt_root(
-            prev_root,
-            &key_values,
-            height,
-            &mut batch,
-        )?;
+        let new_root = self.compute_batched_smt_root(prev_root, &key_values, height, &mut batch)?;
 
         // Store the new root in batch
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         batch.put(root_key, new_root.to_vec());
 
         // Write entire batch at once
-        self.storage.write(batch)
+        self.storage
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         Ok(new_root)
@@ -1910,13 +2035,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
         // Process all keys in batch
         for (key, value) in key_values {
-            working_root = self.update_smt_for_key_batched(
-                working_root,
-                key,
-                value,
-                height,
-                batch,
-            )?;
+            working_root =
+                self.update_smt_for_key_batched(working_root, key, value, height, batch)?;
         }
 
         Ok(working_root)
@@ -1953,12 +2073,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         // Compute path updates using batch operations
-        let path_updates = self.compute_path_updates_batched(
-            current_root,
-            key_hash,
-            new_leaf_hash,
-            batch,
-        )?;
+        let path_updates =
+            self.compute_path_updates_batched(current_root, key_hash, new_leaf_hash, batch)?;
 
         if let Some((_, new_root_hash)) = path_updates.last() {
             Ok(*new_root_hash)
@@ -1988,9 +2104,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             };
 
             match node {
-                SMTNode::Leaf { key: ref existing_key, .. } => {
+                SMTNode::Leaf {
+                    key: ref existing_key,
+                    ..
+                } => {
                     let existing_key_hash = Self::hash_key(existing_key);
-                    
+
                     if existing_key_hash == key_hash {
                         path_nodes.push((depth, node, true));
                         break;
@@ -1999,9 +2118,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                         break;
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     path_nodes.push((depth, node, false));
-                    
+
                     let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
                     current_hash = if bit == 0 { left_child } else { right_child };
                     depth += 1;
@@ -2018,7 +2140,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
 
         for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
             match node {
-                SMTNode::Leaf { key: existing_key, value_index } => {
+                SMTNode::Leaf {
+                    key: existing_key,
+                    value_index,
+                } => {
                     if is_replacement {
                         updates.push((node_depth, new_child_hash));
                     } else {
@@ -2039,7 +2164,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                         updates.push((node_depth, new_child_hash));
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
                     let new_internal = if bit == 0 {
                         SMTNode::Internal {
@@ -2183,7 +2311,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Individual database writes are inefficient. Use update_smt_for_key_batched() instead.
         // For now, we'll create a temporary batch to maintain atomicity.
         let mut batch = self.storage.create_batch();
-        
+
         // Store the leaf node
         let leaf_node_key = make_smt_node_key(PREFIXES.smt_node, &new_leaf_hash);
         batch.put(leaf_node_key, Self::serialize_node(&new_leaf));
@@ -2197,10 +2325,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         // Find the path to insert/update this key
-        let path_updates = self.compute_path_updates(current_root, key_hash, new_leaf_hash, 0, &mut batch)?;
+        let path_updates =
+            self.compute_path_updates(current_root, key_hash, new_leaf_hash, 0, &mut batch)?;
 
         // Write the batch at the end
-        self.storage.write(batch)
+        self.storage
+            .write(batch)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
 
         // Apply the path updates and return the new root
@@ -2233,9 +2363,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             };
 
             match node {
-                SMTNode::Leaf { key: ref existing_key, .. } => {
+                SMTNode::Leaf {
+                    key: ref existing_key,
+                    ..
+                } => {
                     let existing_key_hash = Self::hash_key(existing_key);
-                    
+
                     if existing_key_hash == key_hash {
                         // Replacing existing leaf - path ends here
                         path_nodes.push((depth, node, true)); // true = replace
@@ -2246,9 +2379,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                         break;
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     path_nodes.push((depth, node, false));
-                    
+
                     // Determine which child to follow
                     let bit = (key_hash[depth / 8] >> (7 - (depth % 8))) & 1;
                     current_hash = if bit == 0 { left_child } else { right_child };
@@ -2267,7 +2403,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         // Process path nodes in reverse order (bottom up)
         for (node_depth, node, is_replacement) in path_nodes.into_iter().rev() {
             match node {
-                SMTNode::Leaf { key: existing_key, value_index } => {
+                SMTNode::Leaf {
+                    key: existing_key,
+                    value_index,
+                } => {
                     if is_replacement {
                         // Simple replacement - new leaf becomes the child
                         updates.push((node_depth, new_child_hash));
@@ -2293,7 +2432,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                         updates.push((node_depth, new_child_hash));
                     }
                 }
-                SMTNode::Internal { left_child, right_child } => {
+                SMTNode::Internal {
+                    left_child,
+                    right_child,
+                } => {
                     // Create new internal node with updated child
                     let bit = (key_hash[node_depth / 8] >> (7 - (node_depth % 8))) & 1;
                     let new_internal = if bit == 0 {
@@ -2394,7 +2536,6 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(current_hash)
     }
 
-
     /// Get the current state root (most recent)
     pub fn get_current_state_root(&self) -> Result<[u8; 32]> {
         // Find the highest height with a stored root
@@ -2426,5 +2567,160 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         Ok(EMPTY_NODE_HASH)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::{BatchLike, KeyValueStoreLike};
+    use std::collections::HashMap;
+
+    #[derive(Debug)]
+    pub struct TestError(anyhow::Error);
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    impl std::error::Error for TestError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.0.source()
+        }
+    }
+
+    impl From<anyhow::Error> for TestError {
+        fn from(err: anyhow::Error) -> Self {
+            TestError(err)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub struct MemoryDB {
+        pub db: HashMap<Vec<u8>, Vec<u8>>,
+    }
+
+    enum Op {
+        Put(Vec<u8>, Vec<u8>),
+        Delete(Vec<u8>),
+    }
+
+    #[derive(Default)]
+    pub struct MemoryDBBatch {
+        ops: Vec<Op>,
+    }
+
+    impl BatchLike for MemoryDBBatch {
+        fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+            self.ops
+                .push(Op::Put(key.as_ref().to_vec(), value.as_ref().to_vec()));
+        }
+
+        fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+            self.ops.push(Op::Delete(key.as_ref().to_vec()));
+        }
+
+        fn default() -> Self {
+            Self { ops: Vec::new() }
+        }
+    }
+
+    impl KeyValueStoreLike for MemoryDB {
+        type Batch = MemoryDBBatch;
+        type Error = TestError;
+
+        fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(self.db.get(key.as_ref()).cloned())
+        }
+
+        fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(self.db.get(key.as_ref()).cloned())
+        }
+
+        fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
+        where
+            K: AsRef<[u8]>,
+            V: AsRef<[u8]>,
+        {
+            self.db
+                .insert(key.as_ref().to_vec(), value.as_ref().to_vec());
+            Ok(())
+        }
+
+        fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
+            self.db.remove(key.as_ref());
+            Ok(())
+        }
+
+        fn scan_prefix<K: AsRef<[u8]>>(
+            &self,
+            prefix: K,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+            Ok(self
+                .db
+                .iter()
+                .filter(|(k, _)| k.starts_with(prefix.as_ref()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+        }
+
+        fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
+            Ok(Box::new(self.db.keys().cloned()))
+        }
+
+        fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
+            for op in batch.ops {
+                match op {
+                    Op::Put(key, value) => {
+                        self.db.insert(key, value);
+                    }
+                    Op::Delete(key) => {
+                        self.db.remove(&key);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn create_batch(&self) -> Self::Batch {
+            <Self::Batch as BatchLike>::default()
+        }
+    }
+
+    #[test]
+    fn test_calculate_prefix_root() {
+        let db = MemoryDB::default();
+        let mut smt = BatchedSMTHelper::new(db);
+
+        let key_values = vec![
+            (b"balances:alice".to_vec(), b"100".to_vec()),
+            (b"balances:bob".to_vec(), b"200".to_vec()),
+            (b"sequence:alice".to_vec(), b"1".to_vec()),
+        ];
+
+        let prefix = b"balances:".to_vec();
+        let prefixed_kvs: Vec<(Vec<u8>, Vec<u8>)> = key_values
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        let prefix_root = smt.calculate_prefix_root(&prefixed_kvs).unwrap();
+
+        let mut expected_smt = BatchedSMTHelper::new(MemoryDB::default());
+        let expected_root = expected_smt
+            .compute_minimal_smt_root(EMPTY_NODE_HASH, &prefixed_kvs)
+            .unwrap();
+
+        assert_eq!(prefix_root, expected_root);
+
+        let mut all_smt = BatchedSMTHelper::new(MemoryDB::default());
+        let all_root = all_smt
+            .compute_minimal_smt_root(EMPTY_NODE_HASH, &key_values)
+            .unwrap();
+
+        assert_ne!(prefix_root, all_root);
     }
 }

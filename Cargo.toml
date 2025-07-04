@@ -1,7 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/*"
+  "crates/*",
+  "test-wasms/*"
 ]
 
 # Workspace dependencies for consistency
@@ -18,6 +19,9 @@ memshrew-runtime = { path = "crates/memshrew" }
 name = "metashrew-tests"
 version = "9.0.0"
 edition = "2021"
+
+[features]
+default = []
 
 [dependencies]
 # Core dependencies

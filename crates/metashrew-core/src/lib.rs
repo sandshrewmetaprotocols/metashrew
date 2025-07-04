@@ -89,6 +89,12 @@ pub mod index_pointer;
 pub mod macros;
 pub mod stdio;
 
+// Re-export the procedural macros from metashrew-macros
+pub use metashrew_macros::{main, view};
+
+#[cfg(test)]
+pub mod tests;
+
 #[cfg(feature = "panic-hook")]
 use crate::compat::panic_hook;
 use crate::imports::{__flush, __get, __get_len, __host_len, __load_input};
@@ -96,6 +102,15 @@ pub use crate::stdio::stdout;
 #[allow(unused_imports)]
 use metashrew_support::{
     compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
+    lru_cache::{
+        api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
+        ensure_preallocated_memory, force_evict_to_target, get_cache_allocation_mode, get_cache_stats,
+        get_height_partitioned_cache, get_lru_cache, get_total_memory_usage, get_view_height,
+        initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
+        set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,
+        CacheStats, LruDebugStats, KeyPrefixStats,
+        PrefixAnalysisConfig, key_parser,
+    },
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
 
@@ -165,9 +180,39 @@ pub fn get_cache() -> &'static HashMap<Arc<Vec<u8>>, Arc<Vec<u8>>> {
 pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
     unsafe {
         initialize();
+
+        // First check: immediate cache (CACHE)
         if CACHE.as_ref().unwrap().contains_key(&v.clone()) {
             return CACHE.as_ref().unwrap().get(&v.clone()).unwrap().clone();
         }
+
+        // Second check: height-partitioned cache (for view functions) or main LRU cache
+        if is_lru_cache_initialized() {
+            // Check if we're in a view function with a specific height
+            if let Some(height) = get_view_height() {
+                // Use height-partitioned cache for view functions
+                if let Some(cached_value) = get_height_partitioned_cache(height, &v) {
+                    // Found in height-partitioned cache, populate immediate cache for faster subsequent access
+                    CACHE
+                        .as_mut()
+                        .unwrap()
+                        .insert(v.clone(), cached_value.clone());
+                    return cached_value;
+                }
+            } else {
+                // Use main LRU cache for indexer functions
+                if let Some(cached_value) = get_lru_cache(&v) {
+                    // Found in LRU cache, populate immediate cache for faster subsequent access
+                    CACHE
+                        .as_mut()
+                        .unwrap()
+                        .insert(v.clone(), cached_value.clone());
+                    return cached_value;
+                }
+            }
+        }
+
+        // Third fallback: host calls (__get_len and __get)
         let length: i32 = __get_len(to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())));
         let mut buffer = Vec::<u8>::new();
         buffer.extend_from_slice(&length.to_le_bytes());
@@ -177,7 +222,19 @@ pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
             to_passback_ptr(&mut buffer),
         );
         let value = Arc::new(buffer[4..].to_vec());
+
+        // Populate caches with the retrieved value
         CACHE.as_mut().unwrap().insert(v.clone(), value.clone());
+        if is_lru_cache_initialized() {
+            if let Some(height) = get_view_height() {
+                // Store in height-partitioned cache for view functions
+                set_height_partitioned_cache(height, v.clone(), value.clone());
+            } else {
+                // Store in main LRU cache for indexer functions
+                set_lru_cache(v.clone(), value.clone());
+            }
+        }
+
         value
     }
 }
@@ -217,6 +274,11 @@ pub fn set(k: Arc<Vec<u8>>, v: Arc<Vec<u8>>) {
         initialize();
         CACHE.as_mut().unwrap().insert(k.clone(), v.clone());
         TO_FLUSH.as_mut().unwrap().push(k.clone());
+
+        // Also update LRU cache if initialized
+        if is_lru_cache_initialized() {
+            set_lru_cache(k.clone(), v.clone());
+        }
     }
 }
 
@@ -255,17 +317,73 @@ pub fn set(k: Arc<Vec<u8>>, v: Arc<Vec<u8>>) {
 #[allow(static_mut_refs)]
 pub fn flush() {
     unsafe {
-        initialize();
-        let mut to_encode: Vec<Vec<u8>> = Vec::<Vec<u8>>::new();
-        for item in TO_FLUSH.as_ref().unwrap() {
-            to_encode.push((*item.clone()).clone());
-            to_encode.push((*(CACHE.as_ref().unwrap().get(item).unwrap().clone())).clone());
+        // Ensure initialization before proceeding
+        if CACHE.is_none() || TO_FLUSH.is_none() {
+            initialize();
         }
+
+        let mut to_encode: Vec<Vec<u8>> = Vec::<Vec<u8>>::new();
+
+        // Safely access TO_FLUSH and try to get values from CACHE first, then LRU cache
+        if let Some(to_flush) = TO_FLUSH.as_ref() {
+            for item in to_flush {
+                let mut value_found = false;
+                
+                // First try immediate CACHE
+                if let Some(cache) = CACHE.as_ref() {
+                    if let Some(value) = cache.get(item) {
+                        to_encode.push(item.as_ref().clone());
+                        to_encode.push(value.as_ref().clone());
+                        value_found = true;
+                    }
+                }
+                
+                // If not in immediate cache, try LRU cache (after flush_to_lru() was called)
+                if !value_found && is_lru_cache_initialized() {
+                    if let Some(value) = get_lru_cache(item) {
+                        to_encode.push(item.as_ref().clone());
+                        to_encode.push(value.as_ref().clone());
+                        value_found = true;
+                    }
+                }
+                
+                // If still not found, this is an error condition
+                if !value_found {
+                    panic!("flush(): Key in TO_FLUSH not found in any cache: {:?}",
+                           String::from_utf8_lossy(item.as_ref()));
+                }
+            }
+        }
+
+        // Reset flush queue
         TO_FLUSH = Some(Vec::<Arc<Vec<u8>>>::new());
+
+        // Always call the host __flush function to ensure context state is set to 1
+        // This is critical for proper indexer completion signaling
         let mut buffer = KeyValueFlush::new();
         buffer.list = to_encode;
-        let serialized = buffer.write_to_bytes().unwrap();
-        __flush(to_ptr(&mut to_arraybuffer_layout(&serialized.to_vec())) + 4);
+
+        // Handle serialization errors gracefully
+        match buffer.write_to_bytes() {
+            Ok(serialized) => {
+                // Always call host function, even with empty data
+                let serialized_vec = serialized.to_vec();
+                __flush(to_ptr(&mut to_arraybuffer_layout(&serialized_vec)) + 4);
+            }
+            Err(_) => {
+                panic!("failed to serialize KeyValueFlush");
+            }
+        }
+
+        // Always clear the immediate cache after flushing, regardless of success
+        // This maintains consistency and prevents accumulation of stale data
+        CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
+        
+        // Force eviction if memory usage exceeds 1GB limit
+        // This ensures we don't accumulate too much memory over time
+        if is_lru_cache_initialized() {
+            force_evict_to_target();
+        }
     }
 }
 
@@ -302,6 +420,20 @@ pub fn flush() {
 #[allow(unused_unsafe)]
 pub fn input() -> Vec<u8> {
     initialize();
+
+    #[cfg(feature = "test-utils")]
+    {
+        // In test mode, return the mock input data directly
+        use crate::imports::_INPUT;
+        unsafe {
+            match _INPUT.as_ref() {
+                Some(v) => v.clone(),
+                None => vec![],
+            }
+        }
+    }
+
+    #[cfg(not(feature = "test-utils"))]
     unsafe {
         let length: i32 = __host_len().into();
         let mut buffer = Vec::<u8>::new();
@@ -338,6 +470,15 @@ pub fn input() -> Vec<u8> {
 /// ```
 #[allow(static_mut_refs)]
 pub fn initialize() -> () {
+    // CRITICAL: Set cache mode to indexer for deterministic memory layout
+    // metashrew-core is used for indexer operations which need consistent memory layout
+    set_cache_allocation_mode(CacheAllocationMode::Indexer);
+    
+    // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
+    // This must happen before any other memory allocations to guarantee
+    // consistent memory layout for WASM execution in indexer mode
+    ensure_preallocated_memory();
+    
     unsafe {
         if CACHE.is_none() {
             reset();
@@ -346,6 +487,12 @@ pub fn initialize() -> () {
             panic::set_hook(Box::new(panic_hook));
         }
     }
+
+    // Initialize LRU cache if not already initialized
+    // This is safe to call multiple times
+    // Note: ensure_preallocated_memory() is called above and also within initialize_lru_cache()
+    // for redundancy to guarantee memory preallocation in indexer mode
+    initialize_lru_cache();
 }
 
 /// Export bytes to the host with proper length prefix
@@ -411,6 +558,53 @@ pub fn reset() -> () {
     }
 }
 
+/// Flush CACHE contents to LRU_CACHE
+///
+/// This function moves all entries from the immediate CACHE to the persistent
+/// LRU_CACHE and then clears the CACHE. This is called by the main indexer
+/// function before flush() to ensure that cached values persist across blocks.
+///
+/// This function should NOT be called during view functions.
+///
+/// # Safety
+///
+/// This function modifies global mutable state and should only be called
+/// from the main indexer function.
+#[allow(static_mut_refs)]
+pub fn flush_to_lru() {
+    unsafe {
+        initialize();
+
+        // Only proceed if LRU cache is initialized and we're not in a view function
+        if is_lru_cache_initialized() && get_view_height().is_none() {
+            // Move all CACHE entries to LRU_CACHE
+            if let Some(cache) = CACHE.as_ref() {
+                let cache_size = cache.len();
+                let total_data_size: usize = cache.iter()
+                    .map(|(k, v)| k.len() + v.len())
+                    .sum();
+                
+                println!("flush_to_lru: Moving {} items ({} bytes of data) from CACHE to LRU_CACHE",
+                         cache_size, total_data_size);
+                
+                for (key, value) in cache.iter() {
+                    set_lru_cache(key.clone(), value.clone());
+                }
+                
+                // Log LRU cache stats after transfer
+                let stats = lru_cache_stats();
+                println!("flush_to_lru: LRU cache now has {} items, {} bytes memory usage",
+                         stats.items, stats.memory_usage);
+            }
+
+            // DO NOT clear TO_FLUSH here - the subsequent flush() call needs it to write data to the database
+            // Only clear the immediate cache since the data is now in LRU_CACHE
+            // The flush() function will clear TO_FLUSH after writing to the database
+            CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
+        }
+    }
+}
+
 /// Clear both the cache and flush queue
 ///
 /// This function completely resets the cache system, clearing both the
@@ -446,4 +640,426 @@ pub fn clear() -> () {
         reset();
         CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
     }
+
+    // Also clear LRU cache if initialized
+    if is_lru_cache_initialized() {
+        clear_lru_cache();
+    }
+}
+
+/// Set the current view height for height-partitioned caching
+///
+/// This function sets the current view height, which causes subsequent get()
+/// operations to use height-partitioned caching instead of the main LRU cache.
+/// This is used by view functions to ensure cache isolation by block height.
+///
+/// # Arguments
+///
+/// * `height` - The block height to use for partitioned caching
+pub fn set_view_for_height(height: u32) {
+    set_view_height(height);
+}
+
+/// Clear the current view height and immediate cache
+///
+/// This function clears the current view height and clears the immediate CACHE,
+/// causing subsequent get() operations to use the main LRU cache instead of
+/// height-partitioned caching. This should be called at the end of view functions.
+#[allow(static_mut_refs)]
+pub fn clear_view_cache() {
+    clear_view_height();
+
+    // Clear the immediate cache for view functions
+    unsafe {
+        CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
+    }
+}
+
+// LRU Cache API Functions
+// These functions provide access to the LRU cache system for WASM programs
+
+/// Get cache statistics for monitoring and debugging
+///
+/// This function returns current cache statistics including hit/miss ratios,
+/// memory usage, and eviction counts. Useful for monitoring cache performance.
+///
+/// # Returns
+///
+/// A `CacheStats` struct containing current cache metrics.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, lru_cache_stats};
+///
+/// initialize();
+/// let stats = lru_cache_stats();
+/// println!("Cache hits: {}, misses: {}", stats.hits, stats.misses);
+/// ```
+pub fn lru_cache_stats() -> CacheStats {
+    // Get the cached stats but update memory_usage with current actual usage
+    let mut stats = get_cache_stats();
+    stats.memory_usage = get_total_memory_usage();
+    stats
+}
+
+/// Get the total memory usage of the LRU cache system
+///
+/// This function returns the total memory usage in bytes of both the main
+/// LRU cache and the API cache.
+///
+/// # Returns
+///
+/// Total memory usage in bytes.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, lru_cache_memory_usage};
+///
+/// initialize();
+/// let memory_usage = lru_cache_memory_usage();
+/// println!("LRU cache using {} bytes", memory_usage);
+/// ```
+pub fn lru_cache_memory_usage() -> usize {
+    get_total_memory_usage()
+}
+
+/// Store a value in the API cache
+///
+/// This function allows WASM programs to cache arbitrary data using string keys.
+/// The API cache shares the same memory limit as the main LRU cache but uses
+/// a separate namespace to avoid conflicts with key-value store operations.
+///
+/// # Arguments
+///
+/// * `key` - A string key to identify the cached value
+/// * `value` - The value to cache (as bytes)
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, cache_set};
+/// use std::sync::Arc;
+///
+/// initialize();
+/// let computed_result = Arc::new(b"expensive_computation_result".to_vec());
+/// cache_set("computation_key".to_string(), computed_result);
+/// ```
+pub fn cache_set(key: String, value: Arc<Vec<u8>>) {
+    initialize();
+    api_cache_set(key, value);
+}
+
+/// Retrieve a value from the API cache
+///
+/// This function retrieves a previously cached value using its string key.
+/// The access updates the LRU ordering for the item.
+///
+/// # Arguments
+///
+/// * `key` - The string key to look up
+///
+/// # Returns
+///
+/// `Some(value)` if the key exists in the cache, `None` otherwise.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, cache_get};
+///
+/// initialize();
+/// if let Some(cached_result) = cache_get("computation_key") {
+///     println!("Found cached result: {:?}", cached_result);
+/// } else {
+///     println!("Cache miss, need to compute");
+/// }
+/// ```
+pub fn cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
+    initialize();
+    api_cache_get(key)
+}
+
+/// Remove a value from the API cache
+///
+/// This function removes a specific key-value pair from the API cache.
+///
+/// # Arguments
+///
+/// * `key` - The string key to remove
+///
+/// # Returns
+///
+/// `Some(value)` if the key existed and was removed, `None` if the key didn't exist.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, cache_remove};
+///
+/// initialize();
+/// if let Some(removed_value) = cache_remove("computation_key") {
+///     println!("Removed cached value: {:?}", removed_value);
+/// }
+/// ```
+pub fn cache_remove(key: &str) -> Option<Arc<Vec<u8>>> {
+    initialize();
+    api_cache_remove(key)
+}
+
+/// Check if the LRU cache system is initialized and available
+///
+/// This function returns true if the LRU cache system has been properly
+/// initialized and is available for use.
+///
+/// # Returns
+///
+/// `true` if the LRU cache is available, `false` otherwise.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, is_lru_cache_available};
+///
+/// initialize();
+/// if is_lru_cache_available() {
+///     println!("LRU cache is ready for use");
+/// }
+/// ```
+pub fn is_lru_cache_available() -> bool {
+    is_lru_cache_initialized()
+}
+
+/// Set the cache allocation mode
+///
+/// This function sets how memory should be allocated across the different caches.
+/// - Indexer mode: All memory goes to main LRU cache
+/// - View mode: Memory split between height-partitioned and API caches
+///
+/// # Arguments
+///
+/// * `mode` - The cache allocation mode to use
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, set_cache_mode};
+/// use metashrew_support::lru_cache::CacheAllocationMode;
+///
+/// initialize();
+/// set_cache_mode(CacheAllocationMode::View);
+/// ```
+pub fn set_cache_mode(mode: CacheAllocationMode) {
+    set_cache_allocation_mode(mode);
+}
+
+/// Get the current cache allocation mode
+///
+/// # Returns
+///
+/// The current cache allocation mode.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, get_cache_mode};
+///
+/// initialize();
+/// let mode = get_cache_mode();
+/// println!("Current cache mode: {:?}", mode);
+/// ```
+pub fn get_cache_mode() -> CacheAllocationMode {
+    get_cache_allocation_mode()
+}
+
+// LRU Cache Debugging API Functions
+
+/// Enable LRU cache debugging mode
+///
+/// When enabled, the cache will track key prefix statistics for analysis.
+/// This adds some overhead but provides valuable insights into cache usage patterns.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, enable_lru_debug_mode, generate_lru_debug_report};
+///
+/// initialize();
+/// enable_lru_debug_mode();
+///
+/// // ... perform cache operations ...
+///
+/// let report = generate_lru_debug_report();
+/// println!("{}", report);
+/// ```
+pub fn enable_lru_debug_mode() {
+    metashrew_support::lru_cache::enable_lru_debug_mode();
+}
+
+/// Disable LRU cache debugging mode
+pub fn disable_lru_debug_mode() {
+    metashrew_support::lru_cache::disable_lru_debug_mode();
+}
+
+/// Check if LRU cache debugging mode is enabled
+pub fn is_lru_debug_mode_enabled() -> bool {
+    metashrew_support::lru_cache::is_lru_debug_mode_enabled()
+}
+
+/// Set the prefix analysis configuration
+///
+/// # Arguments
+///
+/// * `config` - Configuration for prefix analysis including min/max prefix lengths
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{set_prefix_analysis_config, PrefixAnalysisConfig};
+///
+/// let config = PrefixAnalysisConfig {
+///     min_prefix_length: 8,
+///     max_prefix_length: 20,
+///     min_keys_per_prefix: 3,
+/// };
+/// set_prefix_analysis_config(config);
+/// ```
+pub fn set_prefix_analysis_config(config: PrefixAnalysisConfig) {
+    metashrew_support::lru_cache::set_prefix_analysis_config(config);
+}
+
+/// Get the current prefix analysis configuration
+pub fn get_prefix_analysis_config() -> PrefixAnalysisConfig {
+    metashrew_support::lru_cache::get_prefix_analysis_config()
+}
+
+/// Clear all prefix hit statistics
+///
+/// This resets all collected prefix statistics. Useful when you want to start
+/// fresh analysis for a new period.
+pub fn clear_prefix_hit_stats() {
+    metashrew_support::lru_cache::clear_prefix_hit_stats();
+}
+
+/// Get comprehensive LRU debug statistics
+///
+/// Returns detailed statistics about cache usage and key prefix patterns.
+///
+/// # Returns
+///
+/// `LruDebugStats` containing overall cache stats and prefix analysis
+pub fn get_lru_debug_stats() -> LruDebugStats {
+    metashrew_support::lru_cache::get_lru_debug_stats()
+}
+
+/// Generate a formatted debug report
+///
+/// Creates a human-readable report of LRU cache usage patterns and key prefix analysis.
+/// This is useful for understanding which parts of your key space are being accessed most.
+///
+/// # Returns
+///
+/// A formatted string containing the debug report
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, enable_lru_debug_mode, generate_lru_debug_report};
+///
+/// initialize();
+/// enable_lru_debug_mode();
+///
+/// // ... perform cache operations ...
+///
+/// let report = generate_lru_debug_report();
+/// println!("{}", report);
+/// ```
+pub fn generate_lru_debug_report() -> String {
+    metashrew_support::lru_cache::generate_lru_debug_report()
+}
+
+/// Parse a cache key into human-readable format
+///
+/// This function intelligently parses cache keys that contain mixed UTF-8 and binary data,
+/// formatting them in a human-readable way. Keys are expected to follow patterns like
+/// "/path/segments/binary_data" where path segments are UTF-8 strings separated by '/'
+/// and binary data is displayed as hexadecimal.
+///
+/// # Arguments
+///
+/// * `key` - The raw key bytes to parse
+///
+/// # Returns
+///
+/// A formatted string representation of the key
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::parse_cache_key;
+///
+/// let key = b"/blockhash/byheight/\x01\x00\x00\x00";
+/// let formatted = parse_cache_key(key);
+/// // Result: "/blockhash/byheight/01000000"
+/// ```
+pub fn parse_cache_key(key: &[u8]) -> String {
+    key_parser::parse_key_default(key)
+}
+
+/// Parse a cache key with enhanced pattern recognition
+///
+/// This function applies additional heuristics to detect common patterns like
+/// little-endian integers, hash-like data, and timestamps.
+///
+/// # Arguments
+///
+/// * `key` - The raw key bytes to parse
+///
+/// # Returns
+///
+/// A formatted string with enhanced pattern recognition
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::parse_cache_key_enhanced;
+///
+/// let key = b"/blockhash/byheight/\x01\x00\x00\x00";
+/// let formatted = parse_cache_key_enhanced(key);
+/// // Result: "/blockhash/byheight/00000001" (recognizes as little-endian u32)
+/// ```
+pub fn parse_cache_key_enhanced(key: &[u8]) -> String {
+    key_parser::parse_key_enhanced(key, &key_parser::KeyParseConfig::default())
+}
+
+/// Parse a cache key with custom configuration
+///
+/// This function allows full control over the parsing behavior through configuration.
+///
+/// # Arguments
+///
+/// * `key` - The raw key bytes to parse
+/// * `config` - Configuration for parsing behavior
+///
+/// # Returns
+///
+/// A formatted string representation of the key
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{parse_cache_key_with_config, key_parser::KeyParseConfig};
+///
+/// let config = KeyParseConfig {
+///     max_utf8_segment_length: 20,
+///     max_binary_segment_length: 8,
+///     show_full_short_binary: true,
+///     min_utf8_segment_length: 3,
+/// };
+/// let key = b"/very/long/path/segment/\x01\x02\x03\x04";
+/// let formatted = parse_cache_key_with_config(key, &config);
+/// ```
+pub fn parse_cache_key_with_config(key: &[u8], config: &key_parser::KeyParseConfig) -> String {
+    key_parser::parse_key_readable(key, config)
 }

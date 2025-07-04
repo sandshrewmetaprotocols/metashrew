@@ -1,0 +1,3 @@
+[submodule "submodules/alkanes-rs"]
+	path = submodules/alkanes-rs
+	url = https://github.com/kungfuflex/alkanes-rs

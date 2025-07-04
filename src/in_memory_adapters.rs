@@ -1,9 +1,7 @@
 //! In-memory adapters for comprehensive e2e testing
 use async_trait::async_trait;
-use bitcoin::{Block, hashes::Hash};
-use metashrew_sync::{
-    BitcoinNodeAdapter, BlockInfo, ChainTip, SyncError, SyncResult,
-};
+use bitcoin::{hashes::Hash, Block};
+use metashrew_sync::{BitcoinNodeAdapter, BlockInfo, ChainTip, SyncError, SyncResult};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -18,7 +16,7 @@ impl InMemoryBitcoinNode {
         let mut blocks = HashMap::new();
         let tip = ChainTip {
             height: 0,
-            hash: genesis_block.block_hash().to_byte_array().to_vec(),
+            hash: genesis_block.block_hash().as_byte_array().to_vec(),
         };
         blocks.insert(0, genesis_block);
         Self {
@@ -31,7 +29,7 @@ impl InMemoryBitcoinNode {
         let mut blocks = self.blocks.write().unwrap();
         let mut tip = self.tip.write().unwrap();
         tip.height = height;
-        tip.hash = block.block_hash().to_byte_array().to_vec();
+        tip.hash = block.block_hash().as_byte_array().to_vec();
         blocks.insert(height, block);
     }
 }
@@ -47,7 +45,7 @@ impl BitcoinNodeAdapter for InMemoryBitcoinNode {
             .read()
             .unwrap()
             .get(&height)
-            .map(|b| b.block_hash().to_byte_array().to_vec())
+            .map(|b| b.block_hash().as_byte_array().to_vec())
             .ok_or_else(|| SyncError::BitcoinNode(format!("Block not found at height {}", height)))
     }
 
@@ -56,7 +54,7 @@ impl BitcoinNodeAdapter for InMemoryBitcoinNode {
             .read()
             .unwrap()
             .get(&height)
-            .map(|b| metashrew_support::utils::consensus_encode(b).unwrap())
+            .map(|b| bitcoin::consensus::serialize(b))
             .ok_or_else(|| SyncError::BitcoinNode(format!("Block not found at height {}", height)))
     }
 
@@ -67,11 +65,13 @@ impl BitcoinNodeAdapter for InMemoryBitcoinNode {
             .unwrap()
             .get(&height)
             .cloned()
-            .ok_or_else(|| SyncError::BitcoinNode(format!("Block not found at height {}", height)))?;
+            .ok_or_else(|| {
+                SyncError::BitcoinNode(format!("Block not found at height {}", height))
+            })?;
         Ok(BlockInfo {
             height,
-            hash: block.block_hash().to_byte_array().to_vec(),
-            data: metashrew_support::utils::consensus_encode(&block).unwrap(),
+            hash: block.block_hash().as_byte_array().to_vec(),
+            data: bitcoin::consensus::serialize(&block),
         })
     }
 

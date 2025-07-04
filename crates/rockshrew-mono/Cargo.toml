@@ -3,10 +3,6 @@ name = "rockshrew-mono"
 version = "9.0.0"
 edition = "2021"
 
-[lib]
-name = "rockshrew_mono"
-path = "src/lib.rs"
-
 [dependencies]
 async-trait = "0.1"
 rand = "0.8"
@@ -50,7 +46,11 @@ tokio-test = "0.4"
 tempfile = "3.8"
 memshrew-runtime = { path = "../memshrew" }
 metashrew-core = { path = "../metashrew-core" }
-
+wat = "1.235.0"
+metashrew-sync = { path = "../metashrew-sync", features = ["test-utils"] }
+bitcoin = { version = "0.32.6", features = ["rand"] }
+metashrew-tests = { path = "../../" }
+futures = "0.3"
 
 [profile.release]
 debug = true

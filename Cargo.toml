@@ -16,7 +16,7 @@ memshrew-runtime = { path = "crates/memshrew" }
 # Root package for running tests
 [package]
 name = "metashrew-tests"
-version = "9.0.0"
+version = "9.0.1"
 edition = "2021"
 
 [dependencies]

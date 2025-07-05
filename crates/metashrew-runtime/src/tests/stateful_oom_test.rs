@@ -74,7 +74,7 @@ async fn test_oom_harness(
 #[tokio::test(flavor = "multi_thread")]
 async fn test_large_entries_oom() {
     let mut runtime = initialize();
-    for i in 500..505 {
+    for i in 1..505 {
         let size_of_each_entry = 1000 * 1024;
         test_oom_harness(&mut runtime, i, size_of_each_entry).await;
     }
@@ -83,7 +83,11 @@ async fn test_large_entries_oom() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_large_number_oom() {
     let mut runtime = initialize();
-    let num_entries = 1024 * 1024;
-    let size_of_each_entry = 1;
+    let num_entries = 268310;
+    let size_of_each_entry = 1024;
     test_oom_harness(&mut runtime, num_entries, size_of_each_entry).await;
+    for i in 1..505 {
+        let size_of_each_entry = 1024;
+        test_oom_harness(&mut runtime, i, size_of_each_entry).await;
+    }
 }

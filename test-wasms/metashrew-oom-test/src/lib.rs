@@ -1,6 +1,8 @@
 use bitcoin;
 use metashrew_core::{get, index_pointer::IndexPointer};
+use metashrew_core::{println, stdio::stdout};
 use metashrew_support::index_pointer::KeyValuePointer;
+use std::fmt::Write;
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -12,6 +14,8 @@ pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>>
         let value_to_set = block.to_vec();
         pointer.set(Arc::new(value_to_set));
     }
+    let stats = metashrew_core::lru_cache_stats();
+    println!("stats {:?}", stats);
 
     Ok(())
 }

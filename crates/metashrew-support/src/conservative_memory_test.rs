@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod tests {
     use crate::lru_cache::{
-        detect_available_memory, ensure_preallocated_memory, initialize_lru_cache,
+        detect_available_memory, initialize_lru_cache,
         get_actual_lru_cache_memory_limit, set_cache_allocation_mode, CacheAllocationMode,
         clear_lru_cache, get_total_memory_usage, force_evict_to_target_percentage,
     };
@@ -20,24 +20,24 @@ mod tests {
         assert!(detected_memory >= 4 * 1024 * 1024, 
                 "Detected memory {} should be at least 4MB", detected_memory);
         
-        // Should not be more than 256MB (our conservative maximum)
-        assert!(detected_memory <= 256 * 1024 * 1024,
-                "Detected memory {} should not exceed 256MB", detected_memory);
+        // Should not be more than 1GB (our maximum with preallocated memory)
+        assert!(detected_memory <= 1024 * 1024 * 1024,
+                "Detected memory {} should not exceed 1GB", detected_memory);
         
         println!("✅ Conservative memory detection: {} bytes ({} MB)", 
                  detected_memory, detected_memory / (1024 * 1024));
     }
 
     #[test]
-    fn test_safe_preallocation() {
-        // Test that preallocation doesn't panic
+    fn test_safe_initialization() {
+        // Test that initialization doesn't panic
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
         
         // This should not panic even in constrained environments
-        ensure_preallocated_memory();
+        initialize_lru_cache();
         
         let actual_limit = get_actual_lru_cache_memory_limit();
-        println!("✅ Safe preallocation completed with limit: {} bytes ({} MB)",
+        println!("✅ Safe initialization completed with limit: {} bytes ({} MB)",
                  actual_limit, actual_limit / (1024 * 1024));
     }
 
@@ -77,9 +77,9 @@ mod tests {
         assert!(actual_limit >= 4 * 1024 * 1024, 
                 "Memory limit {} should be at least 4MB", actual_limit);
         
-        // Should not be excessive for WASM
-        assert!(actual_limit <= 256 * 1024 * 1024,
-                "Memory limit {} should not exceed 256MB for WASM", actual_limit);
+        // Should not be excessive for WASM (allow up to 1GB with preallocated memory)
+        assert!(actual_limit <= 1024 * 1024 * 1024,
+                "Memory limit {} should not exceed 1GB for WASM", actual_limit);
         
         println!("✅ Memory limits are reasonable: {} bytes ({} MB)",
                  actual_limit, actual_limit / (1024 * 1024));

@@ -7,8 +7,8 @@
 mod tests {
     use super::super::lru_cache::{
         detect_available_memory, get_actual_lru_cache_memory_limit, initialize_lru_cache,
-        clear_lru_cache, set_cache_allocation_mode, CacheAllocationMode, ensure_preallocated_memory,
-        set_lru_cache, get_lru_cache, get_cache_stats
+        clear_lru_cache, set_cache_allocation_mode, CacheAllocationMode,
+        set_lru_cache, get_lru_cache, get_cache_stats, force_reinitialize_caches
     };
     use std::sync::Arc;
 
@@ -48,14 +48,15 @@ mod tests {
     fn test_graceful_cache_initialization() {
         // Test that cache initialization works with detected memory limits
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
-        clear_lru_cache();
+        
+        // Force complete reinitialization to avoid test interference
+        force_reinitialize_caches();
         
         // This should not panic even on resource-constrained systems
-        ensure_preallocated_memory();
         initialize_lru_cache();
         
         let actual_limit = get_actual_lru_cache_memory_limit();
-        println!("Cache initialized with {} bytes ({} MB)", 
+        println!("Cache initialized with {} bytes ({} MB)",
                  actual_limit, actual_limit / (1024 * 1024));
         
         // Test basic cache operations work
@@ -63,7 +64,15 @@ mod tests {
         let value = Arc::new(b"test_value_memory_detection".to_vec());
         
         set_lru_cache(key.clone(), value.clone());
+        
+        // Debug: Check cache state before retrieval
+        println!("Checking cache state after set...");
+        // We can't access LRU_CACHE directly, so let's use the stats instead
+        let stats_before = get_cache_stats();
+        println!("Cache stats after set: items={}, memory={}", stats_before.items, stats_before.memory_usage);
+        
         let retrieved = get_lru_cache(&key);
+        println!("Retrieved value: {:?}", retrieved.is_some());
         assert_eq!(retrieved, Some(value), "Cache operations should work with detected memory limit");
         
         let stats = get_cache_stats();
@@ -73,18 +82,18 @@ mod tests {
     }
 
     #[test]
-    fn test_memory_preallocation_safety() {
-        // Test that memory preallocation doesn't panic on resource-constrained systems
+    fn test_cache_initialization_safety() {
+        // Test that cache initialization doesn't panic on resource-constrained systems
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
         
         // This should complete without panicking
         let result = std::panic::catch_unwind(|| {
-            ensure_preallocated_memory();
+            initialize_lru_cache();
         });
         
-        assert!(result.is_ok(), "Memory preallocation should not panic");
+        assert!(result.is_ok(), "Cache initialization should not panic");
         
-        println!("✅ Memory preallocation completed safely");
+        println!("✅ Cache initialization completed safely");
     }
 
     #[test]

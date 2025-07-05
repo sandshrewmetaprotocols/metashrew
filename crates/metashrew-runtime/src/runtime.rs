@@ -504,7 +504,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
         // This must happen before any WASM engine configuration to guarantee
         // consistent memory layout for deterministic execution
-        metashrew_support::lru_cache::ensure_preallocated_memory();
+        metashrew_core::allocator::ensure_preallocated_memory();
         
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
@@ -585,16 +585,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         mut store: T,
         prefix_configs: Vec<(String, Vec<u8>)>,
     ) -> Result<Self> {
-        // CRITICAL: Set cache mode to indexer for deterministic memory layout
-        // Runtime is used for indexer operations which need consistent memory layout
-        metashrew_support::lru_cache::set_cache_allocation_mode(
-            metashrew_support::lru_cache::CacheAllocationMode::Indexer
-        );
-        
-        // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
-        // This must happen before any WASM engine configuration to guarantee
-        // consistent memory layout for deterministic execution
-        metashrew_support::lru_cache::ensure_preallocated_memory();
         
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();

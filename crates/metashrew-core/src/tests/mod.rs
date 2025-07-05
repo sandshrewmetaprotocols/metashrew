@@ -4,6 +4,9 @@
 //! including tests for the LRU cache integration and other core functionality.
 
 #[cfg(test)]
+pub mod allocator_test;
+
+#[cfg(test)]
 pub mod main_macro_test;
 
 #[cfg(test)]

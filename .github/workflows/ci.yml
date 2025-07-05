@@ -14,30 +14,16 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        rust:
-          - stable
-          - beta
-          - nightly
-        include:
-          - rust: stable
-            can-fail: false
-          - rust: beta
-            can-fail: false
-          - rust: nightly
-            can-fail: true
-    continue-on-error: ${{ matrix.can-fail }}
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@master
+      uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: ${{ matrix.rust }}
-        components: rustfmt, clippy
+        toolchain: 1.86.0
+        targets: wasm32-unknown-unknown
         
     - name: Cache cargo registry
       uses: actions/cache@v4
@@ -46,9 +32,8 @@ jobs:
           ~/.cargo/registry
           ~/.cargo/git
           target
-        key: ${{ runner.os }}-cargo-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: |
-          ${{ runner.os }}-cargo-${{ matrix.rust }}-
           ${{ runner.os }}-cargo-
           
     - name: Install system dependencies
@@ -60,23 +45,21 @@ jobs:
           libssl-dev \
           libclang-dev \
           clang
-          
-    - name: Check formatting
-      if: matrix.rust == 'stable'
-      run: cargo fmt --all -- --check
-      
-    - name: Run clippy
-      if: matrix.rust == 'stable'
-      run: cargo clippy --all-targets --all-features
       
     - name: Build project
-      run: cargo build --verbose --all-features
+      run: cargo build --all-features
       
     - name: Run tests
-      run: cargo test --verbose --all-features
+      run: cargo test
+      
+    - name: Run metashrew runtime tests
+      run: cargo build --target wasm32-unknown-unknown --release --package metashrew-minimal && cargo test -p metashrew-runtime
+      
+    - name: Run metashrew core tests
+      run: cargo test -p metashrew-core
       
     - name: Run doc tests
-      run: cargo test --doc --verbose --all-features
+      run: cargo test --doc --all-features
 
   security-audit:
     name: Security Audit

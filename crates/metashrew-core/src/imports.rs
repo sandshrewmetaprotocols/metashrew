@@ -3,7 +3,7 @@ use wasm_bindgen::prelude::*;
 
 #[allow(unused_imports)]
 use metashrew_support::utils::ptr_to_vec;
-static mut _INPUT: Option<Vec<u8>> = None;
+pub static mut _INPUT: Option<Vec<u8>> = None;
 
 #[allow(static_mut_refs)]
 #[cfg(feature = "test-utils")]
@@ -37,26 +37,29 @@ pub fn __host_len() -> i32 {
 
 #[allow(static_mut_refs)]
 #[cfg(feature = "test-utils")]
-pub fn __load_input(ptr: i32) -> () {
-    unsafe {
-        match _INPUT.as_ref() {
-            Some(v) => (&mut std::slice::from_raw_parts_mut(ptr as usize as *mut u8, v.len()))
-                .clone_from_slice(&*v),
-            None => (),
-        }
-    }
+pub fn __load_input(_ptr: i32) -> () {
+    // In test mode, we don't actually write to memory via raw pointers
+    // The input() function will use __host_len() to get the length
+    // and this function is just a no-op for safety
 }
 
 #[cfg(feature = "test-utils")]
 pub fn __get_len(_ptr: i32) -> i32 {
+    // Return 0 to indicate no data found in "database"
+    // This simulates a cache miss at the host level
     0
 }
 
 #[cfg(feature = "test-utils")]
-pub fn __flush(_ptr: i32) -> () {}
+pub fn __flush(_ptr: i32) -> () {
+    // No-op for tests - just simulate successful flush
+}
 
 #[cfg(feature = "test-utils")]
-pub fn __get(_ptr: i32, _result: i32) -> () {}
+pub fn __get(_ptr: i32, _result: i32) -> () {
+    // No-op for tests - since __get_len returns 0, this shouldn't be called
+    // But if it is called, we don't write anything to the result buffer
+}
 
 #[cfg(feature = "test-utils")]
 #[wasm_bindgen(js_namespace = Date)]

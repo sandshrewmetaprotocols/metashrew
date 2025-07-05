@@ -45,8 +45,8 @@
 // - The `run` function should be generic over the adapter traits to support both
 //   production (RocksDB) and testing (in-memory) environments.
 
-pub mod smt_helper;
 pub mod adapters;
+pub mod smt_helper;
 pub mod snapshot;
 pub mod snapshot_adapters;
 pub mod ssh_tunnel;
@@ -68,10 +68,10 @@ use tracing::{debug, instrument};
 
 use crate::adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter};
 use crate::ssh_tunnel::parse_daemon_rpc_url;
-use metashrew_runtime::{set_label, MetashrewRuntime};
+use metashrew_runtime::{set_label, MetashrewRuntime, ViewPoolConfig};
 use metashrew_sync::{
-    BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync,
-    SnapshotProvider, StorageAdapter, SyncConfig, SyncMode, SnapshotSyncEngine,
+    BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync, SnapshotProvider,
+    SnapshotSyncEngine, StorageAdapter, SyncConfig, SyncMode,
 };
 use rockshrew_runtime::{RocksDBRuntimeAdapter, RocksDBStorageAdapter};
 
@@ -113,6 +113,24 @@ pub struct Args {
     pub reorg_check_threshold: u32,
     #[arg(long)]
     pub prefixroot: Vec<String>,
+    /// Enable view pool for parallel view execution
+    #[arg(long)]
+    pub enable_view_pool: bool,
+    /// Number of view runtimes in the pool (default: number of CPU cores)
+    #[arg(long)]
+    pub view_pool_size: Option<usize>,
+    /// Maximum concurrent view requests (default: pool_size * 2)
+    #[arg(long)]
+    pub view_pool_max_concurrent: Option<usize>,
+    /// Enable view pool logging for debugging
+    #[arg(long)]
+    pub view_pool_logging: bool,
+    /// Disable LRU cache and refresh memory for each WASM invocation
+    #[arg(long)]
+    pub disable_lru_cache: bool,
+    /// Disable WASM __log host function (silently ignore WASM log calls)
+    #[arg(long)]
+    pub disable_wasmtime_log: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -169,26 +187,53 @@ where
                 .metashrew_preview(block_hex, function_name, input_hex, height)
                 .await
         }
-        "metashrew_height" => state.sync_engine.read().await.metashrew_height().await.map(|h| h.to_string()),
+        "metashrew_height" => state
+            .sync_engine
+            .read()
+            .await
+            .metashrew_height()
+            .await
+            .map(|h| h.to_string()),
         "metashrew_getblockhash" => {
             let height = params[0].as_u64().unwrap_or_default() as u32;
-            state.sync_engine.read().await.metashrew_getblockhash(height).await
+            state
+                .sync_engine
+                .read()
+                .await
+                .metashrew_getblockhash(height)
+                .await
         }
         "metashrew_stateroot" => {
             let height = params[0].as_str().unwrap_or("latest").to_string();
-            state.sync_engine.read().await.metashrew_stateroot(height).await
+            state
+                .sync_engine
+                .read()
+                .await
+                .metashrew_stateroot(height)
+                .await
         }
-        "metashrew_snapshot" => state.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
+        "metashrew_snapshot" => state
+            .sync_engine
+            .read()
+            .await
+            .metashrew_snapshot()
+            .await
+            .map(|v| v.to_string()),
         "metashrew_prefixroot" => {
             let name = params[0].as_str().unwrap_or_default().to_string();
             let height = params[1].as_str().unwrap_or("latest").to_string();
-            state.sync_engine.read().await.metashrew_prefixroot(name, height).await
+            state
+                .sync_engine
+                .read()
+                .await
+                .metashrew_prefixroot(name, height)
+                .await
         }
         _ => Err(anyhow::anyhow!("Method not found").into()),
     };
 
     let duration = start_time.elapsed();
-    
+
     // Log slow RPC calls
     if duration > std::time::Duration::from_millis(100) {
         warn!("Slow RPC call: {} took {:?}", method, duration);
@@ -218,15 +263,50 @@ where
     Ok(HttpResponse::Ok().json(response))
 }
 
-/// Sets up a signal handler for graceful shutdown.
+/// Sets up a robust signal handler for graceful and forceful shutdown.
+///
+/// First Ctrl-C: Initiates graceful shutdown
+/// Second Ctrl-C: Forces immediate process termination
 async fn setup_signal_handler() -> Arc<AtomicBool> {
     let shutdown_requested = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown_requested.clone();
+    
     tokio::spawn(async move {
-        signal::ctrl_c().await.expect("Failed to install CTRL+C signal handler");
-        shutdown_clone.store(true, Ordering::SeqCst);
-        info!("Shutdown signal received, initiating graceful shutdown...");
+        let mut ctrl_c_count = 0;
+        
+        loop {
+            match signal::ctrl_c().await {
+                Ok(()) => {
+                    ctrl_c_count += 1;
+                    
+                    if ctrl_c_count == 1 {
+                        info!("First Ctrl-C received, initiating graceful shutdown...");
+                        info!("Press Ctrl-C again to force immediate termination");
+                        shutdown_clone.store(true, Ordering::SeqCst);
+                        
+                        // Start a timeout for graceful shutdown
+                        let shutdown_timeout = shutdown_clone.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                            if shutdown_timeout.load(Ordering::SeqCst) {
+                                warn!("Graceful shutdown timeout reached, forcing termination...");
+                                std::process::exit(1);
+                            }
+                        });
+                    } else {
+                        warn!("Second Ctrl-C received, forcing immediate termination!");
+                        warn!("Terminating process forcefully...");
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to listen for Ctrl-C signal: {}", e);
+                    break;
+                }
+            }
+        }
     });
+    
     shutdown_requested
 }
 
@@ -280,128 +360,159 @@ where
         sync_engine: sync_engine_arc.clone(),
     });
 
-    let indexer_handle = tokio::spawn({
-        let sync_engine_clone = sync_engine_arc.clone();
-        async move {
-            info!("Starting block indexing process...");
-            let mut block_count = 0u64;
-            let mut total_processing_time = std::time::Duration::ZERO;
-            let start_time = Instant::now();
-            
-            loop {
-                let block_start = Instant::now();
-                let mut engine = sync_engine_clone.write().await;
-                
-                match engine.process_next_block().await {
-                    Ok(Some(height)) => {
-                        let block_duration = block_start.elapsed();
-                        block_count += 1;
-                        total_processing_time += block_duration;
-                        
-                        // Log performance metrics
-                        if block_duration > std::time::Duration::from_millis(500) {
-                            warn!("Slow block processing at height {}: {:?}", height, block_duration);
-                        }
-                        
-                        // Log periodic performance summary
-                        if block_count % 100 == 0 {
-                            let avg_time = total_processing_time / block_count as u32;
-                            let elapsed = start_time.elapsed();
-                            let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
-                            info!(
-                                "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
-                                block_count, avg_time, blocks_per_sec
-                            );
-                        }
-                        
-                        debug!("Processed block {} in {:?}", height, block_duration);
+    let (indexer_handle, indexer_abort_handle) = {
+        let task = tokio::spawn({
+            let sync_engine_clone = sync_engine_arc.clone();
+            async move {
+                info!("Starting block indexing process...");
+                let mut block_count = 0u64;
+                let mut total_processing_time = std::time::Duration::ZERO;
+                let start_time = Instant::now();
 
-                        // Log prefix roots
-                        let runtime_adapter = engine.runtime.read().await;
-                        if let Err(e) = runtime_adapter.log_prefix_roots().await {
-                            error!("Failed to log prefix roots: {}", e);
-                        }
+                loop {
+                    let block_start = Instant::now();
+                    let mut engine = sync_engine_clone.write().await;
 
+                    match engine.process_next_block().await {
+                        Ok(Some(height)) => {
+                            let block_duration = block_start.elapsed();
+                            block_count += 1;
+                            total_processing_time += block_duration;
 
-                        if Some(height) == engine.config.exit_at {
-                            break;
+                            // Log performance metrics
+                            if block_duration > std::time::Duration::from_millis(500) {
+                                warn!(
+                                    "Slow block processing at height {}: {:?}",
+                                    height, block_duration
+                                );
+                            }
+
+                            // Log periodic performance summary
+                            if block_count % 100 == 0 {
+                                let avg_time = total_processing_time / block_count as u32;
+                                let elapsed = start_time.elapsed();
+                                let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
+                                info!(
+                                    "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
+                                    block_count, avg_time, blocks_per_sec
+                                );
+                            }
+
+                            debug!("Processed block {} in {:?}", height, block_duration);
+
+                            // Log prefix roots
+                            let runtime_adapter = engine.runtime.read().await;
+                            if let Err(e) = runtime_adapter.log_prefix_roots().await {
+                                error!("Failed to log prefix roots: {}", e);
+                            }
+
+                            if Some(height) == engine.config.exit_at {
+                                break;
+                            }
+                            // Successfully processed a block, continue immediately
+                            continue;
                         }
-                        // Successfully processed a block, continue immediately
-                        continue;
-                    }
-                    Ok(None) => {
-                        // No more blocks to process, wait for new blocks
-                        debug!("No new blocks available, waiting...");
-                        drop(engine); // Release the lock before sleeping
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                    Err(e) => {
-                        // CRITICAL FIX: Don't advance to next block on error!
-                        // The process_next_block() method internally manages height,
-                        // but on error we need to retry the SAME block, not skip it.
-                        let error_duration = block_start.elapsed();
-                        error!("Indexer error after {:?}: {}", error_duration, e);
-                        drop(engine); // Release the lock before sleeping
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        // Continue the loop to retry the same block
+                        Ok(None) => {
+                            // No more blocks to process, wait for new blocks
+                            debug!("No new blocks available, waiting...");
+                            drop(engine); // Release the lock before sleeping
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        Err(e) => {
+                            // CRITICAL FIX: Don't advance to next block on error!
+                            // The process_next_block() method internally manages height,
+                            // but on error we need to retry the SAME block, not skip it.
+                            let error_duration = block_start.elapsed();
+                            error!("Indexer error after {:?}: {}", error_duration, e);
+                            drop(engine); // Release the lock before sleeping
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                            // Continue the loop to retry the same block
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+        let abort_handle = task.abort_handle();
+        (task, abort_handle)
+    };
 
-    let server_handle = tokio::spawn({
-        let args_clone = Arc::new(args.clone());
-        HttpServer::new(move || {
-            let cors = match &args_clone.cors {
-                Some(cors_value) if cors_value == "*" => Cors::default()
-                    .allow_any_origin()
-                    .allow_any_method()
-                    .allow_any_header(),
-                Some(cors_value) => {
-                    let mut cors_builder = Cors::default();
-                    for origin in cors_value.split(',') {
-                        cors_builder = cors_builder.allowed_origin(origin.trim());
+    let (server_handle, server_abort_handle) = {
+        let task = tokio::spawn({
+            let args_clone = Arc::new(args.clone());
+            HttpServer::new(move || {
+                let cors = match &args_clone.cors {
+                    Some(cors_value) if cors_value == "*" => Cors::default()
+                        .allow_any_origin()
+                        .allow_any_method()
+                        .allow_any_header(),
+                    Some(cors_value) => {
+                        let mut cors_builder = Cors::default();
+                        for origin in cors_value.split(',') {
+                            cors_builder = cors_builder.allowed_origin(origin.trim());
+                        }
+                        cors_builder
                     }
-                    cors_builder
-                }
-                None => Cors::default().allowed_origin("http://localhost:8080"),
-            };
-            App::new()
-                .wrap(cors)
-                .app_data(app_state.clone())
-                .service(
-                    web::resource("/")
-                        .route(web::post().to(handle_jsonrpc::<N, S, R>))
-                )
-        })
-        .bind((args.host.as_str(), args.port))?
-        .run()
-    });
+                    None => Cors::default().allowed_origin("http://localhost:8080"),
+                };
+                App::new()
+                    .wrap(cors)
+                    .app_data(app_state.clone())
+                    .service(web::resource("/").route(web::post().to(handle_jsonrpc::<N, S, R>)))
+            })
+            .bind((args.host.as_str(), args.port))?
+            .run()
+        });
+        let abort_handle = task.abort_handle();
+        (task, abort_handle)
+    };
 
-    info!("JSON-RPC server running at http://{}:{}", args.host, args.port);
+    info!(
+        "JSON-RPC server running at http://{}:{}",
+        args.host, args.port
+    );
     info!("Indexer is ready and processing blocks.");
 
     let shutdown_signal = setup_signal_handler().await;
+    
+    // Enhanced shutdown handling with proper task cleanup
     tokio::select! {
         result = indexer_handle => {
             if let Err(e) = result {
                 error!("Indexer task failed: {}", e);
+            } else {
+                info!("Indexer task completed successfully");
             }
         }
         result = server_handle => {
             if let Err(e) = result {
                 error!("Server task failed: {}", e);
+            } else {
+                info!("Server task completed successfully");
             }
         }
         _ = async {
             loop {
                 if shutdown_signal.load(Ordering::SeqCst) {
+                    info!("Shutdown signal detected, beginning graceful shutdown...");
                     break;
                 }
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             }
         } => {
+            info!("Initiating graceful shutdown of all services...");
+            
+            // Give tasks a moment to finish current operations
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            
+            // Abort all tasks
+            info!("Stopping indexer task...");
+            indexer_abort_handle.abort();
+            
+            info!("Stopping server task...");
+            server_abort_handle.abort();
+            
+            // Wait a bit for cleanup
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             info!("Graceful shutdown complete.");
         }
     }
@@ -416,8 +527,7 @@ use hex::FromHex;
 
 /// Production-specific run function.
 pub async fn run_prod(args: Args) -> Result<()> {
-    let (rpc_url, bypass_ssl, tunnel_config) =
-        parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
+    let (rpc_url, bypass_ssl, tunnel_config) = parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
 
     info!("Initializing RocksDB with performance-optimized configuration");
     info!("Database path: {}", args.db_path.display());
@@ -440,20 +550,67 @@ pub async fn run_prod(args: Args) -> Result<()> {
         .collect::<Result<Vec<(String, Vec<u8>)>>>()?;
 
     // Use the optimized configuration from rockshrew-runtime based on performance analysis
-    let runtime = MetashrewRuntime::load(
+    let mut runtime = MetashrewRuntime::load(
         args.indexer.clone(),
         RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
         prefix_configs,
     )?;
 
+    // Set the disable wasmtime log flag if requested
+    if args.disable_wasmtime_log {
+        runtime.set_disable_wasmtime_log(true);
+    }
+
     let db = {
-        let context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
+        let context = runtime
+            .context
+            .lock()
+            .map_err(|_| anyhow!("Failed to lock context"))?;
         context.db.db.clone()
     };
 
-    let node_adapter = BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
+    let node_adapter =
+        BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
     let storage_adapter = RocksDBStorageAdapter::new(db.clone());
     let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+
+    // Set the disable LRU cache flag if requested
+    if args.disable_lru_cache {
+        runtime_adapter.set_disable_lru_cache(true);
+    }
+
+    // Configure view execution based on view pool setting
+    // Disable view pool if LRU cache is disabled
+    if args.enable_view_pool && !args.disable_lru_cache {
+        let pool_size = args.view_pool_size.unwrap_or_else(num_cpus::get);
+        let max_concurrent = args.view_pool_max_concurrent.unwrap_or(pool_size * 2);
+
+        let view_pool_config = ViewPoolConfig {
+            pool_size,
+            max_concurrent_requests: Some(max_concurrent),
+            enable_logging: args.view_pool_logging,
+        };
+
+        info!(
+            "Initializing view pool with {} runtimes, max {} concurrent requests",
+            pool_size, max_concurrent
+        );
+
+        if let Err(e) = runtime_adapter.initialize_view_pool(view_pool_config).await {
+            error!("Failed to initialize view pool: {}", e);
+            return Err(e);
+        }
+
+        info!("View pool initialized successfully - using stateful view runtimes for parallel execution");
+    } else {
+        // Disable stateful views to ensure we use non-stateful async wasmtime
+        runtime_adapter.disable_stateful_views().await;
+        if args.disable_lru_cache {
+            info!("LRU cache disabled - view pool disabled, will refresh memory for each WASM invocation");
+        } else {
+            info!("View pool disabled - using non-stateful async wasmtime for view execution");
+        }
+    }
 
     run(args, node_adapter, storage_adapter, runtime_adapter, None).await
 }

@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-sync"
-version = "0.1.0"
+version = "9.0.0"
 edition = "2024"
 
 [dependencies]
@@ -13,7 +13,7 @@ hex = "0.4.3"
 async-trait = "0.1.83"
 thiserror = "1.0.69"
 num_cpus = "1.16.0"
-bitcoin = "0.32.4"
+bitcoin = "0.32.6"
 rocksdb = "0.21.0"
 metashrew-runtime = { path = "../metashrew-runtime" }
 

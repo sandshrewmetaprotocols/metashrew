@@ -92,10 +92,10 @@
 
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::sleep;
 
 use crate::{
@@ -164,7 +164,7 @@ where
     async fn initialize(&self) -> SyncResult<u32> {
         let storage = self.storage.read().await;
         let indexed_height = storage.get_indexed_height().await?;
-        
+
         let start_height = if indexed_height == 0 {
             self.config.start_block
         } else {
@@ -209,7 +209,12 @@ where
     }
 
     /// Process a single block atomically
-    async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
+    async fn process_block(
+        &self,
+        height: u32,
+        block_data: Vec<u8>,
+        block_hash: Vec<u8>,
+    ) -> SyncResult<()> {
         info!(
             "Processing block {} ({} bytes) atomically",
             height,
@@ -314,7 +319,8 @@ where
         info!("Starting sync pipeline with size {}", pipeline_size);
 
         // Create channels for the pipeline
-        let (block_sender, mut block_receiver) = mpsc::channel::<(u32, Vec<u8>, Vec<u8>)>(pipeline_size);
+        let (block_sender, mut block_receiver) =
+            mpsc::channel::<(u32, Vec<u8>, Vec<u8>)>(pipeline_size);
         let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(pipeline_size);
 
         // Spawn block fetcher task
@@ -419,14 +425,18 @@ where
             let result_sender = result_sender.clone();
 
             tokio::spawn(async move {
-                while let Some((block_height, block_data, block_hash)) = block_receiver.recv().await {
+                while let Some((block_height, block_data, block_hash)) = block_receiver.recv().await
+                {
                     info!(
                         "Processing block {} ({} bytes)",
                         block_height,
                         block_data.len()
                     );
 
-                    let result = match sync_engine.process_block(block_height, block_data, block_hash).await {
+                    let result = match sync_engine
+                        .process_block(block_height, block_data, block_hash)
+                        .await
+                    {
                         Ok(_) => BlockResult::Success(block_height),
                         Err(e) => BlockResult::Error(block_height, e.to_string()),
                     };
@@ -504,7 +514,12 @@ where
     S: StorageAdapter,
     R: RuntimeAdapter,
 {
-    async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
+    async fn process_block(
+        &self,
+        height: u32,
+        block_data: Vec<u8>,
+        block_hash: Vec<u8>,
+    ) -> SyncResult<()> {
         // Try atomic processing first
         let atomic_result = {
             let mut runtime = self.runtime.write().await;
@@ -655,7 +670,6 @@ where
         let block_hash = self.node.get_block_hash(height).await?;
         self.process_block(height, block_data, block_hash).await
     }
-
 }
 
 /// Handles chain reorganizations by finding the common ancestor and rolling back state.
@@ -675,7 +689,8 @@ where
     let mut reorg_detected = false;
 
     // Find the common ancestor
-    while check_height > 0 && check_height >= current_height.saturating_sub(config.max_reorg_depth) {
+    while check_height > 0 && check_height >= current_height.saturating_sub(config.max_reorg_depth)
+    {
         let storage_guard = storage.read().await;
         let local_hash = match storage_guard.get_block_hash(check_height).await {
             Ok(Some(hash)) => hash,
@@ -689,7 +704,10 @@ where
         let remote_hash = match node.get_block_hash(check_height).await {
             Ok(hash) => hash,
             Err(e) => {
-                error!("Failed to get remote block hash at height {}: {}", check_height, e);
+                error!(
+                    "Failed to get remote block hash at height {}: {}",
+                    check_height, e
+                );
                 return Ok(current_height); // Don't reorg if node is failing
             }
         };

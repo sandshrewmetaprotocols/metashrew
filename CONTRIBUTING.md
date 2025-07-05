@@ -81,3 +81,11 @@ Feel free to:
 ## License
 
 By contributing, you agree that your contributions will be licensed under the project's license.
+
+## Pre-commit Hook
+
+This project includes a pre-commit hook that automatically formats your code with `cargo fmt` before you commit. To enable it, run the following command from the root of the repository:
+
+```bash
+./scripts/install-hooks.sh
+```

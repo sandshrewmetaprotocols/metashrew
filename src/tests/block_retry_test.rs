@@ -13,8 +13,8 @@ use log::{info, warn};
 use memshrew_runtime::MemStoreAdapter;
 use metashrew_runtime::smt::SMTHelper;
 use metashrew_sync::{
-    adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip,
-    SyncConfig, SyncEngine, SyncResult,
+    adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip, SyncConfig,
+    SyncEngine, SyncResult,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -39,13 +39,19 @@ impl RetryingMockNode {
     async fn should_fail(&self, height: u32) -> bool {
         let mut counts = self.failure_counts.lock().await;
         let current_failures = counts.entry(height).or_insert(0);
-        
+
         if *current_failures < self.max_failures_per_block {
             *current_failures += 1;
-            warn!("Simulating failure #{} for block {}", *current_failures, height);
+            warn!(
+                "Simulating failure #{} for block {}",
+                *current_failures, height
+            );
             true
         } else {
-            info!("Block {} will succeed after {} failures", height, *current_failures);
+            info!(
+                "Block {} will succeed after {} failures",
+                height, *current_failures
+            );
             false
         }
     }
@@ -74,19 +80,16 @@ impl BitcoinNodeAdapter for RetryingMockNode {
 
     async fn get_block_info(&self, height: u32) -> SyncResult<BlockInfo> {
         if self.should_fail(height).await {
-            return Err(metashrew_sync::SyncError::BitcoinNode(
-                format!("Simulated temporary failure for block {}", height)
-            ));
+            return Err(metashrew_sync::SyncError::BitcoinNode(format!(
+                "Simulated temporary failure for block {}",
+                height
+            )));
         }
         let hash = self.get_block_hash(height).await?;
         let chain = self.chain.lock().await;
         let block = chain.get_block(height).unwrap();
         let data = metashrew_support::utils::consensus_encode(block)?;
-        Ok(BlockInfo {
-            height,
-            hash,
-            data,
-        })
+        Ok(BlockInfo { height, hash, data })
     }
 
     async fn get_chain_tip(&self) -> SyncResult<ChainTip> {
@@ -112,22 +115,22 @@ fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Ve
 async fn test_block_retry_fix() -> Result<()> {
     let _ = env_logger::builder().is_test(true).try_init();
     info!("Block retry fix test started");
-    
+
     let config = TestConfig::new();
     let shared_adapter = MemStoreAdapter::new();
 
     // Create a chain with 10 blocks
     let chain = ChainBuilder::new().add_blocks(10);
-    
+
     // Create a node that fails 2 times per block before succeeding
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
-    
+
     let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
     let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
-    
+
     let sync_config = SyncConfig {
         start_block: 0,
-        exit_at: Some(11), // Process blocks 0-10
+        exit_at: Some(11),      // Process blocks 0-10
         pipeline_size: Some(1), // Single-threaded to make the test deterministic
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
@@ -148,7 +151,7 @@ async fn test_block_retry_fix() -> Result<()> {
     info!("Checking that all blocks were indexed...");
     let mut indexed_blocks = Vec::new();
     let mut missing_blocks = Vec::new();
-    
+
     for height in 0..=10 {
         if get_indexed_block(&shared_adapter, height)?.is_some() {
             indexed_blocks.push(height);
@@ -177,7 +180,7 @@ async fn test_block_retry_fix() -> Result<()> {
     );
 
     info!("Block retry fix test passed! All blocks were successfully indexed despite failures.");
-    
+
     Ok(())
 }
 
@@ -185,22 +188,22 @@ async fn test_block_retry_fix() -> Result<()> {
 async fn test_snapshot_sync_retry_fix() -> Result<()> {
     let _ = env_logger::builder().is_test(true).try_init();
     info!("Snapshot sync retry fix test started");
-    
+
     let config = TestConfig::new();
     let shared_adapter = MemStoreAdapter::new();
 
     // Create a chain with 10 blocks
     let chain = ChainBuilder::new().add_blocks(10);
-    
+
     // Create a node that fails 2 times per block before succeeding
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
-    
+
     let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
     let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
-    
+
     let sync_config = SyncConfig {
         start_block: 0,
-        exit_at: Some(11), // Process blocks 0-10
+        exit_at: Some(11),      // Process blocks 0-10
         pipeline_size: Some(1), // Single-threaded to make the test deterministic
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
@@ -222,7 +225,7 @@ async fn test_snapshot_sync_retry_fix() -> Result<()> {
     info!("Checking that all blocks were indexed...");
     let mut indexed_blocks = Vec::new();
     let mut missing_blocks = Vec::new();
-    
+
     for height in 0..=10 {
         if get_indexed_block(&shared_adapter, height)?.is_some() {
             indexed_blocks.push(height);
@@ -251,6 +254,6 @@ async fn test_snapshot_sync_retry_fix() -> Result<()> {
     );
 
     info!("Snapshot sync retry fix test passed! All blocks were successfully indexed despite failures.");
-    
+
     Ok(())
 }

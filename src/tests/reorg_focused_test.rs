@@ -61,11 +61,7 @@ async fn test_reorg_handling() -> Result<()> {
     let blocktracker_data_b = runtime
         .view("blocktracker".to_string(), &view_input, 5) // Chain B is at height 5
         .await?;
-    assert_eq!(
-        blocktracker_data_b.len(),
-        6,
-        "Chain B should have 6 blocks"
-    );
+    assert_eq!(blocktracker_data_b.len(), 6, "Chain B should have 6 blocks");
 
     // 4. Verify that the state from the original chain (A) after the fork point is gone.
     // Querying at height 4 should now show the state from chain B.

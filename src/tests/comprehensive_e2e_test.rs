@@ -59,11 +59,7 @@ impl BitcoinNodeAdapter for MockNode {
     async fn get_block_info(&self, height: u32) -> SyncResult<BlockInfo> {
         let hash = self.get_block_hash(height).await?;
         let data = self.get_block_data(height).await?;
-        Ok(BlockInfo {
-            height,
-            hash,
-            data,
-        })
+        Ok(BlockInfo { height, hash, data })
     }
 
     async fn get_chain_tip(&self) -> SyncResult<ChainTip> {
@@ -85,8 +81,8 @@ fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Ve
     smt_helper.get_at_height(&key, height)
 }
 
-use log::info;
 use env_logger;
+use log::info;
 
 #[tokio::test]
 async fn test_comprehensive_e2e() -> Result<()> {
@@ -141,7 +137,7 @@ async fn test_comprehensive_e2e() -> Result<()> {
     let reorg_runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
     let reorg_runtime_adapter = MetashrewRuntimeAdapter::new(reorg_runtime);
     let reorg_sync_config = SyncConfig {
-        start_block: 0, // This will be ignored as the adapter already has a height
+        start_block: 0,    // This will be ignored as the adapter already has a height
         exit_at: Some(11), // Sync the new chain up to its tip
         pipeline_size: Some(1),
         max_reorg_depth: 100,
@@ -173,20 +169,30 @@ async fn test_comprehensive_e2e() -> Result<()> {
     // Verify that the state from the final block (10) is present
     let final_block_data = get_indexed_block(&final_db_adapter, 10)?.unwrap();
     let final_block_from_chain = reorg_chain.get_block(10).unwrap();
-    let final_block_from_chain_bytes = metashrew_support::utils::consensus_encode(final_block_from_chain)?;
-    assert_eq!(final_block_data, final_block_from_chain_bytes, "Data for block 10 should match the new chain");
+    let final_block_from_chain_bytes =
+        metashrew_support::utils::consensus_encode(final_block_from_chain)?;
+    assert_eq!(
+        final_block_data, final_block_from_chain_bytes,
+        "Data for block 10 should match the new chain"
+    );
 
     // To truly verify the reorg, we need to check the HASH of block 6.
     // The old block 6 should be gone, and the new one should be there.
     let old_chain_block_6_hash = initial_chain.get_block(6).unwrap().block_hash();
     let new_chain_block_6_hash = reorg_chain.get_block(6).unwrap().block_hash();
-    
-    assert_ne!(old_chain_block_6_hash, new_chain_block_6_hash, "Hashes for old and new block 6 should differ");
+
+    assert_ne!(
+        old_chain_block_6_hash, new_chain_block_6_hash,
+        "Hashes for old and new block 6 should differ"
+    );
 
     let indexed_block_6_hash_bytes = final_db_adapter.get_block_hash(6).await?.unwrap();
     let indexed_block_6_hash = BlockHash::from_slice(&indexed_block_6_hash_bytes)?;
 
-    assert_eq!(indexed_block_6_hash, new_chain_block_6_hash, "The hash of indexed block 6 should be from the NEW chain");
+    assert_eq!(
+        indexed_block_6_hash, new_chain_block_6_hash,
+        "The hash of indexed block 6 should be from the NEW chain"
+    );
     info!("Hash of indexed block 6 matches the new chain's block 6.");
 
     // The original assertion was flawed because the new chain also has a block 10.

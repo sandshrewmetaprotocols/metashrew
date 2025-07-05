@@ -24,8 +24,8 @@
 //! 4. **Completion**: State updated to reflect successful processing
 //! 5. **Cleanup**: Context prepared for next block or operation
 
-use crate::traits::KeyValueStoreLike;
 use crate::smt::BatchedSMTHelper;
+use crate::traits::KeyValueStoreLike;
 use std::collections::HashMap;
 
 /// Execution context for WebAssembly indexer modules
@@ -83,7 +83,7 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// The generic design allows different storage implementations (RocksDB,
     /// in-memory, etc.) to be used based on deployment requirements.
     pub db: T,
-    
+
     /// Current block height being processed
     ///
     /// This height is used for:
@@ -92,14 +92,14 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// - Chain reorganization detection
     /// - State root calculations
     pub height: u32,
-    
+
     /// Raw block data available to WASM modules
     ///
     /// Contains the complete block data that WASM indexers can access through
     /// host functions. The format depends on the specific blockchain and
     /// indexer requirements.
     pub block: Vec<u8>,
-    
+
     /// WASM execution state tracking
     ///
     /// Tracks the progress of WASM module execution:

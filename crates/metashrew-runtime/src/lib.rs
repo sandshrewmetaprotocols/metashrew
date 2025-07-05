@@ -11,9 +11,13 @@ pub mod runtime;
 pub mod smt;
 pub mod traits;
 pub mod view_pool;
+pub mod vulkan_runtime;
 
 #[cfg(test)]
 pub mod tests;
+
+#[cfg(test)]
+pub mod gpu_host_functions_test;
 
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;

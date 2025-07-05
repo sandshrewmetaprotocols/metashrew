@@ -113,6 +113,13 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
 
     /// Calculated SMT roots for each configured prefix
     pub prefix_smts: HashMap<String, BatchedSMTHelper<T>>,
+
+    /// GPU execution result data storage
+    ///
+    /// Stores the result data from GPU execution between `__call_vulkan` and `__load_vulkan` calls.
+    /// The `__call_vulkan` host function executes GPU work and stores the result here,
+    /// then returns the size. The `__load_vulkan` host function copies this data to WASM memory.
+    pub gpu_result_data: Option<Vec<u8>>,
 }
 
 impl<T: KeyValueStoreLike> Clone for MetashrewRuntimeContext<T>
@@ -127,6 +134,7 @@ where
             state: self.state,
             prefix_configs: self.prefix_configs.clone(),
             prefix_smts: self.prefix_smts.clone(),
+            gpu_result_data: self.gpu_result_data.clone(),
         }
     }
 }
@@ -188,6 +196,7 @@ impl<T: KeyValueStoreLike + Clone> MetashrewRuntimeContext<T> {
             state: 0,
             prefix_configs,
             prefix_smts,
+            gpu_result_data: None,
         }
     }
 }

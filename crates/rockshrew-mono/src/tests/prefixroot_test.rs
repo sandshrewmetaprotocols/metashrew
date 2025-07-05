@@ -41,6 +41,8 @@ async fn test_prefixroot_parsing() {
         view_pool_max_concurrent: None,
         view_pool_logging: false,
         disable_lru_cache: false,
+        disable_wasmtime_log: false,
+        pipeline: None,
     };
     // This will panic if parsing fails
     let _ = run_prod(args).await;

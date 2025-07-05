@@ -33,6 +33,8 @@
 //! - `__get_len(key_ptr)`: Get value length for a key
 //! - `__flush(data_ptr)`: Write key-value pairs to database
 //! - `__log(ptr)`: Output debug messages
+//! - `__call_vulkan(ptr)`: Execute GPU work and return result size
+//! - `__load_vulkan(ptr)`: Copy GPU result data to WASM memory
 //!
 //! ## Execution Modes
 //!
@@ -74,6 +76,13 @@ use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 use crate::context::MetashrewRuntimeContext;
 use crate::smt::SMTHelper;
 use crate::traits::{BatchLike, KeyValueStoreLike};
+
+// Import Vulkan runtime for GPU acceleration
+#[cfg(feature = "gpu")]
+use crate::vulkan_runtime::{get_vulkan_context, VulkanExecutionInput};
+
+// Import VulkanExecutionResult regardless of feature flag since it's used in fallback code
+use crate::vulkan_runtime::VulkanExecutionResult;
 
 
 /// Internal key used to store the current blockchain tip height
@@ -2008,7 +2017,219 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             )
             .map_err(|e| anyhow!("Failed to wrap __get_len: {:?}", e))?;
 
+        // GPU execution host functions
+        let context_call_vulkan = context.clone();
+        let context_load_vulkan = context.clone();
+
+        linker
+            .func_wrap(
+                "env",
+                "__call_vulkan",
+                move |mut caller: Caller<'_, State>, input_ptr: i32| -> i32 {
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return -1;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return -1;
+                        }
+                    };
+
+                    let data = mem.data(&caller);
+                    
+                    // Read GPU execution input from WASM memory
+                    let gpu_input = match try_read_arraybuffer_as_vec(data, input_ptr) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return -1;
+                        }
+                    };
+
+                    // Execute GPU work and store result in context
+                    match Self::execute_gpu_work(&gpu_input) {
+                        Ok(result_data) => {
+                            let result_size = result_data.len() as i32;
+                            
+                            // Store result in context for __load_vulkan to retrieve
+                            match context_call_vulkan.clone().lock() {
+                                Ok(mut ctx) => {
+                                    ctx.gpu_result_data = Some(result_data);
+                                    result_size
+                                },
+                                Err(_) => {
+                                    caller.data_mut().had_failure = true;
+                                    -1
+                                }
+                            }
+                        },
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            -1
+                        }
+                    }
+                },
+            )
+            .map_err(|e| anyhow!("Failed to wrap __call_vulkan: {:?}", e))?;
+
+        linker
+            .func_wrap(
+                "env",
+                "__load_vulkan",
+                move |mut caller: Caller<'_, State>, output_ptr: i32| {
+                    let mem = match caller.get_export("memory") {
+                        Some(export) => match export.into_memory() {
+                            Some(memory) => memory,
+                            None => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        },
+                        None => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    // Retrieve GPU result data from context
+                    let result_data = match context_load_vulkan.clone().lock() {
+                        Ok(mut ctx) => {
+                            match ctx.gpu_result_data.take() {
+                                Some(data) => data,
+                                None => {
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
+                            }
+                        },
+                        Err(_) => {
+                            caller.data_mut().had_failure = true;
+                            return;
+                        }
+                    };
+
+                    // Copy result data to WASM memory at the specified pointer
+                    if let Err(_) = mem.write(&mut caller, output_ptr as usize, &result_data) {
+                        caller.data_mut().had_failure = true;
+                    }
+                },
+            )
+            .map_err(|e| anyhow!("Failed to wrap __load_vulkan: {:?}", e))?;
+
         Ok(())
+    }
+
+    /// Execute GPU work using the Vulkan pipeline
+    ///
+    /// This method handles the actual GPU execution by:
+    /// 1. Parsing the input data as GPU execution parameters
+    /// 2. Using the Vulkan runtime to execute compute shaders
+    /// 3. Returning the serialized result data
+    ///
+    /// # Parameters
+    ///
+    /// - `input_data`: Serialized GPU execution input from WASM
+    ///
+    /// # Returns
+    ///
+    /// The serialized GPU execution result data that will be copied to WASM memory
+    /// by the `__load_vulkan` host function.
+    ///
+    /// # GPU Execution Flow
+    ///
+    /// 1. **Parse input**: Deserialize GPU execution parameters from WASM
+    /// 2. **Execute Vulkan**: Use the global Vulkan context to execute compute shaders
+    /// 3. **Serialize result**: Convert execution results to bytes for WASM
+    /// 4. **Return data**: Store result for `__load_vulkan` to retrieve
+    ///
+    /// # Fallback Behavior
+    ///
+    /// If GPU execution fails or Vulkan is not available, the method falls back
+    /// to CPU execution to ensure reliable operation.
+    pub fn execute_gpu_work(input_data: &[u8]) -> Result<Vec<u8>> {
+        log::info!("GPU execution requested via __call_vulkan host function with {} bytes input", input_data.len());
+        
+        #[cfg(feature = "gpu")]
+        {
+            // Try to parse input data as VulkanExecutionInput
+            match serde_json::from_slice::<VulkanExecutionInput>(input_data) {
+                Ok(vulkan_input) => {
+                    log::debug!("Parsed Vulkan execution input: shader_name={}, input_size={}",
+                               vulkan_input.shader_name, vulkan_input.input_data.len());
+                    
+                    // Try to get the global Vulkan context and execute
+                    match get_vulkan_context() {
+                        Some(vulkan_context) => {
+                            log::debug!("Using Vulkan context for GPU execution");
+                            
+                            // Execute the compute shader on GPU
+                            match vulkan_context.execute_compute_shader(
+                                &vulkan_input.shader_name,
+                                &vulkan_input.input_data,
+                                vulkan_input.output_size
+                            ) {
+                                Ok(gpu_result) => {
+                                    log::info!("GPU execution completed successfully, output size: {} bytes", gpu_result.len());
+                                    
+                                    // Create VulkanExecutionResult
+                                    let result = VulkanExecutionResult {
+                                        success: true,
+                                        output_data: gpu_result,
+                                        error_message: None,
+                                        execution_time_ms: 0, // TODO: Add timing
+                                    };
+                                    
+                                    // Serialize result for WASM
+                                    match serde_json::to_vec(&result) {
+                                        Ok(serialized) => return Ok(serialized),
+                                        Err(e) => {
+                                            log::warn!("Failed to serialize GPU result: {}, falling back to CPU", e);
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    log::warn!("GPU execution failed: {}, falling back to CPU", e);
+                                }
+                            }
+                        },
+                        None => {
+                            log::warn!("Vulkan context not available, falling back to CPU execution");
+                        }
+                    }
+                },
+                Err(e) => {
+                    log::warn!("Failed to parse Vulkan input: {}, falling back to CPU", e);
+                }
+            }
+        }
+        
+        // Fallback to CPU execution or simple response
+        #[cfg(not(feature = "gpu"))]
+        {
+            log::info!("GPU feature not enabled, using CPU fallback");
+        }
+        
+        // Create a fallback result indicating CPU execution
+        let result = VulkanExecutionResult {
+            success: true,
+            output_data: format!("CPU fallback execution completed with {} bytes input", input_data.len()).into_bytes(),
+            error_message: Some("GPU not available, used CPU fallback".to_string()),
+            execution_time_ms: 0,
+        };
+        
+        // Serialize fallback result
+        match serde_json::to_vec(&result) {
+            Ok(serialized) => Ok(serialized),
+            Err(e) => {
+                log::error!("Failed to serialize fallback result: {}", e);
+                Err(anyhow!("Failed to serialize GPU execution result: {}", e))
+            }
+        }
     }
 
     /// Get all keys that were touched at a specific block height

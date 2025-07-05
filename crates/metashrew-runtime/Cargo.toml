@@ -22,6 +22,12 @@ tempfile = "3.8.1"
 tokio = { version = "1.0", features = ["sync", "rt", "rt-multi-thread", "macros", "time"] }
 num_cpus = "1.16"
 
+# Vulkan dependencies for GPU acceleration
+vulkano = { version = "0.34", optional = true }
+ash = { version = "0.37", optional = true }
+spirv-reflect = { version = "0.2", optional = true }
+bytemuck = { version = "1.14", optional = true }
+
 [dev-dependencies]
 futures = "0.3"
 wat = "1.235.0"
@@ -32,3 +38,5 @@ protoc-rust = { version = "2.28.0" }
 protoc-bin-vendored = "3.0.0"
 
 [features]
+default = []
+gpu = ["vulkano", "ash", "spirv-reflect", "bytemuck"]

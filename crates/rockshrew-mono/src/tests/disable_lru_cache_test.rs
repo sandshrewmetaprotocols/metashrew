@@ -49,6 +49,8 @@ async fn test_disable_lru_cache_flag_parsing() {
         view_pool_max_concurrent: None,
         view_pool_logging: false,
         disable_lru_cache: true,
+        disable_wasmtime_log: false,
+        pipeline: None,
     };
     
     // Test with disable_lru_cache = false
@@ -121,6 +123,8 @@ fn test_args_clone_with_disable_lru_cache() {
         view_pool_max_concurrent: None,
         view_pool_logging: false,
         disable_lru_cache: true,
+        disable_wasmtime_log: false,
+        pipeline: None,
     };
     
     // Test that cloning preserves the disable_lru_cache field

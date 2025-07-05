@@ -131,6 +131,9 @@ pub struct Args {
     /// Disable WASM __log host function (silently ignore WASM log calls)
     #[arg(long)]
     pub disable_wasmtime_log: bool,
+    /// Path to Vulkan GPU pipeline binary for accelerated processing
+    #[arg(long)]
+    pub pipeline: Option<PathBuf>,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -555,6 +558,28 @@ pub async fn run_prod(args: Args) -> Result<()> {
         RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
         prefix_configs,
     )?;
+
+    // Initialize Vulkan pipeline if provided
+    if let Some(ref pipeline_path) = args.pipeline {
+        info!("Initializing Vulkan GPU pipeline: {}", pipeline_path.display());
+        
+        // Initialize the Vulkan context with the pipeline binary
+        match metashrew_runtime::vulkan_runtime::init_vulkan_context_with_pipeline(
+            &pipeline_path.to_string_lossy()
+        ) {
+            Ok(()) => {
+                info!("Vulkan GPU pipeline initialized successfully");
+                info!("GPU host functions (__call_vulkan, __load_vulkan) are now available to WASM");
+                info!("Pipeline binary: {}", pipeline_path.display());
+            }
+            Err(e) => {
+                warn!("Failed to initialize Vulkan GPU pipeline: {}", e);
+                warn!("Continuing without GPU acceleration - WASM will use CPU fallback");
+            }
+        }
+    } else {
+        info!("No Vulkan pipeline specified - GPU acceleration disabled");
+    }
 
     // Set the disable wasmtime log flag if requested
     if args.disable_wasmtime_log {

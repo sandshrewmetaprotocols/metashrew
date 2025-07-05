@@ -6,9 +6,9 @@
 use std::sync::Arc;
 use metashrew_support::lru_cache::{
     initialize_lru_cache, set_lru_cache, get_lru_cache, clear_lru_cache,
-    get_allocator_usage_stats, get_comprehensive_memory_report, 
-    set_cache_allocation_mode, CacheAllocationMode, get_cache_stats, 
-    get_total_memory_usage
+    get_allocator_usage_stats, get_comprehensive_memory_report,
+    set_cache_allocation_mode, CacheAllocationMode, get_cache_stats,
+    get_total_memory_usage, shutdown_preallocated_allocator
 };
 
 #[test]
@@ -31,6 +31,9 @@ fn test_allocator_basic_functionality() {
     
     // Verify we have some preallocated memory
     assert!(total > 0, "Total preallocated memory should be greater than 0");
+    
+    // Clean up
+    shutdown_preallocated_allocator();
     
     println!("✅ Basic allocator functionality test passed!");
 }
@@ -69,7 +72,7 @@ fn test_cache_operations_with_allocator() {
     
     // Test cache operations work correctly
     println!("🔍 Testing cache operations...");
-    let test_key = Arc::new(b"allocator_test_key_2".to_vec());
+    let test_key = Arc::new(format!("allocator_test_key_2").into_bytes());
     match get_lru_cache(&test_key) {
         Some(value) => {
             println!("✅ Cache hit: found value with {} bytes", value.len());
@@ -84,6 +87,9 @@ fn test_cache_operations_with_allocator() {
              cache_stats.items, cache_stats.hits, cache_stats.misses);
     
     assert!(cache_stats.items >= test_entries, "Cache should contain at least {} items", test_entries);
+    
+    // Clean up
+    shutdown_preallocated_allocator();
     
     println!("✅ Cache operations with allocator test passed!");
 }
@@ -115,6 +121,9 @@ fn test_memory_report_generation() {
     assert!(report.contains("PREALLOCATED ALLOCATOR STATUS"), "Report should contain allocator status");
     assert!(report.contains("LRU CACHE MEMORY USAGE"), "Report should contain cache usage");
     assert!(report.contains("MEMORY EFFICIENCY ANALYSIS"), "Report should contain efficiency analysis");
+    
+    // Clean up
+    shutdown_preallocated_allocator();
     
     println!("✅ Memory report generation test passed!");
 }
@@ -161,6 +170,9 @@ fn test_cache_memory_consistency() {
         None => panic!("❌ Failed to retrieve stored data"),
     }
     
+    // Clean up
+    shutdown_preallocated_allocator();
+    
     println!("✅ Memory consistency test passed!");
 }
 
@@ -190,5 +202,9 @@ fn test_allocator_mode_configuration() {
     
     // Reset to indexer mode
     set_cache_allocation_mode(CacheAllocationMode::Indexer);
+    
+    // Clean up
+    shutdown_preallocated_allocator();
+    
     println!("✅ Mode configuration test passed!");
 }

@@ -311,8 +311,8 @@ unsafe impl GlobalAlloc for PreallocatedBumpAllocator {
         
         if ptr >= base && ptr < end {
             // This is from our preallocated region - bump allocators don't support individual deallocation
-            // We just track this for debugging
-            println!("DEBUG: PreallocatedBumpAllocator dealloc called for ptr={:p} (within preallocated region, no-op)", ptr);
+            // We just track this for debugging but don't actually free anything
+            // The entire preallocated region will be freed when the process exits
         } else {
             // This is from system allocator, delegate deallocation
             std::alloc::System.dealloc(ptr, layout);
@@ -405,6 +405,31 @@ pub fn reset_preallocated_allocator() {
     if is_preallocated_allocator_enabled() {
         PREALLOCATED_ALLOCATOR.reset();
     }
+}
+
+/// Clean shutdown of the preallocated allocator
+///
+/// This function should be called at the end of tests to ensure proper cleanup.
+/// It disables the allocator and clears any cached state.
+///
+/// NOTE: We don't reset the bump allocator because that would invalidate
+/// existing pointers that may still be in use. Instead, we just disable
+/// it for new allocations and clear the caches.
+pub fn shutdown_preallocated_allocator() {
+    // Clear all LRU caches to release any references to preallocated memory
+    // This must be done BEFORE disabling the allocator to ensure proper cleanup
+    clear_lru_cache();
+    
+    // Disable the preallocated allocator for new allocations
+    // This will cause new allocations to use the system allocator
+    disable_preallocated_allocator();
+    
+    // NOTE: We intentionally do NOT reset the bump allocator here because:
+    // 1. Bump allocators cannot safely deallocate individual allocations
+    // 2. Resetting would invalidate existing pointers that may still be in use
+    // 3. The memory will be reclaimed when the process exits
+    
+    println!("DEBUG: Preallocated allocator shutdown completed");
 }
 
 /// Get comprehensive memory usage report

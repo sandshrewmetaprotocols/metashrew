@@ -7,6 +7,9 @@
 pub mod main_macro_test;
 
 #[cfg(test)]
+pub mod memory_allocation_fix_test;
+
+#[cfg(test)]
 pub mod memory_preallocation_test;
 
 #[cfg(test)]

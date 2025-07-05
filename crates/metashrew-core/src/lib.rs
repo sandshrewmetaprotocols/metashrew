@@ -215,9 +215,67 @@ pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
 
         // Third fallback: host calls (__get_len and __get)
         let length: i32 = __get_len(to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())));
+        
+        // CRITICAL FIX: Validate length to prevent capacity overflow
+        // Reject negative lengths - this indicates corrupted host response
+        if length < 0 {
+            panic!("FATAL: Invalid negative length {} returned from __get_len for key: {:?}. This indicates corrupted host response and indexer must halt to prevent incorrect results.",
+                   length, String::from_utf8_lossy(v.as_ref()));
+        }
+        
+        // CRITICAL FIX: Handle large allocations with LRU cache eviction and retry
+        const MAX_ALLOCATION_SIZE: usize = 512 * 1024 * 1024; // 512MB
+        let length_usize = length as usize;
+        let total_size = length_usize + 4;
+        
+        // First attempt: Try allocation normally
         let mut buffer = Vec::<u8>::new();
-        buffer.extend_from_slice(&length.to_le_bytes());
-        buffer.resize((length as usize) + 4, 0);
+        let allocation_result = buffer.try_reserve_exact(total_size);
+        
+        match allocation_result {
+            Ok(()) => {
+                // Allocation succeeded, proceed normally
+                buffer.extend_from_slice(&length.to_le_bytes());
+                buffer.resize(total_size, 0);
+            }
+            Err(allocation_error) => {
+                println!("WARNING: Initial allocation failed for {} bytes. Attempting LRU cache eviction and retry. Error: {:?}",
+                         total_size, allocation_error);
+                
+                // Second attempt: Force LRU cache eviction to ~50% utilization and retry
+                if is_lru_cache_initialized() {
+                    println!("Forcing LRU cache eviction to 50% utilization to free memory...");
+                    force_evict_to_target_percentage(50); // Evict to 50% of current usage
+                    
+                    // Retry allocation after eviction
+                    let mut retry_buffer = Vec::<u8>::new();
+                    match retry_buffer.try_reserve_exact(total_size) {
+                        Ok(()) => {
+                            println!("SUCCESS: Allocation succeeded after LRU cache eviction");
+                            buffer = retry_buffer;
+                            buffer.extend_from_slice(&length.to_le_bytes());
+                            buffer.resize(total_size, 0);
+                        }
+                        Err(retry_error) => {
+                            // Final failure: Panic to halt indexer and prevent incorrect results
+                            panic!("FATAL: Failed to allocate {} bytes for buffer even after LRU cache eviction. Key: {:?}. Initial error: {:?}. Retry error: {:?}. Indexer must halt to prevent incorrect results.",
+                                   total_size, String::from_utf8_lossy(v.as_ref()), allocation_error, retry_error);
+                        }
+                    }
+                } else {
+                    // No LRU cache available for eviction, check if size is unreasonable
+                    if length_usize > MAX_ALLOCATION_SIZE {
+                        panic!("FATAL: Requested allocation size {} bytes exceeds maximum reasonable size {} bytes for key: {:?}. This likely indicates corrupted host response. Indexer must halt to prevent incorrect results.",
+                               length_usize, MAX_ALLOCATION_SIZE, String::from_utf8_lossy(v.as_ref()));
+                    } else {
+                        // Reasonable size but allocation failed - system memory issue
+                        panic!("FATAL: Failed to allocate {} bytes for buffer (reasonable size but insufficient system memory). Key: {:?}. Error: {:?}. Indexer must halt to prevent incorrect results.",
+                               total_size, String::from_utf8_lossy(v.as_ref()), allocation_error);
+                    }
+                }
+            }
+        };
+        
         __get(
             to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())),
             to_passback_ptr(&mut buffer),
@@ -437,9 +495,66 @@ pub fn input() -> Vec<u8> {
     #[cfg(not(feature = "test-utils"))]
     unsafe {
         let length: i32 = __host_len().into();
+        
+        // CRITICAL FIX: Validate length to prevent capacity overflow
+        // Reject negative lengths - this indicates corrupted host response
+        if length < 0 {
+            panic!("FATAL: Invalid negative length {} returned from __host_len. This indicates corrupted host response and indexer must halt to prevent incorrect results.", length);
+        }
+        
+        // CRITICAL FIX: Handle large allocations with LRU cache eviction and retry
+        const MAX_ALLOCATION_SIZE: usize = 512 * 1024 * 1024; // 512MB
+        let length_usize = length as usize;
+        let total_size = length_usize + 4;
+        
+        // First attempt: Try allocation normally
         let mut buffer = Vec::<u8>::new();
-        buffer.extend_from_slice(&length.to_le_bytes());
-        buffer.resize((length as usize) + 4, 0);
+        let allocation_result = buffer.try_reserve_exact(total_size);
+        
+        match allocation_result {
+            Ok(()) => {
+                // Allocation succeeded, proceed normally
+                buffer.extend_from_slice(&length.to_le_bytes());
+                buffer.resize(total_size, 0);
+            }
+            Err(allocation_error) => {
+                println!("WARNING: Initial input allocation failed for {} bytes. Attempting LRU cache eviction and retry. Error: {:?}",
+                         total_size, allocation_error);
+                
+                // Second attempt: Force LRU cache eviction to ~50% utilization and retry
+                if is_lru_cache_initialized() {
+                    println!("Forcing LRU cache eviction to 50% utilization to free memory...");
+                    force_evict_to_target_percentage(50); // Evict to 50% of current usage
+                    
+                    // Retry allocation after eviction
+                    let mut retry_buffer = Vec::<u8>::new();
+                    match retry_buffer.try_reserve_exact(total_size) {
+                        Ok(()) => {
+                            println!("SUCCESS: Input allocation succeeded after LRU cache eviction");
+                            buffer = retry_buffer;
+                            buffer.extend_from_slice(&length.to_le_bytes());
+                            buffer.resize(total_size, 0);
+                        }
+                        Err(retry_error) => {
+                            // Final failure: Panic to halt indexer and prevent incorrect results
+                            panic!("FATAL: Failed to allocate {} bytes for input buffer even after LRU cache eviction. Initial error: {:?}. Retry error: {:?}. Indexer must halt to prevent incorrect results.",
+                                   total_size, allocation_error, retry_error);
+                        }
+                    }
+                } else {
+                    // No LRU cache available for eviction, check if size is unreasonable
+                    if length_usize > MAX_ALLOCATION_SIZE {
+                        panic!("FATAL: Requested input allocation size {} bytes exceeds maximum reasonable size {} bytes. This likely indicates corrupted host response. Indexer must halt to prevent incorrect results.",
+                               length_usize, MAX_ALLOCATION_SIZE);
+                    } else {
+                        // Reasonable size but allocation failed - system memory issue
+                        panic!("FATAL: Failed to allocate {} bytes for input buffer (reasonable size but insufficient system memory). Error: {:?}. Indexer must halt to prevent incorrect results.",
+                               total_size, allocation_error);
+                    }
+                }
+            }
+        };
+        
         __load_input(to_ptr(&mut buffer) + 4);
         buffer[4..].to_vec()
     }
@@ -1134,4 +1249,78 @@ pub fn parse_cache_key_enhanced(key: &[u8]) -> String {
 /// ```
 pub fn parse_cache_key_with_config(key: &[u8], config: &key_parser::KeyParseConfig) -> String {
     key_parser::parse_key_readable(key, config)
+}
+
+/// Force LRU cache eviction to a target percentage of current usage
+///
+/// This function aggressively evicts LRU cache entries to reduce memory usage
+/// to the specified percentage of current usage. This is used when allocation
+/// failures occur to free up memory for retry attempts.
+///
+/// # Arguments
+///
+/// * `target_percentage` - Target percentage of current memory usage (e.g., 50 for 50%)
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::force_evict_to_target_percentage;
+///
+/// // Evict LRU cache to 50% of current usage
+/// force_evict_to_target_percentage(50);
+/// ```
+pub fn force_evict_to_target_percentage(target_percentage: u32) {
+    if !is_lru_cache_initialized() {
+        println!("WARNING: Cannot evict LRU cache - not initialized");
+        return;
+    }
+    
+    let current_usage = get_total_memory_usage();
+    let target_usage = (current_usage as f64 * target_percentage as f64 / 100.0) as usize;
+    
+    println!("LRU cache eviction: Current usage {} bytes, target {} bytes ({}%)",
+             current_usage, target_usage, target_percentage);
+    
+    // Use the existing force_evict_to_target function but with our calculated target
+    // We need to temporarily override the target for this specific eviction
+    force_evict_to_target_with_custom_limit(target_usage);
+}
+
+/// Force eviction to a custom memory limit
+///
+/// This is an internal helper function that performs aggressive eviction
+/// to reach a specific memory target.
+fn force_evict_to_target_with_custom_limit(target_bytes: usize) {
+    // First, do the standard eviction
+    force_evict_to_target();
+    
+    // Then continue evicting until we reach our target
+    let mut iterations = 0;
+    const MAX_ITERATIONS: u32 = 100; // Prevent infinite loops
+    
+    while get_total_memory_usage() > target_bytes && iterations < MAX_ITERATIONS {
+        let current_usage = get_total_memory_usage();
+        
+        // Try to evict more aggressively
+        if current_usage <= target_bytes {
+            break;
+        }
+        
+        // For now, call the standard eviction repeatedly
+        // TODO: Implement more targeted eviction in metashrew-support
+        force_evict_to_target();
+        
+        iterations += 1;
+        
+        // If we're not making progress, break to avoid infinite loop
+        let new_usage = get_total_memory_usage();
+        if new_usage >= current_usage {
+            println!("WARNING: LRU eviction not making progress, stopping at {} bytes", new_usage);
+            break;
+        }
+    }
+    
+    let final_usage = get_total_memory_usage();
+    println!("LRU cache eviction completed: Final usage {} bytes (target was {} bytes)",
+             final_usage, target_bytes);
 }

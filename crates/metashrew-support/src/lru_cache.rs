@@ -1312,9 +1312,8 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
         let old_len = cache.len();
         let _old_memory = cache.current_size();
         
-        // Check if this key already exists (for replacement vs new insertion)
-        let key_exists = cache.contains(&cache_key);
-        
+        // Insert the entry - the LRU cache will handle key replacement internally
+        // We don't need to check if the key exists beforehand since insert() handles this
         let _ = cache.insert(cache_key, cache_value);
         
         let new_len = cache.len();
@@ -1326,21 +1325,14 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
             stats.items = new_len;
             stats.memory_usage = new_memory;
 
-            // Calculate evictions more accurately:
-            // If we inserted a new key but the cache size didn't increase by 1,
-            // or if we replaced an existing key and the cache size decreased,
-            // then evictions occurred
-            if !key_exists {
-                // New key insertion
+            // Calculate evictions: if we tried to insert but the cache size didn't increase,
+            // then evictions occurred (either due to replacement or memory pressure)
+            if new_len <= old_len {
+                // Either key replacement or evictions occurred
                 let expected_new_len = old_len + 1;
                 if new_len < expected_new_len {
                     // Cache evicted items to make room
                     stats.evictions += (expected_new_len - new_len) as u64;
-                }
-            } else {
-                // Key replacement - check if cache size decreased
-                if new_len < old_len {
-                    stats.evictions += (old_len - new_len) as u64;
                 }
             }
         }
@@ -1431,9 +1423,7 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
         
-        // Check if this key already exists (for replacement vs new insertion)
-        let key_exists = cache.contains(&cache_key);
-        
+        // Insert the entry - the LRU cache will handle key replacement internally
         let _ = cache.insert(cache_key, cache_value);
         
         let new_len = cache.len();
@@ -1444,21 +1434,14 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
             stats.items = new_len;
             stats.memory_usage = cache.current_size();
 
-            // Calculate evictions more accurately:
-            // If we inserted a new key but the cache size didn't increase by 1,
-            // or if we replaced an existing key and the cache size decreased,
-            // then evictions occurred
-            if !key_exists {
-                // New key insertion
+            // Calculate evictions: if we tried to insert but the cache size didn't increase,
+            // then evictions occurred (either due to replacement or memory pressure)
+            if new_len <= old_len {
+                // Either key replacement or evictions occurred
                 let expected_new_len = old_len + 1;
                 if new_len < expected_new_len {
                     // Cache evicted items to make room
                     stats.evictions += (expected_new_len - new_len) as u64;
-                }
-            } else {
-                // Key replacement - check if cache size decreased
-                if new_len < old_len {
-                    stats.evictions += (old_len - new_len) as u64;
                 }
             }
         }
@@ -1678,9 +1661,7 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
         
-        // Check if this key already exists (for replacement vs new insertion)
-        let key_exists = cache.contains(&cache_key);
-        
+        // Insert the entry - the LRU cache will handle key replacement internally
         let _ = cache.insert(cache_key, cache_value);
         
         let new_len = cache.len();
@@ -1691,21 +1672,14 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
             stats.items = new_len;
             stats.memory_usage = cache.current_size();
 
-            // Calculate evictions more accurately:
-            // If we inserted a new key but the cache size didn't increase by 1,
-            // or if we replaced an existing key and the cache size decreased,
-            // then evictions occurred
-            if !key_exists {
-                // New key insertion
+            // Calculate evictions: if we tried to insert but the cache size didn't increase,
+            // then evictions occurred (either due to replacement or memory pressure)
+            if new_len <= old_len {
+                // Either key replacement or evictions occurred
                 let expected_new_len = old_len + 1;
                 if new_len < expected_new_len {
                     // Cache evicted items to make room
                     stats.evictions += (expected_new_len - new_len) as u64;
-                }
-            } else {
-                // Key replacement - check if cache size decreased
-                if new_len < old_len {
-                    stats.evictions += (old_len - new_len) as u64;
                 }
             }
         }

@@ -1,0 +1,10 @@
+[package]
+name = "test_allocator"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+metashrew-support = { path = "../crates/metashrew-support" }
+lru-mem = "0.2"

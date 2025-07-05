@@ -52,23 +52,25 @@
 //! ```
 
 use lru_mem::{HeapSize, LruCache};
+use std::alloc::{GlobalAlloc, Layout};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Memory limit for the LRU cache (1GB)
 const LRU_CACHE_MEMORY_LIMIT: usize = 1024 * 1024 * 1024; // 1GB
 
-/// Minimum memory limit for resource-constrained environments (256MB)
-const MIN_LRU_CACHE_MEMORY_LIMIT: usize = 256 * 1024 * 1024; // 256MB
+/// Minimum memory limit for resource-constrained environments (64MB)
+const MIN_LRU_CACHE_MEMORY_LIMIT: usize = 64 * 1024 * 1024; // 64MB
 
 /// Detect available memory and determine appropriate cache size
 pub fn detect_available_memory() -> usize {
     // Try to detect available memory by attempting progressively smaller allocations
     // Start with much more conservative sizes for WASM environments
     let test_sizes = [
-        1024 * 1024 * 1024, // 256MB (start conservative)
-        512 * 1024 * 1024,  // 256MB (start conservative)
-        256 * 1024 * 1024,  // 256MB (start conservative)
+        1024 * 1024 * 1024, // 1GB (target)
+        512 * 1024 * 1024,  // 512MB
+        256 * 1024 * 1024,  // 256MB
         128 * 1024 * 1024,  // 128MB
         64 * 1024 * 1024,   // 64MB
         32 * 1024 * 1024,   // 32MB
@@ -192,6 +194,290 @@ static PREALLOCATED_CACHE_MEMORY: std::sync::LazyLock<Vec<u8>> = std::sync::Lazy
     println!("ERROR: Failed to preallocate any cache memory, using empty allocation");
     Vec::new()
 });
+
+/// Custom bump allocator that uses the preallocated memory region
+///
+/// This allocator provides deterministic memory layout by allocating from
+/// a preallocated memory region using a simple bump allocation strategy.
+/// It's designed specifically for LRU cache usage in WASM environments.
+pub struct PreallocatedBumpAllocator {
+    /// Current offset within the preallocated memory region
+    offset: AtomicUsize,
+    /// Base pointer to the preallocated memory (thread-safe)
+    base_ptr: AtomicPtr<u8>,
+    /// Total size of the preallocated memory region
+    total_size: AtomicUsize,
+}
+
+// SAFETY: PreallocatedBumpAllocator is safe to send between threads
+// because it uses atomic operations for all mutable state
+unsafe impl Send for PreallocatedBumpAllocator {}
+
+// SAFETY: PreallocatedBumpAllocator is safe to share between threads
+// because all operations are atomic and the base pointer is immutable after initialization
+unsafe impl Sync for PreallocatedBumpAllocator {}
+
+impl PreallocatedBumpAllocator {
+    /// Create a new bump allocator using the preallocated memory region
+    pub fn new() -> Self {
+        // Force initialization of preallocated memory
+        let base_ptr = PREALLOCATED_CACHE_MEMORY.as_ptr() as *mut u8;
+        let total_size = PREALLOCATED_CACHE_MEMORY.len();
+        
+        println!("DEBUG: PreallocatedBumpAllocator initialized with base_ptr={:p}, size={} bytes",
+                 base_ptr, total_size);
+        
+        Self {
+            offset: AtomicUsize::new(0),
+            base_ptr: AtomicPtr::new(base_ptr),
+            total_size: AtomicUsize::new(total_size),
+        }
+    }
+    
+    /// Get current memory usage statistics
+    pub fn get_usage_stats(&self) -> (usize, usize, f64) {
+        let used = self.offset.load(Ordering::Relaxed);
+        let total = self.total_size.load(Ordering::Relaxed);
+        let percentage = if total > 0 { (used as f64 / total as f64) * 100.0 } else { 0.0 };
+        (used, total, percentage)
+    }
+    
+    /// Reset the allocator (for testing purposes)
+    pub fn reset(&self) {
+        self.offset.store(0, Ordering::Relaxed);
+        println!("DEBUG: PreallocatedBumpAllocator reset");
+    }
+}
+
+unsafe impl GlobalAlloc for PreallocatedBumpAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let size = layout.size();
+        let align = layout.align();
+        
+        let total_size = self.total_size.load(Ordering::Relaxed);
+        let base_ptr = self.base_ptr.load(Ordering::Relaxed);
+        
+        // If no preallocated memory available, fall back to system allocator
+        if total_size == 0 || base_ptr.is_null() {
+            return std::alloc::System.alloc(layout);
+        }
+        
+        // Align the current offset to the required alignment
+        let current_offset = self.offset.load(Ordering::Relaxed);
+        let aligned_offset = (current_offset + align - 1) & !(align - 1);
+        let new_offset = aligned_offset + size;
+        
+        // Check if we have enough space
+        if new_offset > total_size {
+            // Out of preallocated memory, fall back to system allocator
+            println!("DEBUG: PreallocatedBumpAllocator out of space (need {} bytes, have {} remaining), falling back to system allocator",
+                     size, total_size - current_offset);
+            return std::alloc::System.alloc(layout);
+        }
+        
+        // Try to atomically update the offset
+        match self.offset.compare_exchange_weak(
+            current_offset,
+            new_offset,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => {
+                let ptr = base_ptr.add(aligned_offset);
+                println!("DEBUG: PreallocatedBumpAllocator allocated {} bytes at offset {} (ptr={:p})",
+                         size, aligned_offset, ptr);
+                ptr
+            }
+            Err(_) => {
+                // Another thread updated the offset, retry
+                self.alloc(layout)
+            }
+        }
+    }
+    
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let base_ptr = self.base_ptr.load(Ordering::Relaxed);
+        let total_size = self.total_size.load(Ordering::Relaxed);
+        
+        if base_ptr.is_null() || total_size == 0 {
+            // No preallocated memory, delegate to system allocator
+            std::alloc::System.dealloc(ptr, layout);
+            return;
+        }
+        
+        // Check if this pointer is within our preallocated region
+        let base = base_ptr;
+        let end = base.add(total_size);
+        
+        if ptr >= base && ptr < end {
+            // This is from our preallocated region - bump allocators don't support individual deallocation
+            // We just track this for debugging
+            println!("DEBUG: PreallocatedBumpAllocator dealloc called for ptr={:p} (within preallocated region, no-op)", ptr);
+        } else {
+            // This is from system allocator, delegate deallocation
+            std::alloc::System.dealloc(ptr, layout);
+        }
+    }
+}
+
+/// Global instance of our custom allocator (lazy initialization)
+static PREALLOCATED_ALLOCATOR: std::sync::LazyLock<PreallocatedBumpAllocator> =
+    std::sync::LazyLock::new(|| PreallocatedBumpAllocator::new());
+
+/// Flag to control whether to use the preallocated allocator
+static USE_PREALLOCATED_ALLOCATOR: RwLock<bool> = RwLock::new(false);
+
+/// Wrapper allocator that conditionally uses preallocated memory
+///
+/// This allocator checks the USE_PREALLOCATED_ALLOCATOR flag and either
+/// uses our custom bump allocator or falls back to the system allocator.
+pub struct ConditionalPreallocatedAllocator;
+
+unsafe impl GlobalAlloc for ConditionalPreallocatedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if *USE_PREALLOCATED_ALLOCATOR.read().unwrap() {
+            PREALLOCATED_ALLOCATOR.alloc(layout)
+        } else {
+            std::alloc::System.alloc(layout)
+        }
+    }
+    
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        if *USE_PREALLOCATED_ALLOCATOR.read().unwrap() {
+            PREALLOCATED_ALLOCATOR.dealloc(ptr, layout)
+        } else {
+            std::alloc::System.dealloc(ptr, layout)
+        }
+    }
+}
+
+/// Set our conditional allocator as the global allocator
+///
+/// This allows us to control whether allocations use preallocated memory
+/// or the system allocator based on the USE_PREALLOCATED_ALLOCATOR flag.
+#[global_allocator]
+static GLOBAL: ConditionalPreallocatedAllocator = ConditionalPreallocatedAllocator;
+
+/// Enable the use of preallocated memory allocator for LRU cache
+///
+/// This function enables the custom bump allocator that uses the preallocated
+/// memory region. This provides deterministic memory layout for WASM environments.
+///
+/// **IMPORTANT**: This should be called before any LRU cache operations.
+pub fn enable_preallocated_allocator() {
+    let mut use_allocator = USE_PREALLOCATED_ALLOCATOR.write().unwrap();
+    *use_allocator = true;
+    
+    // Force initialization of the allocator
+    let _ = &*PREALLOCATED_ALLOCATOR;
+    
+    println!("INFO: Preallocated memory allocator enabled for LRU cache");
+}
+
+/// Disable the use of preallocated memory allocator
+///
+/// This function disables the custom allocator and falls back to system allocation.
+pub fn disable_preallocated_allocator() {
+    let mut use_allocator = USE_PREALLOCATED_ALLOCATOR.write().unwrap();
+    *use_allocator = false;
+    
+    println!("INFO: Preallocated memory allocator disabled, using system allocator");
+}
+
+/// Check if preallocated allocator is enabled
+pub fn is_preallocated_allocator_enabled() -> bool {
+    *USE_PREALLOCATED_ALLOCATOR.read().unwrap()
+}
+
+/// Get allocator usage statistics
+///
+/// Returns (used_bytes, total_bytes, usage_percentage)
+pub fn get_allocator_usage_stats() -> (usize, usize, f64) {
+    if is_preallocated_allocator_enabled() {
+        PREALLOCATED_ALLOCATOR.get_usage_stats()
+    } else {
+        (0, 0, 0.0)
+    }
+}
+
+/// Reset the preallocated allocator (for testing)
+pub fn reset_preallocated_allocator() {
+    if is_preallocated_allocator_enabled() {
+        PREALLOCATED_ALLOCATOR.reset();
+    }
+}
+
+/// Get comprehensive memory usage report
+///
+/// Returns detailed information about both preallocated memory usage
+/// and LRU cache memory usage for debugging and monitoring.
+pub fn get_comprehensive_memory_report() -> String {
+    let mut report = String::new();
+    
+    report.push_str("🧠 COMPREHENSIVE MEMORY USAGE REPORT\n");
+    report.push_str("═══════════════════════════════════════════════════════════════\n\n");
+    
+    // Preallocated allocator status
+    report.push_str("📦 PREALLOCATED ALLOCATOR STATUS\n");
+    if is_preallocated_allocator_enabled() {
+        let (used, total, percentage) = get_allocator_usage_stats();
+        report.push_str(&format!("├── Status: ENABLED\n"));
+        report.push_str(&format!("├── Used: {} bytes ({:.1} MB)\n", used, used as f64 / (1024.0 * 1024.0)));
+        report.push_str(&format!("├── Total: {} bytes ({:.1} MB)\n", total, total as f64 / (1024.0 * 1024.0)));
+        report.push_str(&format!("├── Usage: {:.1}%\n", percentage));
+        report.push_str(&format!("└── Available: {} bytes ({:.1} MB)\n\n",
+                                 total - used, (total - used) as f64 / (1024.0 * 1024.0)));
+    } else {
+        report.push_str("├── Status: DISABLED\n");
+        report.push_str("└── Using system allocator\n\n");
+    }
+    
+    // LRU cache memory usage
+    report.push_str("💾 LRU CACHE MEMORY USAGE\n");
+    let cache_stats = get_cache_stats();
+    let total_cache_memory = get_total_memory_usage();
+    
+    report.push_str(&format!("├── Total Cache Memory: {} bytes ({:.1} MB)\n",
+                             total_cache_memory, total_cache_memory as f64 / (1024.0 * 1024.0)));
+    report.push_str(&format!("├── Cache Items: {}\n", cache_stats.items));
+    report.push_str(&format!("├── Cache Hits: {}\n", cache_stats.hits));
+    report.push_str(&format!("├── Cache Misses: {}\n", cache_stats.misses));
+    report.push_str(&format!("├── Cache Evictions: {}\n", cache_stats.evictions));
+    
+    let hit_rate = if cache_stats.hits + cache_stats.misses > 0 {
+        (cache_stats.hits as f64 / (cache_stats.hits + cache_stats.misses) as f64) * 100.0
+    } else {
+        0.0
+    };
+    report.push_str(&format!("└── Hit Rate: {:.1}%\n\n", hit_rate));
+    
+    // Memory efficiency analysis
+    report.push_str("📊 MEMORY EFFICIENCY ANALYSIS\n");
+    if is_preallocated_allocator_enabled() {
+        let (used, total, _) = get_allocator_usage_stats();
+        if total > 0 {
+            let efficiency = (total_cache_memory as f64 / used as f64) * 100.0;
+            report.push_str(&format!("├── Allocator Efficiency: {:.1}% (cache memory / allocated memory)\n", efficiency));
+            
+            if total_cache_memory > used {
+                report.push_str("├── ⚠️  WARNING: Cache reports more memory than allocator used\n");
+                report.push_str("│   This suggests the cache is using system memory in addition to preallocated memory\n");
+            } else {
+                report.push_str("├── ✅ Cache memory usage is within preallocated bounds\n");
+            }
+        }
+    } else {
+        report.push_str("├── Using system allocator - no preallocated memory tracking\n");
+    }
+    
+    let memory_limit = get_actual_lru_cache_memory_limit();
+    let limit_usage = (total_cache_memory as f64 / memory_limit as f64) * 100.0;
+    report.push_str(&format!("├── Memory Limit: {} bytes ({:.1} MB)\n",
+                             memory_limit, memory_limit as f64 / (1024.0 * 1024.0)));
+    report.push_str(&format!("└── Limit Usage: {:.1}%\n", limit_usage));
+    
+    report
+}
 
 /// Get the actual LRU cache memory limit determined at runtime
 ///
@@ -846,6 +1132,18 @@ pub fn initialize_lru_cache() {
     // This must happen before any other memory allocations to guarantee
     // consistent memory layout for WASM execution in indexer mode
     ensure_preallocated_memory();
+    
+    // Enable preallocated allocator in indexer mode for deterministic memory layout
+    match allocation_mode {
+        CacheAllocationMode::Indexer => {
+            enable_preallocated_allocator();
+            println!("INFO: Enabled preallocated allocator for deterministic memory layout (indexer mode)");
+        }
+        CacheAllocationMode::View => {
+            disable_preallocated_allocator();
+            println!("INFO: Using system allocator (view mode - deterministic layout not required)");
+        }
+    }
 
     let actual_memory_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
     let preallocated_size = PREALLOCATED_CACHE_MEMORY.len();
@@ -1012,7 +1310,7 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
     let mut cache_guard = LRU_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
-        let old_memory = cache.current_size();
+        let _old_memory = cache.current_size();
         
         // Check if this key already exists (for replacement vs new insertion)
         let key_exists = cache.contains(&cache_key);

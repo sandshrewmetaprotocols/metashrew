@@ -753,17 +753,9 @@ impl From<CacheValue> for Arc<Vec<u8>> {
 
 impl HeapSize for CacheValue {
     fn heap_size(&self) -> usize {
-        // More accurate memory calculation:
-        // - Arc overhead (reference counting, etc.)
-        // - Vec overhead (capacity, length, pointer)
-        // - Actual data size
-        // - Additional overhead for heap allocation alignment
-        let arc_overhead = std::mem::size_of::<Arc<Vec<u8>>>() * 2; // Conservative estimate
-        let vec_overhead = std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<usize>(); // capacity overhead
-        let data_size = self.0.len();
-        let alignment_overhead = (data_size + 7) & !7; // 8-byte alignment padding
-
-        arc_overhead + vec_overhead + alignment_overhead
+        // Simple and accurate memory calculation:
+        // Just the data size plus minimal overhead for Arc and Vec structures
+        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
     }
 }
 
@@ -785,13 +777,8 @@ impl From<CacheKey> for Arc<Vec<u8>> {
 
 impl HeapSize for CacheKey {
     fn heap_size(&self) -> usize {
-        // More accurate memory calculation for keys
-        let arc_overhead = std::mem::size_of::<Arc<Vec<u8>>>() * 2; // Conservative estimate
-        let vec_overhead = std::mem::size_of::<Vec<u8>>() + std::mem::size_of::<usize>(); // capacity overhead
-        let data_size = self.0.len();
-        let alignment_overhead = (data_size + 7) & !7; // 8-byte alignment padding
-
-        arc_overhead + vec_overhead + alignment_overhead
+        // Simple and accurate memory calculation for keys
+        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
     }
 }
 
@@ -866,10 +853,15 @@ pub fn initialize_lru_cache() {
     // Use the smaller of detected limit or actually preallocated memory
     // This ensures we don't try to allocate more than what was successfully preallocated
     let safe_memory_limit = if preallocated_size > 0 {
-        actual_memory_limit.min(preallocated_size)
+        let calculated_limit = actual_memory_limit.min(preallocated_size);
+        println!("DEBUG: safe_memory_limit calculation: actual_limit={} bytes, preallocated_size={} bytes, safe_limit={} bytes",
+                 actual_memory_limit, preallocated_size, calculated_limit);
+        calculated_limit
     } else {
         // If preallocation failed, use a very conservative limit
-        4 * 1024 * 1024 // 4MB fallback
+        let fallback_limit = 4 * 1024 * 1024; // 4MB fallback
+        println!("DEBUG: safe_memory_limit fallback: {} bytes", fallback_limit);
+        fallback_limit
     };
 
     match allocation_mode {
@@ -878,6 +870,8 @@ pub fn initialize_lru_cache() {
             {
                 let mut cache = LRU_CACHE.write().unwrap();
                 if cache.is_none() {
+                    println!("DEBUG: Creating LruCache::new with safe_memory_limit={} bytes ({} MB)",
+                             safe_memory_limit, safe_memory_limit / (1024 * 1024));
                     *cache = Some(LruCache::new(safe_memory_limit)); // All memory to main cache
                     println!(
                         "INFO: Initialized main LRU cache with {} bytes ({} MB)",
@@ -960,38 +954,27 @@ pub fn initialize_lru_cache() {
 pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
     let cache_key = CacheKey::from(key.clone());
 
-    // Try to read with read lock first
-    {
-        let cache_guard = LRU_CACHE.read().unwrap();
-        if let Some(cache) = cache_guard.as_ref() {
-            // Check if key exists without updating LRU order
-            if cache.contains(&cache_key) {
-                drop(cache_guard); // Release read lock
+    // Use write lock directly to avoid race conditions between contains() and get()
+    let mut cache_guard = LRU_CACHE.write().unwrap();
+    if let Some(cache) = cache_guard.as_mut() {
+        let result = cache.get(&cache_key).cloned().map(|v| v.into());
 
-                // Upgrade to write lock to update LRU order and get value
-                let mut cache_guard = LRU_CACHE.write().unwrap();
-                if let Some(cache) = cache_guard.as_mut() {
-                    let result = cache.get(&cache_key).cloned().map(|v| v.into());
+        // Track prefix statistics for debugging
+        track_prefix_stats(key.as_ref(), result.is_some());
 
-                    // Track prefix statistics for debugging
-                    track_prefix_stats(key.as_ref(), result.is_some());
-
-                    // Update statistics
-                    {
-                        let mut stats = CACHE_STATS.write().unwrap();
-                        if result.is_some() {
-                            stats.hits += 1;
-                        } else {
-                            stats.misses += 1;
-                        }
-                        stats.items = cache.len();
-                        stats.memory_usage = cache.current_size();
-                    }
-
-                    return result;
-                }
+        // Update statistics - only count actual get() calls as hits/misses
+        {
+            let mut stats = CACHE_STATS.write().unwrap();
+            if result.is_some() {
+                stats.hits += 1;
+            } else {
+                stats.misses += 1;
             }
+            stats.items = cache.len();
+            stats.memory_usage = cache.current_size();
         }
+
+        return result;
     }
 
     // Track prefix statistics for debugging (miss case)
@@ -1029,17 +1012,38 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
     let mut cache_guard = LRU_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
+        let old_memory = cache.current_size();
+        
+        // Check if this key already exists (for replacement vs new insertion)
+        let key_exists = cache.contains(&cache_key);
+        
         let _ = cache.insert(cache_key, cache_value);
+        
+        let new_len = cache.len();
+        let new_memory = cache.current_size();
 
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
-            stats.items = cache.len();
-            stats.memory_usage = cache.current_size();
+            stats.items = new_len;
+            stats.memory_usage = new_memory;
 
-            // If cache size decreased, items were evicted
-            if cache.len() < old_len {
-                stats.evictions += (old_len - cache.len()) as u64;
+            // Calculate evictions more accurately:
+            // If we inserted a new key but the cache size didn't increase by 1,
+            // or if we replaced an existing key and the cache size decreased,
+            // then evictions occurred
+            if !key_exists {
+                // New key insertion
+                let expected_new_len = old_len + 1;
+                if new_len < expected_new_len {
+                    // Cache evicted items to make room
+                    stats.evictions += (expected_new_len - new_len) as u64;
+                }
+            } else {
+                // Key replacement - check if cache size decreased
+                if new_len < old_len {
+                    stats.evictions += (old_len - new_len) as u64;
+                }
             }
         }
     }
@@ -1128,17 +1132,36 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
     let mut cache_guard = API_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
+        
+        // Check if this key already exists (for replacement vs new insertion)
+        let key_exists = cache.contains(&cache_key);
+        
         let _ = cache.insert(cache_key, cache_value);
+        
+        let new_len = cache.len();
 
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
-            stats.items = cache.len();
+            stats.items = new_len;
             stats.memory_usage = cache.current_size();
 
-            // If cache size decreased, items were evicted
-            if cache.len() < old_len {
-                stats.evictions += (old_len - cache.len()) as u64;
+            // Calculate evictions more accurately:
+            // If we inserted a new key but the cache size didn't increase by 1,
+            // or if we replaced an existing key and the cache size decreased,
+            // then evictions occurred
+            if !key_exists {
+                // New key insertion
+                let expected_new_len = old_len + 1;
+                if new_len < expected_new_len {
+                    // Cache evicted items to make room
+                    stats.evictions += (expected_new_len - new_len) as u64;
+                }
+            } else {
+                // Key replacement - check if cache size decreased
+                if new_len < old_len {
+                    stats.evictions += (old_len - new_len) as u64;
+                }
             }
         }
     }
@@ -1171,34 +1194,24 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
 pub fn api_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
     let cache_key = ApiCacheKey::from(key.to_string());
 
-    // Try to read with read lock first
-    {
-        let cache_guard = API_CACHE.read().unwrap();
-        if let Some(cache) = cache_guard.as_ref() {
-            if cache.contains(&cache_key) {
-                drop(cache_guard); // Release read lock
+    // Use write lock directly to avoid race conditions between contains() and get()
+    let mut cache_guard = API_CACHE.write().unwrap();
+    if let Some(cache) = cache_guard.as_mut() {
+        let result = cache.get(&cache_key).cloned().map(|v| v.into());
 
-                // Upgrade to write lock to update LRU order and get value
-                let mut cache_guard = API_CACHE.write().unwrap();
-                if let Some(cache) = cache_guard.as_mut() {
-                    let result = cache.get(&cache_key).cloned().map(|v| v.into());
-
-                    // Update statistics
-                    {
-                        let mut stats = CACHE_STATS.write().unwrap();
-                        if result.is_some() {
-                            stats.hits += 1;
-                        } else {
-                            stats.misses += 1;
-                        }
-                        stats.items = cache.len();
-                        stats.memory_usage = cache.current_size();
-                    }
-
-                    return result;
-                }
+        // Update statistics - only count actual get() calls as hits/misses
+        {
+            let mut stats = CACHE_STATS.write().unwrap();
+            if result.is_some() {
+                stats.hits += 1;
+            } else {
+                stats.misses += 1;
             }
+            stats.items = cache.len();
+            stats.memory_usage = cache.current_size();
         }
+
+        return result;
     }
 
     // Update miss statistics
@@ -1320,34 +1333,24 @@ pub fn get_view_height() -> Option<u32> {
 pub fn get_height_partitioned_cache(height: u32, key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
     let cache_key = HeightPartitionedKey::from((height, key.clone()));
 
-    // Try to read with read lock first
-    {
-        let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
-        if let Some(cache) = cache_guard.as_ref() {
-            if cache.contains(&cache_key) {
-                drop(cache_guard); // Release read lock
+    // Use write lock directly to avoid race conditions between contains() and get()
+    let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
+    if let Some(cache) = cache_guard.as_mut() {
+        let result = cache.get(&cache_key).cloned().map(|v| v.into());
 
-                // Upgrade to write lock to update LRU order and get value
-                let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
-                if let Some(cache) = cache_guard.as_mut() {
-                    let result = cache.get(&cache_key).cloned().map(|v| v.into());
-
-                    // Update statistics
-                    {
-                        let mut stats = CACHE_STATS.write().unwrap();
-                        if result.is_some() {
-                            stats.hits += 1;
-                        } else {
-                            stats.misses += 1;
-                        }
-                        stats.items = cache.len();
-                        stats.memory_usage = cache.current_size();
-                    }
-
-                    return result;
-                }
+        // Update statistics - only count actual get() calls as hits/misses
+        {
+            let mut stats = CACHE_STATS.write().unwrap();
+            if result.is_some() {
+                stats.hits += 1;
+            } else {
+                stats.misses += 1;
             }
+            stats.items = cache.len();
+            stats.memory_usage = cache.current_size();
         }
+
+        return result;
     }
 
     // Update miss statistics
@@ -1376,17 +1379,36 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
     let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
+        
+        // Check if this key already exists (for replacement vs new insertion)
+        let key_exists = cache.contains(&cache_key);
+        
         let _ = cache.insert(cache_key, cache_value);
+        
+        let new_len = cache.len();
 
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
-            stats.items = cache.len();
+            stats.items = new_len;
             stats.memory_usage = cache.current_size();
 
-            // If cache size decreased, items were evicted
-            if cache.len() < old_len {
-                stats.evictions += (old_len - cache.len()) as u64;
+            // Calculate evictions more accurately:
+            // If we inserted a new key but the cache size didn't increase by 1,
+            // or if we replaced an existing key and the cache size decreased,
+            // then evictions occurred
+            if !key_exists {
+                // New key insertion
+                let expected_new_len = old_len + 1;
+                if new_len < expected_new_len {
+                    // Cache evicted items to make room
+                    stats.evictions += (expected_new_len - new_len) as u64;
+                }
+            } else {
+                // Key replacement - check if cache size decreased
+                if new_len < old_len {
+                    stats.evictions += (old_len - new_len) as u64;
+                }
             }
         }
     }

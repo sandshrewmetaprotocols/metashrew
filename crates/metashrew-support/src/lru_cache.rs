@@ -64,49 +64,53 @@ const MIN_LRU_CACHE_MEMORY_LIMIT: usize = 256 * 1024 * 1024; // 256MB
 /// Detect available memory and determine appropriate cache size
 pub fn detect_available_memory() -> usize {
     // Try to detect available memory by attempting progressively smaller allocations
+    // Start with much more conservative sizes for WASM environments
     let test_sizes = [
-        LRU_CACHE_MEMORY_LIMIT,           // 1GB
-        LRU_CACHE_MEMORY_LIMIT / 2,       // 512MB
-        MIN_LRU_CACHE_MEMORY_LIMIT,       // 256MB (minimum recommended)
-        LRU_CACHE_MEMORY_LIMIT / 8,       // 128MB
-        LRU_CACHE_MEMORY_LIMIT / 16,      // 64MB
+        256 * 1024 * 1024,  // 256MB (start conservative)
+        128 * 1024 * 1024,  // 128MB
+        64 * 1024 * 1024,   // 64MB
+        32 * 1024 * 1024,   // 32MB
+        16 * 1024 * 1024,   // 16MB
+        8 * 1024 * 1024,    // 8MB (absolute minimum)
     ];
     
     for &size in &test_sizes {
-        // Don't go below the minimum recommended size unless absolutely necessary
-        if size < MIN_LRU_CACHE_MEMORY_LIMIT && size != test_sizes[test_sizes.len() - 1] {
-            continue;
-        }
-        
         // Try to allocate a test vector to see if this size is feasible
+        // Use try_reserve_exact to avoid capacity overflow panics
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut test_vec = Vec::with_capacity(size);
-            // Try to actually allocate a small portion to test if the capacity is realistic
-            let test_allocation_size = (size / 1000).max(1024); // Test with 0.1% or at least 1KB
-            test_vec.resize(test_allocation_size, 0);
-            test_vec.shrink_to_fit(); // Release the test allocation
-            true
+            let mut test_vec = Vec::new();
+            // Use try_reserve_exact to safely test allocation
+            match test_vec.try_reserve_exact(size) {
+                Ok(()) => {
+                    // Try to actually allocate a small portion to test if the capacity is realistic
+                    let test_allocation_size = (size / 1000).max(1024).min(1024 * 1024); // Test with 0.1% or at least 1KB, max 1MB
+                    test_vec.resize(test_allocation_size, 0);
+                    test_vec.shrink_to_fit(); // Release the test allocation
+                    true
+                }
+                Err(_) => false
+            }
         })) {
             Ok(true) => {
                 if size < MIN_LRU_CACHE_MEMORY_LIMIT {
-                    log::warn!("Detected cache size {} bytes ({} MB) is below recommended minimum of {} bytes ({} MB)",
+                    println!("WARNING: Detected cache size {} bytes ({} MB) is below recommended minimum of {} bytes ({} MB)",
                               size, size / (1024 * 1024),
                               MIN_LRU_CACHE_MEMORY_LIMIT, MIN_LRU_CACHE_MEMORY_LIMIT / (1024 * 1024));
                 } else {
-                    log::info!("Detected feasible LRU cache size: {} bytes ({} MB)", size, size / (1024 * 1024));
+                    println!("INFO: Detected feasible LRU cache size: {} bytes ({} MB)", size, size / (1024 * 1024));
                 }
                 return size;
             }
             Ok(false) | Err(_) => {
-                log::debug!("Failed to allocate {} bytes for LRU cache, trying smaller size", size);
+                println!("DEBUG: Failed to allocate {} bytes for LRU cache, trying smaller size", size);
                 continue;
             }
         }
     }
     
     // If all sizes fail, use a very conservative fallback but warn about it
-    let fallback_size = 32 * 1024 * 1024; // 32MB absolute minimum
-    log::warn!("Could not allocate any of the preferred cache sizes, falling back to {} bytes ({} MB). Performance may be degraded.",
+    let fallback_size = 4 * 1024 * 1024; // 4MB absolute minimum for WASM
+    println!("WARNING: Could not allocate any of the preferred cache sizes, falling back to {} bytes ({} MB). Performance may be degraded.",
                fallback_size, fallback_size / (1024 * 1024));
     fallback_size
 }
@@ -124,39 +128,60 @@ static PREALLOCATED_CACHE_MEMORY: std::sync::LazyLock<Vec<u8>> =
     std::sync::LazyLock::new(|| {
         let actual_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
         
-        // Preallocate memory based on detected available memory
-        // This ensures that this memory region is always occupied at the same
-        // virtual address, providing consistent memory layout for WASM execution
-        let mut memory = Vec::with_capacity(actual_limit);
+        // Try progressively smaller allocations to find what works in WASM environment
+        let allocation_attempts = [
+            actual_limit,           // Try the detected limit first
+            actual_limit / 2,       // Try half
+            actual_limit / 4,       // Try quarter
+            16 * 1024 * 1024,      // 16MB fallback
+            8 * 1024 * 1024,       // 8MB fallback
+            4 * 1024 * 1024,       // 4MB fallback
+            1024 * 1024,           // 1MB minimal
+        ];
         
-        // Actually allocate the memory by filling it with zeros
-        // This forces the OS to commit the memory pages immediately
-        // Use a safer approach that handles allocation failures gracefully
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            memory.resize(actual_limit, 0);
-        })) {
-            Ok(()) => {
-                log::info!(
-                    "Successfully preallocated {} bytes ({} MB) LRU cache memory region at address: {:p}",
-                    memory.len(),
-                    memory.len() / (1024 * 1024),
-                    memory.as_ptr()
-                );
-            }
-            Err(_) => {
-                // If preallocation fails, create a minimal buffer to maintain consistent memory layout
-                let minimal_size = 1024 * 1024; // 1MB minimal allocation
-                memory = Vec::with_capacity(minimal_size);
-                memory.resize(minimal_size, 0);
-                log::warn!(
-                    "Failed to preallocate full cache memory, using minimal {} bytes allocation at address: {:p}",
-                    memory.len(),
-                    memory.as_ptr()
-                );
+        for &size in &allocation_attempts {
+            // Try to allocate using try_reserve_exact to avoid capacity overflow panics
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut memory = Vec::new();
+                match memory.try_reserve_exact(size) {
+                    Ok(()) => {
+                        // Actually allocate the memory by filling it with zeros
+                        // This forces the OS to commit the memory pages immediately
+                        memory.resize(size, 0);
+                        Some(memory)
+                    }
+                    Err(_) => None
+                }
+            })) {
+                Ok(Some(memory)) => {
+                    if size < actual_limit {
+                        println!(
+                            "WARNING: Preallocated {} bytes ({} MB) LRU cache memory (less than target {} MB) at address: {:p}",
+                            memory.len(),
+                            memory.len() / (1024 * 1024),
+                            actual_limit / (1024 * 1024),
+                            memory.as_ptr()
+                        );
+                    } else {
+                        println!(
+                            "INFO: Successfully preallocated {} bytes ({} MB) LRU cache memory region at address: {:p}",
+                            memory.len(),
+                            memory.len() / (1024 * 1024),
+                            memory.as_ptr()
+                        );
+                    }
+                    return memory;
+                }
+                Ok(None) | Err(_) => {
+                    println!("DEBUG: Failed to preallocate {} bytes, trying smaller size", size);
+                    continue;
+                }
             }
         }
         
-        memory
+        // If all allocations fail, create an empty vector to avoid panics
+        println!("ERROR: Failed to preallocate any cache memory, using empty allocation");
+        Vec::new()
     });
 
 /// Get the actual LRU cache memory limit determined at runtime
@@ -214,8 +239,8 @@ pub fn ensure_preallocated_memory() {
             let memory_size = PREALLOCATED_CACHE_MEMORY.len();
             let actual_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
             
-            log::debug!(
-                "LRU cache preallocated memory confirmed (indexer mode): ptr={:p}, size={} bytes, target_limit={} bytes",
+            println!(
+                "DEBUG: LRU cache preallocated memory confirmed (indexer mode): ptr={:p}, size={} bytes, target_limit={} bytes",
                 memory_ptr,
                 memory_size,
                 actual_limit
@@ -231,13 +256,15 @@ pub fn ensure_preallocated_memory() {
                         std::ptr::read_volatile(memory_ptr.add(memory_size - 1));
                     }
                 }
+                
+                println!("INFO: LRU cache memory preallocation verified and committed (indexer mode): {} bytes ({} MB)",
+                          memory_size, memory_size / (1024 * 1024));
+            } else {
+                println!("WARNING: LRU cache memory preallocation failed - using dynamic allocation only");
             }
-            
-            log::info!("LRU cache memory preallocation verified and committed (indexer mode): {} bytes ({} MB)",
-                      memory_size, memory_size / (1024 * 1024));
         }
         CacheAllocationMode::View => {
-            log::debug!("Skipping LRU cache memory preallocation (view mode - deterministic memory layout not required)");
+            println!("DEBUG: Skipping LRU cache memory preallocation (view mode - deterministic memory layout not required)");
         }
     }
 }
@@ -804,7 +831,7 @@ impl HeapSize for HeightPartitionedKey {
 /// for user-defined caching, and the height-partitioned cache for view functions.
 /// Memory allocation depends on the current cache allocation mode.
 ///
-/// **IMPORTANT**: This function ensures that 1GB of memory is preallocated at startup
+/// **IMPORTANT**: This function ensures memory is preallocated at startup
 /// to guarantee consistent memory layout, but only in indexer mode.
 ///
 /// # Thread Safety
@@ -820,6 +847,16 @@ pub fn initialize_lru_cache() {
     ensure_preallocated_memory();
 
     let actual_memory_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
+    let preallocated_size = PREALLOCATED_CACHE_MEMORY.len();
+    
+    // Use the smaller of detected limit or actually preallocated memory
+    // This ensures we don't try to allocate more than what was successfully preallocated
+    let safe_memory_limit = if preallocated_size > 0 {
+        actual_memory_limit.min(preallocated_size)
+    } else {
+        // If preallocation failed, use a very conservative limit
+        4 * 1024 * 1024 // 4MB fallback
+    };
     
     match allocation_mode {
         CacheAllocationMode::Indexer => {
@@ -827,9 +864,9 @@ pub fn initialize_lru_cache() {
             {
                 let mut cache = LRU_CACHE.write().unwrap();
                 if cache.is_none() {
-                    *cache = Some(LruCache::new(actual_memory_limit)); // All memory to main cache
-                    log::info!("Initialized main LRU cache with {} bytes ({} MB)",
-                              actual_memory_limit, actual_memory_limit / (1024 * 1024));
+                    *cache = Some(LruCache::new(safe_memory_limit)); // All memory to main cache
+                    println!("INFO: Initialized main LRU cache with {} bytes ({} MB)",
+                              safe_memory_limit, safe_memory_limit / (1024 * 1024));
                 }
             }
 
@@ -860,9 +897,9 @@ pub fn initialize_lru_cache() {
             {
                 let mut api_cache = API_CACHE.write().unwrap();
                 if api_cache.is_none() {
-                    let api_cache_size = actual_memory_limit / 2;
+                    let api_cache_size = safe_memory_limit / 2;
                     *api_cache = Some(LruCache::new(api_cache_size));
-                    log::info!("Initialized API cache with {} bytes ({} MB)",
+                    println!("INFO: Initialized API cache with {} bytes ({} MB)",
                               api_cache_size, api_cache_size / (1024 * 1024));
                 }
             }
@@ -870,9 +907,9 @@ pub fn initialize_lru_cache() {
             {
                 let mut height_cache = HEIGHT_PARTITIONED_CACHE.write().unwrap();
                 if height_cache.is_none() {
-                    let height_cache_size = actual_memory_limit / 2;
+                    let height_cache_size = safe_memory_limit / 2;
                     *height_cache = Some(LruCache::new(height_cache_size));
-                    log::info!("Initialized height-partitioned cache with {} bytes ({} MB)",
+                    println!("INFO: Initialized height-partitioned cache with {} bytes ({} MB)",
                               height_cache_size, height_cache_size / (1024 * 1024));
                 }
             }
@@ -1413,6 +1450,100 @@ pub fn force_evict_to_target() {
                         if cache.is_empty() {
                             break;
                         }
+                        cache.remove_lru();
+                        
+                        {
+                            let mut stats = CACHE_STATS.write().unwrap();
+                            stats.evictions += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Force eviction to a target percentage of current memory usage
+///
+/// This function aggressively evicts LRU cache entries to reduce memory usage
+/// to the specified percentage of current usage. This is used when allocation
+/// failures occur to free up memory for retry attempts.
+///
+/// # Arguments
+///
+/// * `target_percentage` - Target percentage of current memory usage (e.g., 50 for 50%)
+pub fn force_evict_to_target_percentage(target_percentage: u32) {
+    let allocation_mode = *CACHE_ALLOCATION_MODE.read().unwrap();
+    
+    match allocation_mode {
+        CacheAllocationMode::Indexer => {
+            // In indexer mode, only the main LRU cache should be large
+            let mut cache_guard = LRU_CACHE.write().unwrap();
+            if let Some(cache) = cache_guard.as_mut() {
+                let current_size = cache.current_size();
+                let current_items = cache.len();
+                
+                if current_size == 0 {
+                    println!("DEBUG: LRU cache is empty, no eviction needed");
+                    return;
+                }
+                
+                let target_size = (current_size as f64 * target_percentage as f64 / 100.0) as usize;
+                
+                println!("LRU Cache eviction to {}%: Current {} bytes, {} items -> Target {} bytes",
+                         target_percentage, current_size, current_items, target_size);
+                
+                let mut evicted_count = 0;
+                let max_evictions = current_items / 2; // Safety limit
+                
+                while cache.current_size() > target_size && !cache.is_empty() && evicted_count < max_evictions {
+                    cache.remove_lru();
+                    evicted_count += 1;
+                }
+                
+                println!("LRU Cache eviction completed: evicted {} items, {} bytes remaining, {} items remaining",
+                         evicted_count, cache.current_size(), cache.len());
+                
+                // Update eviction statistics
+                {
+                    let mut stats = CACHE_STATS.write().unwrap();
+                    stats.evictions += evicted_count as u64;
+                    stats.items = cache.len();
+                    stats.memory_usage = cache.current_size();
+                }
+            }
+        },
+        CacheAllocationMode::View => {
+            // In view mode, evict from both height-partitioned and API caches
+            let current_total = get_total_memory_usage();
+            if current_total == 0 {
+                return;
+            }
+            
+            let target_total = (current_total as f64 * target_percentage as f64 / 100.0) as usize;
+            
+            // Evict from height-partitioned cache
+            {
+                let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
+                if let Some(cache) = cache_guard.as_mut() {
+                    let target_size = target_total / 2;
+                    while cache.current_size() > target_size && !cache.is_empty() {
+                        cache.remove_lru();
+                        
+                        {
+                            let mut stats = CACHE_STATS.write().unwrap();
+                            stats.evictions += 1;
+                        }
+                    }
+                }
+            }
+            
+            // Evict from API cache
+            {
+                let mut cache_guard = API_CACHE.write().unwrap();
+                if let Some(cache) = cache_guard.as_mut() {
+                    let target_size = target_total / 2;
+                    while cache.current_size() > target_size && !cache.is_empty() {
                         cache.remove_lru();
                         
                         {

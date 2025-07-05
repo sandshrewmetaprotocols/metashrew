@@ -104,7 +104,7 @@ use metashrew_support::{
     compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
-        ensure_preallocated_memory, force_evict_to_target, get_actual_lru_cache_memory_limit,
+        ensure_preallocated_memory, force_evict_to_target, force_evict_to_target_percentage, get_actual_lru_cache_memory_limit,
         get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
         get_min_lru_cache_memory_limit, get_total_memory_usage, get_view_height,
         initialize_lru_cache, is_cache_below_recommended_minimum, is_lru_cache_initialized,
@@ -1251,76 +1251,3 @@ pub fn parse_cache_key_with_config(key: &[u8], config: &key_parser::KeyParseConf
     key_parser::parse_key_readable(key, config)
 }
 
-/// Force LRU cache eviction to a target percentage of current usage
-///
-/// This function aggressively evicts LRU cache entries to reduce memory usage
-/// to the specified percentage of current usage. This is used when allocation
-/// failures occur to free up memory for retry attempts.
-///
-/// # Arguments
-///
-/// * `target_percentage` - Target percentage of current memory usage (e.g., 50 for 50%)
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use metashrew_core::force_evict_to_target_percentage;
-///
-/// // Evict LRU cache to 50% of current usage
-/// force_evict_to_target_percentage(50);
-/// ```
-pub fn force_evict_to_target_percentage(target_percentage: u32) {
-    if !is_lru_cache_initialized() {
-        println!("WARNING: Cannot evict LRU cache - not initialized");
-        return;
-    }
-    
-    let current_usage = get_total_memory_usage();
-    let target_usage = (current_usage as f64 * target_percentage as f64 / 100.0) as usize;
-    
-    println!("LRU cache eviction: Current usage {} bytes, target {} bytes ({}%)",
-             current_usage, target_usage, target_percentage);
-    
-    // Use the existing force_evict_to_target function but with our calculated target
-    // We need to temporarily override the target for this specific eviction
-    force_evict_to_target_with_custom_limit(target_usage);
-}
-
-/// Force eviction to a custom memory limit
-///
-/// This is an internal helper function that performs aggressive eviction
-/// to reach a specific memory target.
-fn force_evict_to_target_with_custom_limit(target_bytes: usize) {
-    // First, do the standard eviction
-    force_evict_to_target();
-    
-    // Then continue evicting until we reach our target
-    let mut iterations = 0;
-    const MAX_ITERATIONS: u32 = 100; // Prevent infinite loops
-    
-    while get_total_memory_usage() > target_bytes && iterations < MAX_ITERATIONS {
-        let current_usage = get_total_memory_usage();
-        
-        // Try to evict more aggressively
-        if current_usage <= target_bytes {
-            break;
-        }
-        
-        // For now, call the standard eviction repeatedly
-        // TODO: Implement more targeted eviction in metashrew-support
-        force_evict_to_target();
-        
-        iterations += 1;
-        
-        // If we're not making progress, break to avoid infinite loop
-        let new_usage = get_total_memory_usage();
-        if new_usage >= current_usage {
-            println!("WARNING: LRU eviction not making progress, stopping at {} bytes", new_usage);
-            break;
-        }
-    }
-    
-    let final_usage = get_total_memory_usage();
-    println!("LRU cache eviction completed: Final usage {} bytes (target was {} bytes)",
-             final_usage, target_bytes);
-}

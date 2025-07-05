@@ -76,6 +76,7 @@ pub mod compat;
 pub mod index_pointer;
 pub mod lru_cache;
 pub mod lru_cache_preallocation_test;
+pub mod lru_cache_memory_detection_test;
 pub mod proto;
 pub mod utils;
 

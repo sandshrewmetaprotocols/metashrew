@@ -104,12 +104,13 @@ use metashrew_support::{
     compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
-        ensure_preallocated_memory, force_evict_to_target, get_cache_allocation_mode, get_cache_stats,
-        get_height_partitioned_cache, get_lru_cache, get_total_memory_usage, get_view_height,
-        initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
-        set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,
-        CacheStats, LruDebugStats, KeyPrefixStats,
-        PrefixAnalysisConfig, key_parser,
+        ensure_preallocated_memory, force_evict_to_target, get_actual_lru_cache_memory_limit,
+        get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
+        get_min_lru_cache_memory_limit, get_total_memory_usage, get_view_height,
+        initialize_lru_cache, is_cache_below_recommended_minimum, is_lru_cache_initialized,
+        set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache, set_view_height,
+        CacheAllocationMode, CacheStats, LruDebugStats, KeyPrefixStats, PrefixAnalysisConfig,
+        key_parser,
     },
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
@@ -871,6 +872,77 @@ pub fn set_cache_mode(mode: CacheAllocationMode) {
 /// ```
 pub fn get_cache_mode() -> CacheAllocationMode {
     get_cache_allocation_mode()
+}
+
+/// Get the actual LRU cache memory limit determined at runtime
+///
+/// This function returns the memory limit that was determined based on available
+/// system memory, which may be less than the ideal 1GB limit on resource-constrained systems.
+/// This is useful for monitoring and debugging memory usage.
+///
+/// # Returns
+///
+/// The actual memory limit in bytes that will be used for LRU cache allocation.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, get_actual_cache_memory_limit};
+///
+/// initialize();
+/// let limit = get_actual_cache_memory_limit();
+/// println!("LRU cache memory limit: {} bytes ({} MB)", limit, limit / (1024 * 1024));
+/// ```
+pub fn get_actual_cache_memory_limit() -> usize {
+    get_actual_lru_cache_memory_limit()
+}
+
+/// Get the minimum recommended LRU cache memory limit
+///
+/// This function returns the minimum recommended memory size for optimal LRU cache
+/// performance. Cache sizes below this threshold may result in degraded performance
+/// due to frequent evictions.
+///
+/// # Returns
+///
+/// The minimum recommended memory limit in bytes (256MB).
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, get_min_cache_memory_limit};
+///
+/// initialize();
+/// let min_limit = get_min_cache_memory_limit();
+/// println!("Minimum recommended cache size: {} bytes ({} MB)", min_limit, min_limit / (1024 * 1024));
+/// ```
+pub fn get_min_cache_memory_limit() -> usize {
+    get_min_lru_cache_memory_limit()
+}
+
+/// Check if the current cache is operating below the recommended minimum
+///
+/// This function compares the actual allocated cache size with the recommended
+/// minimum and returns true if the cache is operating in a degraded mode.
+///
+/// # Returns
+///
+/// `true` if the cache size is below the recommended minimum, `false` otherwise.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use metashrew_core::{initialize, is_cache_below_minimum};
+///
+/// initialize();
+/// if is_cache_below_minimum() {
+///     println!("⚠️  Cache is operating below recommended minimum - performance may be degraded");
+/// } else {
+///     println!("✅ Cache size is adequate");
+/// }
+/// ```
+pub fn is_cache_below_minimum() -> bool {
+    is_cache_below_recommended_minimum()
 }
 
 // LRU Cache Debugging API Functions

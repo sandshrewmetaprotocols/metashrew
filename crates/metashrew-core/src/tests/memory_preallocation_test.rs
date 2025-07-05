@@ -3,9 +3,9 @@
 //! This module tests that the 1GB LRU cache memory is preallocated at startup
 //! and that memory addresses remain consistent regardless of cache usage.
 
-use crate::{initialize, clear};
+use crate::{initialize, clear, allocator};
 use metashrew_support::lru_cache::{
-    ensure_preallocated_memory, initialize_lru_cache, is_lru_cache_initialized,
+    initialize_lru_cache, is_lru_cache_initialized,
     get_total_memory_usage, get_cache_stats, clear_lru_cache,
 };
 use std::sync::Arc;
@@ -18,7 +18,7 @@ fn test_memory_preallocation_consistency() {
     clear_lru_cache();
     
     // First call to ensure_preallocated_memory
-    ensure_preallocated_memory();
+    allocator::ensure_preallocated_memory();
     
     // Get the memory pointer address (this should be consistent)
     let memory_usage_1 = get_total_memory_usage();
@@ -57,7 +57,7 @@ fn test_preallocation_before_cache_usage() {
     clear_lru_cache();
     
     // Call preallocation directly
-    ensure_preallocated_memory();
+    allocator::ensure_preallocated_memory();
     
     // At this point, 1GB should be preallocated even though cache isn't initialized
     // We can't directly measure the preallocated memory, but we can verify
@@ -84,9 +84,9 @@ fn test_multiple_preallocation_calls() {
     clear_lru_cache();
     
     // Call preallocation multiple times
-    ensure_preallocated_memory();
-    ensure_preallocated_memory();
-    ensure_preallocated_memory();
+    allocator::ensure_preallocated_memory();
+    allocator::ensure_preallocated_memory();
+    allocator::ensure_preallocated_memory();
     
     // Initialize cache
     initialize_lru_cache();
@@ -133,7 +133,7 @@ fn test_memory_layout_determinism() {
         clear_lru_cache();
         
         // Ensure preallocation
-        ensure_preallocated_memory();
+        allocator::ensure_preallocated_memory();
         
         // Initialize
         initialize();
@@ -175,7 +175,7 @@ fn test_cache_operations_after_preallocation() {
     clear_lru_cache();
     
     // Preallocate memory
-    ensure_preallocated_memory();
+    allocator::ensure_preallocated_memory();
     
     // Initialize
     initialize();

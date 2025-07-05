@@ -2901,6 +2901,7 @@ dependencies = [
  "hex",
  "itertools 0.12.1",
  "log",
+ "metashrew-core",
  "metashrew-support",
  "num_cpus",
  "protobuf 3.7.2",

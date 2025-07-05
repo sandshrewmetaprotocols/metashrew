@@ -82,6 +82,7 @@ use std::fmt::Write;
 use std::panic;
 use std::sync::Arc;
 
+pub mod allocator;
 #[cfg(feature = "panic-hook")]
 pub mod compat;
 pub mod imports;
@@ -104,7 +105,7 @@ use metashrew_support::{
     compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
-        ensure_preallocated_memory, force_evict_to_target, force_evict_to_target_percentage, get_actual_lru_cache_memory_limit,
+        force_evict_to_target, force_evict_to_target_percentage, get_actual_lru_cache_memory_limit,
         get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
         get_min_lru_cache_memory_limit, get_total_memory_usage, get_view_height,
         initialize_lru_cache, is_cache_below_recommended_minimum, is_lru_cache_initialized,
@@ -593,7 +594,11 @@ pub fn initialize() -> () {
     // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
     // This must happen before any other memory allocations to guarantee
     // consistent memory layout for WASM execution in indexer mode
-    ensure_preallocated_memory();
+    allocator::ensure_preallocated_memory();
+    
+    // Enable the preallocated allocator for deterministic memory layout
+    allocator::enable_preallocated_allocator();
+    println!("INFO: Enabled preallocated allocator for deterministic memory layout (indexer mode)");
     
     unsafe {
         if CACHE.is_none() {
@@ -606,8 +611,6 @@ pub fn initialize() -> () {
 
     // Initialize LRU cache if not already initialized
     // This is safe to call multiple times
-    // Note: ensure_preallocated_memory() is called above and also within initialize_lru_cache()
-    // for redundancy to guarantee memory preallocation in indexer mode
     initialize_lru_cache();
 }
 

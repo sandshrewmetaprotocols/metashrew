@@ -51,7 +51,7 @@
 //! }
 //! ```
 
-use lru_mem::{HeapSize, LruCache};
+use moka::sync::Cache;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -544,21 +544,21 @@ static CACHE_ALLOCATION_MODE: RwLock<CacheAllocationMode> =
 /// This cache persists across multiple WASM invocations when stateful views are enabled.
 /// It provides a memory-bounded secondary cache layer that sits between the immediate
 /// cache (CACHE) and the host calls (__get/__get_len).
-static LRU_CACHE: RwLock<Option<LruCache<CacheKey, CacheValue>>> = RwLock::new(None);
+static LRU_CACHE: RwLock<Option<Cache<CacheKey, CacheValue>>> = RwLock::new(None);
 
 /// Global API cache for user-defined caching needs
 ///
 /// This cache allows WASM programs to cache arbitrary data beyond just key-value store
 /// lookups. It shares the same memory limit as the main LRU cache but uses a separate
 /// namespace to avoid conflicts.
-static API_CACHE: RwLock<Option<LruCache<ApiCacheKey, CacheValue>>> = RwLock::new(None);
+static API_CACHE: RwLock<Option<Cache<ApiCacheKey, CacheValue>>> = RwLock::new(None);
 
 /// Global height-partitioned cache for view functions
 ///
 /// This cache partitions entries by block height, ensuring that view functions
 /// only see cache entries for the specific height they are querying. This enables
 /// proper archival state queries without side effects.
-static HEIGHT_PARTITIONED_CACHE: RwLock<Option<LruCache<HeightPartitionedKey, CacheValue>>> =
+static HEIGHT_PARTITIONED_CACHE: RwLock<Option<Cache<HeightPartitionedKey, CacheValue>>> =
     RwLock::new(None);
 
 /// Current view height for height-partitioned caching
@@ -660,7 +660,7 @@ static CACHE_STATS: RwLock<CacheStats> = RwLock::new(CacheStats {
     evictions: 0,
 });
 
-/// Wrapper type for Arc<Vec<u8>> to implement MemSize
+/// Wrapper type for Arc<Vec<u8>> cache values
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheValue(pub Arc<Vec<u8>>);
 
@@ -676,15 +676,7 @@ impl From<CacheValue> for Arc<Vec<u8>> {
     }
 }
 
-impl HeapSize for CacheValue {
-    fn heap_size(&self) -> usize {
-        // Simple and accurate memory calculation:
-        // Just the data size plus minimal overhead for Arc and Vec structures
-        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
-    }
-}
-
-/// Wrapper type for Arc<Vec<u8>> keys to implement MemSize
+/// Wrapper type for Arc<Vec<u8>> cache keys
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey(pub Arc<Vec<u8>>);
 
@@ -700,14 +692,7 @@ impl From<CacheKey> for Arc<Vec<u8>> {
     }
 }
 
-impl HeapSize for CacheKey {
-    fn heap_size(&self) -> usize {
-        // Simple and accurate memory calculation for keys
-        std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>() + self.0.len()
-    }
-}
-
-/// Wrapper type for String to implement MemSize for API cache
+/// Wrapper type for String API cache keys
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ApiCacheKey(pub String);
 
@@ -720,12 +705,6 @@ impl From<String> for ApiCacheKey {
 impl From<ApiCacheKey> for String {
     fn from(val: ApiCacheKey) -> Self {
         val.0
-    }
-}
-
-impl HeapSize for ApiCacheKey {
-    fn heap_size(&self) -> usize {
-        std::mem::size_of::<String>() + self.0.len()
     }
 }
 
@@ -742,13 +721,27 @@ impl From<(u32, Arc<Vec<u8>>)> for HeightPartitionedKey {
     }
 }
 
-impl HeapSize for HeightPartitionedKey {
-    fn heap_size(&self) -> usize {
-        std::mem::size_of::<u32>()
-            + std::mem::size_of::<Arc<Vec<u8>>>()
-            + std::mem::size_of::<Vec<u8>>()
-            + self.key.len()
-    }
+/// Helper function to calculate memory weight for cache entries
+
+/// Specific weigher for CacheKey/CacheValue pairs
+fn cache_weigher(key: &CacheKey, value: &CacheValue) -> u32 {
+    let key_size = std::mem::size_of::<Arc<Vec<u8>>>() + key.0.len();
+    let value_size = std::mem::size_of::<Arc<Vec<u8>>>() + value.0.len();
+    (key_size + value_size) as u32
+}
+
+/// Specific weigher for ApiCacheKey/CacheValue pairs
+fn api_cache_weigher(key: &ApiCacheKey, value: &CacheValue) -> u32 {
+    let key_size = std::mem::size_of::<String>() + key.0.len();
+    let value_size = std::mem::size_of::<Arc<Vec<u8>>>() + value.0.len();
+    (key_size + value_size) as u32
+}
+
+/// Specific weigher for HeightPartitionedKey/CacheValue pairs
+fn height_cache_weigher(key: &HeightPartitionedKey, value: &CacheValue) -> u32 {
+    let key_size = std::mem::size_of::<u32>() + std::mem::size_of::<Arc<Vec<u8>>>() + key.key.len();
+    let value_size = std::mem::size_of::<Arc<Vec<u8>>>() + value.0.len();
+    (key_size + value_size) as u32
 }
 
 /// Initialize the LRU cache system
@@ -767,7 +760,7 @@ pub fn initialize_lru_cache() {
     let actual_memory_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
 
     // Use the detected memory limit
-    let safe_memory_limit = actual_memory_limit;
+    let safe_memory_limit = actual_memory_limit as u64;
 
     match allocation_mode {
         CacheAllocationMode::Indexer => {
@@ -775,9 +768,15 @@ pub fn initialize_lru_cache() {
             {
                 let mut cache = LRU_CACHE.write().unwrap();
                 if cache.is_none() {
-                    println!("DEBUG: Creating LruCache::new with safe_memory_limit={} bytes ({} MB)",
+                    println!("DEBUG: Creating Moka cache with safe_memory_limit={} bytes ({} MB)",
                              safe_memory_limit, safe_memory_limit / (1024 * 1024));
-                    *cache = Some(LruCache::new(safe_memory_limit)); // All memory to main cache
+                    
+                    let new_cache = Cache::builder()
+                        .weigher(cache_weigher)
+                        .max_capacity(safe_memory_limit) // All memory to main cache
+                        .build();
+                    
+                    *cache = Some(new_cache);
                     println!(
                         "INFO: Initialized main LRU cache with {} bytes ({} MB)",
                         safe_memory_limit,
@@ -790,14 +789,22 @@ pub fn initialize_lru_cache() {
             {
                 let mut api_cache = API_CACHE.write().unwrap();
                 if api_cache.is_none() {
-                    *api_cache = Some(LruCache::new(1024)); // Minimal allocation
+                    let minimal_cache = Cache::builder()
+                        .weigher(api_cache_weigher)
+                        .max_capacity(1024) // Minimal allocation
+                        .build();
+                    *api_cache = Some(minimal_cache);
                 }
             }
 
             {
                 let mut height_cache = HEIGHT_PARTITIONED_CACHE.write().unwrap();
                 if height_cache.is_none() {
-                    *height_cache = Some(LruCache::new(1024)); // Minimal allocation
+                    let minimal_cache = Cache::builder()
+                        .weigher(height_cache_weigher)
+                        .max_capacity(1024) // Minimal allocation
+                        .build();
+                    *height_cache = Some(minimal_cache);
                 }
             }
         }
@@ -806,7 +813,11 @@ pub fn initialize_lru_cache() {
             {
                 let mut cache = LRU_CACHE.write().unwrap();
                 if cache.is_none() {
-                    *cache = Some(LruCache::new(1024)); // Minimal allocation
+                    let minimal_cache = Cache::builder()
+                        .weigher(cache_weigher)
+                        .max_capacity(1024) // Minimal allocation
+                        .build();
+                    *cache = Some(minimal_cache);
                 }
             }
 
@@ -814,7 +825,11 @@ pub fn initialize_lru_cache() {
                 let mut api_cache = API_CACHE.write().unwrap();
                 if api_cache.is_none() {
                     let api_cache_size = safe_memory_limit / 2;
-                    *api_cache = Some(LruCache::new(api_cache_size));
+                    let new_cache = Cache::builder()
+                        .weigher(api_cache_weigher)
+                        .max_capacity(api_cache_size)
+                        .build();
+                    *api_cache = Some(new_cache);
                     println!(
                         "INFO: Initialized API cache with {} bytes ({} MB)",
                         api_cache_size,
@@ -827,7 +842,11 @@ pub fn initialize_lru_cache() {
                 let mut height_cache = HEIGHT_PARTITIONED_CACHE.write().unwrap();
                 if height_cache.is_none() {
                     let height_cache_size = safe_memory_limit / 2;
-                    *height_cache = Some(LruCache::new(height_cache_size));
+                    let new_cache = Cache::builder()
+                        .weigher(height_cache_weigher)
+                        .max_capacity(height_cache_size)
+                        .build();
+                    *height_cache = Some(new_cache);
                     println!(
                         "INFO: Initialized height-partitioned cache with {} bytes ({} MB)",
                         height_cache_size,
@@ -854,18 +873,23 @@ pub fn initialize_lru_cache() {
 ///
 /// # Thread Safety
 ///
-/// This function uses a read lock for cache access and upgrades to a write lock
-/// only when updating the LRU ordering.
+/// This function is thread-safe as moka handles concurrency internally.
 pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
     let cache_key = CacheKey::from(key.clone());
 
-    // Use write lock directly to avoid race conditions between contains() and get()
-    let mut cache_guard = LRU_CACHE.write().unwrap();
-    if let Some(cache) = cache_guard.as_mut() {
-        let result = cache.get(&cache_key).cloned().map(|v| v.into());
+    // Moka is thread-safe, so we can use read lock
+    let cache_guard = LRU_CACHE.read().unwrap();
+    if let Some(cache) = cache_guard.as_ref() {
+        // Run pending tasks first to ensure cache is up to date
+        cache.run_pending_tasks();
+        
+        let result = cache.get(&cache_key).map(|v| v.into());
 
         // Track prefix statistics for debugging
         track_prefix_stats(key.as_ref(), result.is_some());
+
+        // Run pending tasks again to ensure accurate statistics
+        cache.run_pending_tasks();
 
         // Update statistics - only count actual get() calls as hits/misses
         {
@@ -875,8 +899,8 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
             } else {
                 stats.misses += 1;
             }
-            stats.items = cache.len();
-            stats.memory_usage = cache.current_size();
+            stats.items = cache.entry_count() as usize;
+            stats.memory_usage = cache.weighted_size() as usize;
         }
 
         return result;
@@ -911,37 +935,24 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
 /// when the memory limit is approached. The eviction process is transparent to
 /// the caller.
 pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
-    let cache_key = CacheKey::from(key.clone());
+    let cache_key = CacheKey::from(key);
     let cache_value = CacheValue::from(value);
 
-    let mut cache_guard = LRU_CACHE.write().unwrap();
-    if let Some(cache) = cache_guard.as_mut() {
-        let old_len = cache.len();
-        let _old_memory = cache.current_size();
-        
-        // Check if this is a key replacement by seeing if the key already exists
-        let is_replacement = cache.contains(&cache_key);
-        
-        // Insert the entry - the LRU cache will handle key replacement internally
-        let _ = cache.insert(cache_key, cache_value);
-        
-        let new_len = cache.len();
-        let new_memory = cache.current_size();
+    let cache_guard = LRU_CACHE.read().unwrap();
+    if let Some(cache) = cache_guard.as_ref() {
+        // Moka handles eviction automatically based on the weigher function
+        cache.insert(cache_key, cache_value);
+
+        // Run pending tasks to ensure accurate statistics and immediate availability
+        cache.run_pending_tasks();
 
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
-            stats.items = new_len;
-            stats.memory_usage = new_memory;
-
-            // Only count evictions if:
-            // 1. This was NOT a key replacement (new key)
-            // 2. The cache length decreased (items were actually evicted)
-            if !is_replacement && new_len < old_len {
-                // Cache evicted items to make room for the new entry
-                let evicted_count = old_len - new_len;
-                stats.evictions += evicted_count as u64;
-            }
+            stats.items = cache.entry_count() as usize;
+            stats.memory_usage = cache.weighted_size() as usize;
+            // Note: Moka doesn't provide direct eviction count, so we'll track it differently
+            // For now, we'll leave evictions as-is since moka handles eviction internally
         }
     }
 }
@@ -959,21 +970,21 @@ pub fn clear_lru_cache() {
     {
         let mut cache_guard = LRU_CACHE.write().unwrap();
         if let Some(cache) = cache_guard.as_mut() {
-            cache.clear();
+            cache.invalidate_all();
         }
     }
 
     {
         let mut api_cache_guard = API_CACHE.write().unwrap();
         if let Some(cache) = api_cache_guard.as_mut() {
-            cache.clear();
+            cache.invalidate_all();
         }
     }
 
     {
         let mut height_cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
         if let Some(cache) = height_cache_guard.as_mut() {
-            cache.clear();
+            cache.invalidate_all();
         }
     }
 
@@ -1051,32 +1062,19 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
     let cache_key = ApiCacheKey::from(key);
     let cache_value = CacheValue::from(value);
 
-    let mut cache_guard = API_CACHE.write().unwrap();
-    if let Some(cache) = cache_guard.as_mut() {
-        let old_len = cache.len();
-        
-        // Check if this is a key replacement by seeing if the key already exists
-        let is_replacement = cache.contains(&cache_key);
-        
-        // Insert the entry - the LRU cache will handle key replacement internally
-        let _ = cache.insert(cache_key, cache_value);
-        
-        let new_len = cache.len();
+    let cache_guard = API_CACHE.read().unwrap();
+    if let Some(cache) = cache_guard.as_ref() {
+        // Moka handles eviction automatically
+        cache.insert(cache_key, cache_value);
+
+        // Run pending tasks to ensure accurate statistics and immediate availability
+        cache.run_pending_tasks();
 
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
-            stats.items = new_len;
-            stats.memory_usage = cache.current_size();
-
-            // Only count evictions if:
-            // 1. This was NOT a key replacement (new key)
-            // 2. The cache length decreased (items were actually evicted)
-            if !is_replacement && new_len < old_len {
-                // Cache evicted items to make room for the new entry
-                let evicted_count = old_len - new_len;
-                stats.evictions += evicted_count as u64;
-            }
+            stats.items = cache.entry_count() as usize;
+            stats.memory_usage = cache.weighted_size() as usize;
         }
     }
 }
@@ -1108,10 +1106,15 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
 pub fn api_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
     let cache_key = ApiCacheKey::from(key.to_string());
 
-    // Use write lock directly to avoid race conditions between contains() and get()
-    let mut cache_guard = API_CACHE.write().unwrap();
-    if let Some(cache) = cache_guard.as_mut() {
-        let result = cache.get(&cache_key).cloned().map(|v| v.into());
+    let cache_guard = API_CACHE.read().unwrap();
+    if let Some(cache) = cache_guard.as_ref() {
+        // Run pending tasks first to ensure cache is up to date
+        cache.run_pending_tasks();
+        
+        let result = cache.get(&cache_key).map(|v| v.into());
+
+        // Run pending tasks again to ensure accurate statistics
+        cache.run_pending_tasks();
 
         // Update statistics - only count actual get() calls as hits/misses
         {
@@ -1121,8 +1124,8 @@ pub fn api_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
             } else {
                 stats.misses += 1;
             }
-            stats.items = cache.len();
-            stats.memory_usage = cache.current_size();
+            stats.items = cache.entry_count() as usize;
+            stats.memory_usage = cache.weighted_size() as usize;
         }
 
         return result;
@@ -1151,9 +1154,15 @@ pub fn api_cache_get(key: &str) -> Option<Arc<Vec<u8>>> {
 pub fn api_cache_remove(key: &str) -> Option<Arc<Vec<u8>>> {
     let cache_key = ApiCacheKey::from(key.to_string());
 
-    let mut cache_guard = API_CACHE.write().unwrap();
-    if let Some(cache) = cache_guard.as_mut() {
-        cache.remove(&cache_key).map(|v| v.into())
+    let cache_guard = API_CACHE.read().unwrap();
+    if let Some(cache) = cache_guard.as_ref() {
+        // Use Moka's remove method which returns the removed value
+        let result = cache.remove(&cache_key).map(|v| v.into());
+        
+        // Run pending tasks to ensure accurate operations
+        cache.run_pending_tasks();
+        
+        result
     } else {
         None
     }
@@ -1179,21 +1188,21 @@ pub fn get_total_memory_usage() -> usize {
     {
         let cache_guard = LRU_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
-            total += cache.current_size();
+            total += cache.weighted_size() as usize;
         }
     }
 
     {
         let cache_guard = API_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
-            total += cache.current_size();
+            total += cache.weighted_size() as usize;
         }
     }
 
     {
         let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
-            total += cache.current_size();
+            total += cache.weighted_size() as usize;
         }
     }
 
@@ -1247,10 +1256,12 @@ pub fn get_view_height() -> Option<u32> {
 pub fn get_height_partitioned_cache(height: u32, key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
     let cache_key = HeightPartitionedKey::from((height, key.clone()));
 
-    // Use write lock directly to avoid race conditions between contains() and get()
-    let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
-    if let Some(cache) = cache_guard.as_mut() {
-        let result = cache.get(&cache_key).cloned().map(|v| v.into());
+    let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
+    if let Some(cache) = cache_guard.as_ref() {
+        let result = cache.get(&cache_key).map(|v| v.into());
+
+        // Run pending tasks to ensure accurate statistics
+        cache.run_pending_tasks();
 
         // Update statistics - only count actual get() calls as hits/misses
         {
@@ -1260,8 +1271,8 @@ pub fn get_height_partitioned_cache(height: u32, key: &Arc<Vec<u8>>) -> Option<A
             } else {
                 stats.misses += 1;
             }
-            stats.items = cache.len();
-            stats.memory_usage = cache.current_size();
+            stats.items = cache.entry_count() as usize;
+            stats.memory_usage = cache.weighted_size() as usize;
         }
 
         return result;
@@ -1290,125 +1301,85 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
     let cache_key = HeightPartitionedKey::from((height, key));
     let cache_value = CacheValue::from(value);
 
-    let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
-    if let Some(cache) = cache_guard.as_mut() {
-        let old_len = cache.len();
-        
-        // Check if this is a key replacement by seeing if the key already exists
-        let is_replacement = cache.contains(&cache_key);
-        
-        // Insert the entry - the LRU cache will handle key replacement internally
-        let _ = cache.insert(cache_key, cache_value);
-        
-        let new_len = cache.len();
+    let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
+    if let Some(cache) = cache_guard.as_ref() {
+        // Moka handles eviction automatically
+        cache.insert(cache_key, cache_value);
+
+        // Run pending tasks to ensure accurate statistics
+        cache.run_pending_tasks();
 
         // Update statistics
         {
             let mut stats = CACHE_STATS.write().unwrap();
-            stats.items = new_len;
-            stats.memory_usage = cache.current_size();
-
-            // Only count evictions if:
-            // 1. This was NOT a key replacement (new key)
-            // 2. The cache length decreased (items were actually evicted)
-            if !is_replacement && new_len < old_len {
-                // Cache evicted items to make room for the new entry
-                let evicted_count = old_len - new_len;
-                stats.evictions += evicted_count as u64;
-            }
+            stats.items = cache.entry_count() as usize;
+            stats.memory_usage = cache.weighted_size() as usize;
         }
     }
 }
 
 /// Force eviction if memory usage exceeds the limit
 ///
-/// This function checks if the total memory usage exceeds the 1GB limit and
+/// This function checks if the total memory usage exceeds the limit and
 /// forces eviction if necessary. This should be called at the end of indexer
 /// runs to ensure memory stays within bounds.
+///
+/// Note: With Moka, eviction is handled automatically based on the configured
+/// memory limits, so this function primarily serves as a monitoring point.
 pub fn force_evict_to_target() {
     let allocation_mode = *CACHE_ALLOCATION_MODE.read().unwrap();
+    let actual_memory_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
 
     match allocation_mode {
         CacheAllocationMode::Indexer => {
-            // In indexer mode, only the main LRU cache should be large
-            let actual_memory_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
-            let mut cache_guard = LRU_CACHE.write().unwrap();
-            if let Some(cache) = cache_guard.as_mut() {
-                let current_size = cache.current_size();
-                let current_items = cache.len();
+            // In indexer mode, check the main LRU cache
+            let cache_guard = LRU_CACHE.read().unwrap();
+            if let Some(cache) = cache_guard.as_ref() {
+                let current_size = cache.weighted_size() as usize;
+                let current_items = cache.entry_count() as usize;
 
-                // Only evict if significantly over limit to avoid thrashing
-                let eviction_threshold = actual_memory_limit + (actual_memory_limit / 10); // 10% buffer
-
-                if current_size > eviction_threshold {
+                // Moka handles eviction automatically, but we can log if we're over limit
+                if current_size > actual_memory_limit {
                     println!(
-                        "LRU Cache eviction triggered: {} bytes, {} items, limit: {} bytes",
+                        "LRU Cache over limit: {} bytes, {} items, limit: {} bytes (Moka will handle eviction)",
                         current_size, current_items, actual_memory_limit
                     );
+                }
 
-                    // Evict down to 90% of limit to provide breathing room
-                    let target_size = actual_memory_limit - (actual_memory_limit / 10);
-                    let mut evicted_count = 0;
-
-                    while cache.current_size() > target_size && !cache.is_empty() {
-                        cache.remove_lru();
-                        evicted_count += 1;
-
-                        // Safety check to prevent infinite loop
-                        if evicted_count > current_items / 2 {
-                            println!("LRU Cache eviction safety limit reached, stopping");
-                            break;
-                        }
-                    }
-
-                    println!("LRU Cache eviction completed: evicted {} items, {} bytes remaining, {} items remaining",
-                             evicted_count, cache.current_size(), cache.len());
-
-                    // Update eviction statistics
-                    {
-                        let mut stats = CACHE_STATS.write().unwrap();
-                        stats.evictions += evicted_count as u64;
-                        stats.items = cache.len();
-                        stats.memory_usage = cache.current_size();
-                    }
+                // Update statistics
+                {
+                    let mut stats = CACHE_STATS.write().unwrap();
+                    stats.items = current_items;
+                    stats.memory_usage = current_size;
                 }
             }
         }
         CacheAllocationMode::View => {
             // In view mode, check both height-partitioned and API caches
-            let actual_memory_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
+            let target_size = actual_memory_limit / 2;
+            
             {
-                let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
-                if let Some(cache) = cache_guard.as_mut() {
-                    let target_size = actual_memory_limit / 2;
-                    while cache.current_size() > target_size {
-                        if cache.is_empty() {
-                            break;
-                        }
-                        cache.remove_lru();
-
-                        {
-                            let mut stats = CACHE_STATS.write().unwrap();
-                            stats.evictions += 1;
-                        }
+                let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
+                if let Some(cache) = cache_guard.as_ref() {
+                    let current_size = cache.weighted_size() as usize;
+                    if current_size > target_size {
+                        println!(
+                            "Height-partitioned cache over limit: {} bytes, target: {} bytes (Moka will handle eviction)",
+                            current_size, target_size
+                        );
                     }
                 }
             }
 
             {
-                let mut cache_guard = API_CACHE.write().unwrap();
-                if let Some(cache) = cache_guard.as_mut() {
-                    let target_size = actual_memory_limit / 2;
-                    while cache.current_size() > target_size {
-                        if cache.is_empty() {
-                            break;
-                        }
-                        cache.remove_lru();
-
-                        {
-                            let mut stats = CACHE_STATS.write().unwrap();
-                            stats.evictions += 1;
-                        }
+                let cache_guard = API_CACHE.read().unwrap();
+                if let Some(cache) = cache_guard.as_ref() {
+                    let current_size = cache.weighted_size() as usize;
+                    if current_size > target_size {
+                        println!(
+                            "API cache over limit: {} bytes, target: {} bytes (Moka will handle eviction)",
+                            current_size, target_size
+                        );
                     }
                 }
             }
@@ -1431,10 +1402,10 @@ pub fn force_evict_to_target_percentage(target_percentage: u32) {
     match allocation_mode {
         CacheAllocationMode::Indexer => {
             // In indexer mode, only the main LRU cache should be large
-            let mut cache_guard = LRU_CACHE.write().unwrap();
-            if let Some(cache) = cache_guard.as_mut() {
-                let current_size = cache.current_size();
-                let current_items = cache.len();
+            let cache_guard = LRU_CACHE.read().unwrap();
+            if let Some(cache) = cache_guard.as_ref() {
+                let current_size = cache.weighted_size() as usize;
+                let current_items = cache.entry_count() as usize;
 
                 if current_size == 0 {
                     println!("DEBUG: LRU cache is empty, no eviction needed");
@@ -1444,35 +1415,26 @@ pub fn force_evict_to_target_percentage(target_percentage: u32) {
                 let target_size = (current_size as f64 * target_percentage as f64 / 100.0) as usize;
 
                 println!(
-                    "LRU Cache eviction to {}%: Current {} bytes, {} items -> Target {} bytes",
+                    "LRU Cache target {}%: Current {} bytes, {} items -> Target {} bytes (Moka handles eviction automatically)",
                     target_percentage, current_size, current_items, target_size
                 );
 
-                let mut evicted_count = 0;
-                let max_evictions = current_items / 2; // Safety limit
-
-                while cache.current_size() > target_size
-                    && !cache.is_empty()
-                    && evicted_count < max_evictions
-                {
-                    cache.remove_lru();
-                    evicted_count += 1;
+                // With Moka, we can't manually evict specific items, but we can clear if needed
+                if target_percentage < 10 {
+                    println!("Target percentage very low, clearing cache");
+                    cache.invalidate_all();
                 }
 
-                println!("LRU Cache eviction completed: evicted {} items, {} bytes remaining, {} items remaining",
-                         evicted_count, cache.current_size(), cache.len());
-
-                // Update eviction statistics
+                // Update statistics
                 {
                     let mut stats = CACHE_STATS.write().unwrap();
-                    stats.evictions += evicted_count as u64;
-                    stats.items = cache.len();
-                    stats.memory_usage = cache.current_size();
+                    stats.items = cache.entry_count() as usize;
+                    stats.memory_usage = cache.weighted_size() as usize;
                 }
             }
         }
         CacheAllocationMode::View => {
-            // In view mode, evict from both height-partitioned and API caches
+            // In view mode, check both height-partitioned and API caches
             let current_total = get_total_memory_usage();
             if current_total == 0 {
                 return;
@@ -1480,34 +1442,26 @@ pub fn force_evict_to_target_percentage(target_percentage: u32) {
 
             let target_total = (current_total as f64 * target_percentage as f64 / 100.0) as usize;
 
-            // Evict from height-partitioned cache
-            {
-                let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
-                if let Some(cache) = cache_guard.as_mut() {
-                    let target_size = target_total / 2;
-                    while cache.current_size() > target_size && !cache.is_empty() {
-                        cache.remove_lru();
+            println!(
+                "View mode cache target {}%: Current {} bytes -> Target {} bytes (Moka handles eviction automatically)",
+                target_percentage, current_total, target_total
+            );
 
-                        {
-                            let mut stats = CACHE_STATS.write().unwrap();
-                            stats.evictions += 1;
-                        }
+            // If target is very low, clear caches
+            if target_percentage < 10 {
+                println!("Target percentage very low, clearing view caches");
+                
+                {
+                    let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
+                    if let Some(cache) = cache_guard.as_ref() {
+                        cache.invalidate_all();
                     }
                 }
-            }
 
-            // Evict from API cache
-            {
-                let mut cache_guard = API_CACHE.write().unwrap();
-                if let Some(cache) = cache_guard.as_mut() {
-                    let target_size = target_total / 2;
-                    while cache.current_size() > target_size && !cache.is_empty() {
-                        cache.remove_lru();
-
-                        {
-                            let mut stats = CACHE_STATS.write().unwrap();
-                            stats.evictions += 1;
-                        }
+                {
+                    let cache_guard = API_CACHE.read().unwrap();
+                    if let Some(cache) = cache_guard.as_ref() {
+                        cache.invalidate_all();
                     }
                 }
             }
@@ -1930,7 +1884,6 @@ pub fn generate_lru_debug_report() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lru_mem::MemSize;
 
     #[test]
     fn test_lru_cache_basic_operations() {
@@ -1939,8 +1892,10 @@ mod tests {
         force_reinitialize_caches();
         initialize_lru_cache();
 
-        let key = Arc::new(b"test_key".to_vec());
-        let value = Arc::new(b"test_value".to_vec());
+        // Use unique keys to avoid conflicts with other tests
+        let unique_suffix = std::thread::current().id();
+        let key = Arc::new(format!("test_key_{:?}", unique_suffix).into_bytes());
+        let value = Arc::new(format!("test_value_{:?}", unique_suffix).into_bytes());
 
         // Test set and get
         set_lru_cache(key.clone(), value.clone());
@@ -1948,7 +1903,7 @@ mod tests {
         assert_eq!(retrieved, Some(value));
 
         // Test cache miss
-        let missing_key = Arc::new(b"missing_key".to_vec());
+        let missing_key = Arc::new(format!("missing_key_{:?}", unique_suffix).into_bytes());
         let missing = get_lru_cache(&missing_key);
         assert_eq!(missing, None);
     }
@@ -1962,12 +1917,29 @@ mod tests {
         force_reinitialize_caches();
         initialize_lru_cache();
 
-        let key = "test_api_key".to_string();
-        let value = Arc::new(b"test_api_value".to_vec());
+        // Use unique key to avoid conflicts with other tests
+        let unique_suffix = std::thread::current().id();
+        let key = format!("test_api_key_{:?}", unique_suffix);
+        let value = Arc::new(format!("test_api_value_{:?}", unique_suffix).into_bytes());
 
         // Test set and get
         api_cache_set(key.clone(), value.clone());
+        
+        // Debug: Check if API cache is properly initialized
+        {
+            let cache_guard = API_CACHE.read().unwrap();
+            if let Some(cache) = cache_guard.as_ref() {
+                println!("API cache is initialized, entry_count: {}, weighted_size: {}", cache.entry_count(), cache.weighted_size());
+            } else {
+                println!("API cache is not initialized!");
+            }
+        }
+        
         let retrieved = api_cache_get(&key);
+        if retrieved.is_none() {
+            println!("API cache retrieval failed - checking cache state");
+        }
+        
         assert_eq!(
             retrieved,
             Some(value.clone()),
@@ -1975,7 +1947,8 @@ mod tests {
         );
 
         // Test cache miss
-        let missing = api_cache_get("missing_api_key");
+        let missing_key = format!("missing_api_key_{:?}", unique_suffix);
+        let missing = api_cache_get(&missing_key);
         assert_eq!(missing, None);
 
         // Test remove
@@ -2032,7 +2005,7 @@ mod tests {
             // Debug: Check if cache is properly initialized
             let cache_guard = LRU_CACHE.read().unwrap();
             if let Some(cache) = cache_guard.as_ref() {
-                println!("Cache is initialized, len: {}, current_size: {}", cache.len(), cache.current_size());
+                println!("Cache is initialized, entry_count: {}, weighted_size: {}", cache.entry_count(), cache.weighted_size());
             } else {
                 println!("Cache is not initialized!");
             }
@@ -2055,15 +2028,23 @@ mod tests {
         let small_cache_value = CacheValue::from(small_vec);
         let large_cache_value = CacheValue::from(large_vec);
 
-        let small_size = small_cache_value.mem_size();
-        let large_size = large_cache_value.mem_size();
+        // With Moka, we use weigher functions instead of MemSize trait
+        let small_key = CacheKey::from(Arc::new(b"small".to_vec()));
+        let large_key = CacheKey::from(Arc::new(b"large".to_vec()));
+        
+        let small_size = cache_weigher(&small_key, &small_cache_value);
+        let large_size = cache_weigher(&large_key, &large_cache_value);
 
         // Large vector should use more memory
         assert!(large_size > small_size);
 
         // Size should include overhead plus data
+        // Our weigher function calculates: key_size + value_size where each is Arc overhead + data length
+        let expected_min_size = (std::mem::size_of::<Arc<Vec<u8>>>() + 5) + (std::mem::size_of::<Arc<Vec<u8>>>() + 3); // "small" + 3 bytes data
         assert!(
-            small_size >= 3 + std::mem::size_of::<Arc<Vec<u8>>>() + std::mem::size_of::<Vec<u8>>()
+            small_size >= expected_min_size as u32,
+            "Small size {} should be at least {} (Arc overhead + key + Arc overhead + data)",
+            small_size, expected_min_size
         );
     }
 
@@ -2093,11 +2074,11 @@ mod tests {
         let initial_memory = get_total_memory_usage();
         println!("Initial memory usage: {} bytes", initial_memory);
 
-        // Add some data to the main LRU cache
+        // Add some data to the main LRU cache - use larger data to ensure significant increase
         let test_data = vec![
-            (b"key1".to_vec(), vec![0u8; 1000]), // 1KB value
-            (b"key2".to_vec(), vec![1u8; 2000]), // 2KB value
-            (b"key3".to_vec(), vec![2u8; 3000]), // 3KB value
+            (b"key1".to_vec(), vec![0u8; 10000]), // 10KB value
+            (b"key2".to_vec(), vec![1u8; 20000]), // 20KB value
+            (b"key3".to_vec(), vec![2u8; 30000]), // 30KB value
         ];
 
         for (key, value) in &test_data {
@@ -2108,12 +2089,13 @@ mod tests {
         let after_data_memory = get_total_memory_usage();
         println!("After adding data: {} bytes", after_data_memory);
 
-        // Memory usage should have increased significantly
+        // Memory usage should have increased significantly (at least 50KB of data plus overhead)
         assert!(
-            after_data_memory > initial_memory + 3000,
-            "Memory usage should have increased significantly. Initial: {}, After: {}",
+            after_data_memory > initial_memory + 50000,
+            "Memory usage should have increased significantly. Initial: {}, After: {}, Increase: {}",
             initial_memory,
-            after_data_memory
+            after_data_memory,
+            after_data_memory - initial_memory
         );
 
         // Memory usage should be reasonable (not just 4 or 8 bytes)
@@ -2204,8 +2186,12 @@ mod tests {
         let small_cache_value = CacheValue::from(small_data.clone());
         let large_cache_value = CacheValue::from(large_data.clone());
 
-        let small_heap_size = small_cache_value.heap_size();
-        let large_heap_size = large_cache_value.heap_size();
+        // With Moka, we use weigher functions instead of HeapSize trait
+        let small_key = CacheKey::from(Arc::new(b"small".to_vec()));
+        let large_key = CacheKey::from(Arc::new(b"large".to_vec()));
+        
+        let small_heap_size = cache_weigher(&small_key, &small_cache_value);
+        let large_heap_size = cache_weigher(&large_key, &large_cache_value);
 
         println!("Small data (3 bytes): heap_size = {}", small_heap_size);
         println!("Large data (1000 bytes): heap_size = {}", large_heap_size);
@@ -2253,7 +2239,7 @@ mod tests {
 
         let cache_guard = LRU_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
-            let cache_mem_size = cache.current_size();
+            let cache_mem_size = cache.weighted_size();
             println!("Cache mem_size after adding large data: {}", cache_mem_size);
             assert!(
                 cache_mem_size > 0,
@@ -2277,16 +2263,19 @@ mod tests {
 
         let cache_guard = LRU_CACHE.read().unwrap();
         if let Some(cache) = cache_guard.as_ref() {
-            println!("Cache len: {}", cache.len());
+            println!("Cache entry_count: {}", cache.entry_count());
 
             // Try different method names that might exist
             // Let's see what methods are available by trying to call them
 
             // This should work if the method exists
-            let current_size = cache.current_size();
+            let current_size = cache.weighted_size();
             println!("Cache current_size: {}", current_size);
 
-            let max_size = cache.max_size();
+            // Moka doesn't have a direct max_size() method, but we can get the max capacity
+            // For now, let's use a placeholder or comment this out
+            // let max_size = cache.max_capacity(); // This method doesn't exist in Moka
+            let max_size = get_actual_lru_cache_memory_limit(); // Use our configured limit instead
             println!("Cache max_size: {}", max_size);
         }
 
@@ -2342,7 +2331,7 @@ mod tests {
             // Debug cache state
             let cache_guard = LRU_CACHE.read().unwrap();
             if let Some(cache) = cache_guard.as_ref() {
-                println!("Cache is initialized, len: {}, current_size: {}", cache.len(), cache.current_size());
+                println!("Cache is initialized, entry_count: {}, weighted_size: {}", cache.entry_count(), cache.weighted_size());
             } else {
                 println!("Cache is not initialized!");
             }

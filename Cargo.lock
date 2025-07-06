@@ -2914,6 +2914,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "metashrew-println"
+version = "0.1.0"
+
+[[package]]
 name = "metashrew-runtime"
 version = "9.0.0"
 dependencies = [

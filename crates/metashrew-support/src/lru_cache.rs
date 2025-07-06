@@ -51,7 +51,9 @@
 //! }
 //! ```
 
-use moka::sync::Cache;
+// Use our local metashrew-cache (modified moka) instead of external moka
+use metashrew_cache::sync::Cache;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
@@ -544,6 +546,8 @@ static CACHE_ALLOCATION_MODE: RwLock<CacheAllocationMode> =
 /// This cache persists across multiple WASM invocations when stateful views are enabled.
 /// It provides a memory-bounded secondary cache layer that sits between the immediate
 /// cache (CACHE) and the host calls (__get/__get_len).
+///
+/// Uses our modified metashrew-cache which supports both WASM and non-WASM environments.
 static LRU_CACHE: RwLock<Option<Cache<CacheKey, CacheValue>>> = RwLock::new(None);
 
 /// Global API cache for user-defined caching needs
@@ -750,16 +754,15 @@ fn height_cache_weigher(key: &HeightPartitionedKey, value: &CacheValue) -> u32 {
 /// for user-defined caching, and the height-partitioned cache for view functions.
 /// Memory allocation depends on the current cache allocation mode.
 ///
+/// Uses our modified metashrew-cache which automatically handles WASM compatibility.
+///
 /// # Thread Safety
 ///
 /// This function is thread-safe and can be called multiple times. Subsequent
 /// calls will be no-ops if the cache is already initialized.
 pub fn initialize_lru_cache() {
     let allocation_mode = *CACHE_ALLOCATION_MODE.read().unwrap();
-
     let actual_memory_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
-
-    // Use the detected memory limit
     let safe_memory_limit = actual_memory_limit as u64;
 
     match allocation_mode {
@@ -768,7 +771,7 @@ pub fn initialize_lru_cache() {
             {
                 let mut cache = LRU_CACHE.write().unwrap();
                 if cache.is_none() {
-                    println!("DEBUG: Creating Moka cache with safe_memory_limit={} bytes ({} MB)",
+                    println!("DEBUG: Creating metashrew-cache with safe_memory_limit={} bytes ({} MB)",
                              safe_memory_limit, safe_memory_limit / (1024 * 1024));
                     
                     let new_cache = Cache::builder()
@@ -873,11 +876,10 @@ pub fn initialize_lru_cache() {
 ///
 /// # Thread Safety
 ///
-/// This function is thread-safe as moka handles concurrency internally.
+/// This function is thread-safe as our metashrew-cache handles concurrency internally.
 pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
     let cache_key = CacheKey::from(key.clone());
 
-    // Moka is thread-safe, so we can use read lock
     let cache_guard = LRU_CACHE.read().unwrap();
     if let Some(cache) = cache_guard.as_ref() {
         // Run pending tasks first to ensure cache is up to date
@@ -940,7 +942,7 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
 
     let cache_guard = LRU_CACHE.read().unwrap();
     if let Some(cache) = cache_guard.as_ref() {
-        // Moka handles eviction automatically based on the weigher function
+        // Our metashrew-cache handles eviction automatically based on the weigher function
         cache.insert(cache_key, cache_value);
 
         // Run pending tasks to ensure accurate statistics and immediate availability
@@ -951,8 +953,8 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
             let mut stats = CACHE_STATS.write().unwrap();
             stats.items = cache.entry_count() as usize;
             stats.memory_usage = cache.weighted_size() as usize;
-            // Note: Moka doesn't provide direct eviction count, so we'll track it differently
-            // For now, we'll leave evictions as-is since moka handles eviction internally
+            // Note: Our cache doesn't provide direct eviction count, so we'll track it differently
+            // For now, we'll leave evictions as-is since the cache handles eviction internally
         }
     }
 }

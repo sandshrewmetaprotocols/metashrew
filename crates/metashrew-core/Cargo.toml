@@ -24,6 +24,7 @@ wasm-bindgen-test = "0.3.49"
 hex = "0.4.3"
 metashrew-support = { path = "../metashrew-support" }
 metashrew-macros = { path = "../metashrew-macros" }
+metashrew-println = { workspace = true, features = ["wasm"] }
 
 [build-dependencies]
 protobuf-codegen = "3.4.0"

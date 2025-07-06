@@ -52,7 +52,9 @@
 //! ```
 
 use lru_mem::{HeapSize, LruCache};
+use metashrew_println::{println, stdout};
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::sync::{Arc, RwLock};
 
 /// Minimum memory limit for resource-constrained environments (64MB)
@@ -67,43 +69,48 @@ pub fn detect_available_memory() -> usize {
 static ACTUAL_LRU_CACHE_MEMORY_LIMIT: std::sync::LazyLock<usize> =
     std::sync::LazyLock::new(|| detect_available_memory());
 
-
 /// Get comprehensive memory usage report
 ///
 /// Returns detailed information about LRU cache memory usage for debugging and monitoring.
 pub fn get_comprehensive_memory_report() -> String {
     let mut report = String::new();
-    
+
     report.push_str("🧠 COMPREHENSIVE MEMORY USAGE REPORT\n");
     report.push_str("═══════════════════════════════════════════════════════════════\n\n");
-    
+
     // LRU cache memory usage
     report.push_str("💾 LRU CACHE MEMORY USAGE\n");
     let cache_stats = get_cache_stats();
     let total_cache_memory = get_total_memory_usage();
-    
-    report.push_str(&format!("├── Total Cache Memory: {} bytes ({:.1} MB)\n",
-                             total_cache_memory, total_cache_memory as f64 / (1024.0 * 1024.0)));
+
+    report.push_str(&format!(
+        "├── Total Cache Memory: {} bytes ({:.1} MB)\n",
+        total_cache_memory,
+        total_cache_memory as f64 / (1024.0 * 1024.0)
+    ));
     report.push_str(&format!("├── Cache Items: {}\n", cache_stats.items));
     report.push_str(&format!("├── Cache Hits: {}\n", cache_stats.hits));
     report.push_str(&format!("├── Cache Misses: {}\n", cache_stats.misses));
     report.push_str(&format!("├── Cache Evictions: {}\n", cache_stats.evictions));
-    
+
     let hit_rate = if cache_stats.hits + cache_stats.misses > 0 {
         (cache_stats.hits as f64 / (cache_stats.hits + cache_stats.misses) as f64) * 100.0
     } else {
         0.0
     };
     report.push_str(&format!("└── Hit Rate: {:.1}%\n\n", hit_rate));
-    
+
     // Memory efficiency analysis
     report.push_str("📊 MEMORY EFFICIENCY ANALYSIS\n");
     let memory_limit = get_actual_lru_cache_memory_limit();
     let limit_usage = (total_cache_memory as f64 / memory_limit as f64) * 100.0;
-    report.push_str(&format!("├── Memory Limit: {} bytes ({:.1} MB)\n",
-                             memory_limit, memory_limit as f64 / (1024.0 * 1024.0)));
+    report.push_str(&format!(
+        "├── Memory Limit: {} bytes ({:.1} MB)\n",
+        memory_limit,
+        memory_limit as f64 / (1024.0 * 1024.0)
+    ));
     report.push_str(&format!("└── Limit Usage: {:.1}%\n", limit_usage));
-    
+
     report
 }
 
@@ -143,7 +150,6 @@ pub fn get_min_lru_cache_memory_limit() -> usize {
 pub fn is_cache_below_recommended_minimum() -> bool {
     get_actual_lru_cache_memory_limit() < MIN_LRU_CACHE_MEMORY_LIMIT
 }
-
 
 /// Key parser for intelligent formatting of cache keys
 ///
@@ -717,8 +723,11 @@ pub fn initialize_lru_cache() {
             {
                 let mut cache = LRU_CACHE.write().unwrap();
                 if cache.is_none() {
-                    println!("DEBUG: Creating LruCache::new with safe_memory_limit={} bytes ({} MB)",
-                             safe_memory_limit, safe_memory_limit / (1024 * 1024));
+                    println!(
+                        "DEBUG: Creating LruCache::new with safe_memory_limit={} bytes ({} MB)",
+                        safe_memory_limit,
+                        safe_memory_limit / (1024 * 1024)
+                    );
                     *cache = Some(LruCache::new(safe_memory_limit)); // All memory to main cache
                     println!(
                         "INFO: Initialized main LRU cache with {} bytes ({} MB)",
@@ -860,13 +869,13 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
         let _old_memory = cache.current_size();
-        
+
         // Check if this is a key replacement by seeing if the key already exists
         let is_replacement = cache.contains(&cache_key);
-        
+
         // Insert the entry - the LRU cache will handle key replacement internally
         let _ = cache.insert(cache_key, cache_value);
-        
+
         let new_len = cache.len();
         let new_memory = cache.current_size();
 
@@ -943,7 +952,7 @@ pub fn force_reinitialize_caches() {
         let mut height_cache = HEIGHT_PARTITIONED_CACHE.write().unwrap();
         *height_cache = None;
     }
-    
+
     // Reset statistics
     {
         let mut stats = CACHE_STATS.write().unwrap();
@@ -996,13 +1005,13 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
     let mut cache_guard = API_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
-        
+
         // Check if this is a key replacement by seeing if the key already exists
         let is_replacement = cache.contains(&cache_key);
-        
+
         // Insert the entry - the LRU cache will handle key replacement internally
         let _ = cache.insert(cache_key, cache_value);
-        
+
         let new_len = cache.len();
 
         // Update statistics
@@ -1235,13 +1244,13 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
     let mut cache_guard = HEIGHT_PARTITIONED_CACHE.write().unwrap();
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
-        
+
         // Check if this is a key replacement by seeing if the key already exists
         let is_replacement = cache.contains(&cache_key);
-        
+
         // Insert the entry - the LRU cache will handle key replacement internally
         let _ = cache.insert(cache_key, cache_value);
-        
+
         let new_len = cache.len();
 
         // Update statistics
@@ -1953,40 +1962,69 @@ mod tests {
 
         // Get initial stats - should be zero after clear
         let initial_stats = get_cache_stats();
-        println!("Initial stats: hits={}, misses={}, items={}", initial_stats.hits, initial_stats.misses, initial_stats.items);
+        println!(
+            "Initial stats: hits={}, misses={}, items={}",
+            initial_stats.hits, initial_stats.misses, initial_stats.items
+        );
 
         // Cache miss should increment misses
         let miss_result = get_lru_cache(&key);
-        assert!(miss_result.is_none(), "Should be a miss for non-existent key"); // Should be a miss
+        assert!(
+            miss_result.is_none(),
+            "Should be a miss for non-existent key"
+        ); // Should be a miss
         let after_miss = get_cache_stats();
-        println!("After miss: hits={}, misses={}, items={}", after_miss.hits, after_miss.misses, after_miss.items);
-        assert!(after_miss.misses > initial_stats.misses, "Miss count should increase");
+        println!(
+            "After miss: hits={}, misses={}, items={}",
+            after_miss.hits, after_miss.misses, after_miss.items
+        );
+        assert!(
+            after_miss.misses > initial_stats.misses,
+            "Miss count should increase"
+        );
 
         // Set value and hit should increment hits
         set_lru_cache(key.clone(), value.clone());
         println!("Set value in cache");
-        
+
         // Verify the cache actually contains the value
         let hit_result = get_lru_cache(&key);
         println!("Retrieved from cache: {:?}", hit_result.is_some());
-        
+
         if hit_result.is_none() {
             // Debug: Check if cache is properly initialized
             let cache_guard = LRU_CACHE.read().unwrap();
             if let Some(cache) = cache_guard.as_ref() {
-                println!("Cache is initialized, len: {}, current_size: {}", cache.len(), cache.current_size());
+                println!(
+                    "Cache is initialized, len: {}, current_size: {}",
+                    cache.len(),
+                    cache.current_size()
+                );
             } else {
                 println!("Cache is not initialized!");
             }
         }
-        
+
         assert!(hit_result.is_some(), "Should be a hit after setting value"); // Should be a hit
-        assert_eq!(hit_result, Some(value), "Retrieved value should match set value");
-        
+        assert_eq!(
+            hit_result,
+            Some(value),
+            "Retrieved value should match set value"
+        );
+
         let after_hit = get_cache_stats();
-        println!("After hit: hits={}, misses={}, items={}", after_hit.hits, after_hit.misses, after_hit.items);
-        assert!(after_hit.hits > initial_stats.hits, "Hit count should increase");
-        assert!(after_hit.items >= 1, "Cache should contain at least one item"); // At least our item should be there
+        println!(
+            "After hit: hits={}, misses={}, items={}",
+            after_hit.hits, after_hit.misses, after_hit.items
+        );
+        assert!(
+            after_hit.hits > initial_stats.hits,
+            "Hit count should increase"
+        );
+        assert!(
+            after_hit.items >= 1,
+            "Cache should contain at least one item"
+        ); // At least our item should be there
     }
 
     #[test]
@@ -2243,7 +2281,7 @@ mod tests {
 
         // Set cache allocation mode to indexer for this test
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
-        
+
         // Force complete reinitialization to ensure proper allocation
         force_reinitialize_caches();
         initialize_lru_cache();
@@ -2273,29 +2311,40 @@ mod tests {
         for (key, value) in &keys_and_values {
             set_lru_cache(Arc::new(key.clone()), Arc::new(value.clone()));
         }
-        
+
         // Verify cache is working before testing debug functionality
         println!("Testing basic cache operations before debug tests...");
         let test_key = Arc::new(keys_and_values[0].0.clone());
         let test_result = get_lru_cache(&test_key);
         println!("Cache test result: {:?}", test_result.is_some());
-        
+
         if test_result.is_none() {
             // Debug cache state
             let cache_guard = LRU_CACHE.read().unwrap();
             if let Some(cache) = cache_guard.as_ref() {
-                println!("Cache is initialized, len: {}, current_size: {}", cache.len(), cache.current_size());
+                println!(
+                    "Cache is initialized, len: {}, current_size: {}",
+                    cache.len(),
+                    cache.current_size()
+                );
             } else {
                 println!("Cache is not initialized!");
             }
         }
-        
-        assert!(test_result.is_some(), "Basic cache operation should work before testing debug functionality");
+
+        assert!(
+            test_result.is_some(),
+            "Basic cache operation should work before testing debug functionality"
+        );
 
         // Access some keys to generate hits
         for (key, _) in &keys_and_values[0..3] {
             let result = get_lru_cache(&Arc::new(key.clone()));
-            assert!(result.is_some(), "Should find cached value for key: {:?}", std::str::from_utf8(key).unwrap_or("binary"));
+            assert!(
+                result.is_some(),
+                "Should find cached value for key: {:?}",
+                std::str::from_utf8(key).unwrap_or("binary")
+            );
         }
 
         // Test cache miss
@@ -2305,14 +2354,19 @@ mod tests {
 
         // Get debug stats
         let debug_stats = get_lru_debug_stats();
-        
+
         // Debug: Print what we actually got
-        println!("Debug stats: {} prefix stats found", debug_stats.prefix_stats.len());
+        println!(
+            "Debug stats: {} prefix stats found",
+            debug_stats.prefix_stats.len()
+        );
         for (i, stat) in debug_stats.prefix_stats.iter().enumerate() {
-            println!("  Prefix {}: '{}' (readable: '{}'), hits: {}, misses: {}, keys: {}",
-                     i, stat.prefix, stat.prefix_readable, stat.hits, stat.misses, stat.unique_keys);
+            println!(
+                "  Prefix {}: '{}' (readable: '{}'), hits: {}, misses: {}, keys: {}",
+                i, stat.prefix, stat.prefix_readable, stat.hits, stat.misses, stat.unique_keys
+            );
         }
-        
+
         // The test might not find prefixes due to the prefix detection logic
         // Let's make this assertion more lenient for now
         if debug_stats.prefix_stats.is_empty() {
@@ -2353,7 +2407,7 @@ mod tests {
             &report
         };
         println!("Generated debug report (first ~200 chars): {}", preview);
-        
+
         assert!(
             report.contains("LRU CACHE DEBUG REPORT"),
             "Report should contain header"
@@ -2460,7 +2514,7 @@ mod tests {
     fn test_evictions_counting_fix() {
         // Test that evictions are only counted when they actually occur
         // This verifies the fix for the issue where key replacements were incorrectly counted as evictions
-        
+
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
         force_reinitialize_caches();
         initialize_lru_cache();
@@ -2472,16 +2526,24 @@ mod tests {
         // Insert original value
         set_lru_cache(key.clone(), value1);
         let stats_after_insert = get_cache_stats();
-        println!("After initial insert: evictions = {}", stats_after_insert.evictions);
+        println!(
+            "After initial insert: evictions = {}",
+            stats_after_insert.evictions
+        );
 
         // Replace with new value (same key) - this should NOT count as eviction
         set_lru_cache(key.clone(), value2);
         let stats_after_replace = get_cache_stats();
-        println!("After key replacement: evictions = {}", stats_after_replace.evictions);
+        println!(
+            "After key replacement: evictions = {}",
+            stats_after_replace.evictions
+        );
 
         // Verify evictions didn't increase for key replacement
-        assert_eq!(stats_after_insert.evictions, stats_after_replace.evictions,
-                   "Key replacement should NOT increase eviction count");
+        assert_eq!(
+            stats_after_insert.evictions, stats_after_replace.evictions,
+            "Key replacement should NOT increase eviction count"
+        );
 
         // Add several unique keys - should not cause evictions until memory limit
         for i in 0..5 {
@@ -2491,11 +2553,16 @@ mod tests {
         }
 
         let stats_after_unique_keys = get_cache_stats();
-        println!("After adding 5 unique keys: evictions = {}", stats_after_unique_keys.evictions);
+        println!(
+            "After adding 5 unique keys: evictions = {}",
+            stats_after_unique_keys.evictions
+        );
 
         // Should still be 0 evictions since we haven't hit memory limit
-        assert_eq!(stats_after_unique_keys.evictions, 0,
-                   "Adding unique keys below memory limit should NOT cause evictions");
+        assert_eq!(
+            stats_after_unique_keys.evictions, 0,
+            "Adding unique keys below memory limit should NOT cause evictions"
+        );
 
         println!("✅ Evictions counting fix verified: only actual evictions are counted");
     }

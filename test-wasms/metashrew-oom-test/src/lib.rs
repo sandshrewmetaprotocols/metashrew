@@ -1,6 +1,6 @@
 use bitcoin;
 use metashrew_core::{get, index_pointer::IndexPointer};
-use metashrew_core::{println, stdio::stdout};
+use metashrew_core::{println, stdout};
 use metashrew_support::index_pointer::KeyValuePointer;
 use std::fmt::Write;
 use std::io::Cursor;

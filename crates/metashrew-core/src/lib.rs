@@ -88,7 +88,6 @@ pub mod compat;
 pub mod imports;
 pub mod index_pointer;
 pub mod macros;
-pub mod stdio;
 
 // Re-export the procedural macros from metashrew-macros
 pub use metashrew_macros::{main, view};
@@ -99,19 +98,19 @@ pub mod tests;
 #[cfg(feature = "panic-hook")]
 use crate::compat::panic_hook;
 use crate::imports::{__flush, __get, __get_len, __host_len, __load_input};
-pub use crate::stdio::stdout;
+pub use metashrew_println::wasm::{to_arraybuffer_layout, to_passback_ptr, to_ptr};
+pub use metashrew_println::{self, println, stdout};
 #[allow(unused_imports)]
 use metashrew_support::{
-    compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
         force_evict_to_target, force_evict_to_target_percentage, get_actual_lru_cache_memory_limit,
         get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
         get_min_lru_cache_memory_limit, get_total_memory_usage, get_view_height,
         initialize_lru_cache, is_cache_below_recommended_minimum, is_lru_cache_initialized,
-        set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache, set_view_height,
-        CacheAllocationMode, CacheStats, LruDebugStats, KeyPrefixStats, PrefixAnalysisConfig,
-        key_parser,
+        key_parser, set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache,
+        set_view_height, CacheAllocationMode, CacheStats, KeyPrefixStats, LruDebugStats,
+        PrefixAnalysisConfig,
     },
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
@@ -216,23 +215,23 @@ pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
 
         // Third fallback: host calls (__get_len and __get)
         let length: i32 = __get_len(to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())));
-        
+
         // CRITICAL FIX: Validate length to prevent capacity overflow
         // Reject negative lengths - this indicates corrupted host response
         if length < 0 {
             panic!("FATAL: Invalid negative length {} returned from __get_len for key: {:?}. This indicates corrupted host response and indexer must halt to prevent incorrect results.",
                    length, String::from_utf8_lossy(v.as_ref()));
         }
-        
+
         // CRITICAL FIX: Handle large allocations with LRU cache eviction and retry
         const MAX_ALLOCATION_SIZE: usize = 512 * 1024 * 1024; // 512MB
         let length_usize = length as usize;
         let total_size = length_usize + 4;
-        
+
         // First attempt: Try allocation normally
         let mut buffer = Vec::<u8>::new();
         let allocation_result = buffer.try_reserve_exact(total_size);
-        
+
         match allocation_result {
             Ok(()) => {
                 // Allocation succeeded, proceed normally
@@ -242,12 +241,12 @@ pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
             Err(allocation_error) => {
                 println!("WARNING: Initial allocation failed for {} bytes. Attempting LRU cache eviction and retry. Error: {:?}",
                          total_size, allocation_error);
-                
+
                 // Second attempt: Force LRU cache eviction to ~50% utilization and retry
                 if is_lru_cache_initialized() {
                     println!("Forcing LRU cache eviction to 50% utilization to free memory...");
                     force_evict_to_target_percentage(50); // Evict to 50% of current usage
-                    
+
                     // Retry allocation after eviction
                     let mut retry_buffer = Vec::<u8>::new();
                     match retry_buffer.try_reserve_exact(total_size) {
@@ -276,7 +275,7 @@ pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
                 }
             }
         };
-        
+
         __get(
             to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())),
             to_passback_ptr(&mut buffer),
@@ -388,7 +387,7 @@ pub fn flush() {
         if let Some(to_flush) = TO_FLUSH.as_ref() {
             for item in to_flush {
                 let mut value_found = false;
-                
+
                 // First try immediate CACHE
                 if let Some(cache) = CACHE.as_ref() {
                     if let Some(value) = cache.get(item) {
@@ -397,7 +396,7 @@ pub fn flush() {
                         value_found = true;
                     }
                 }
-                
+
                 // If not in immediate cache, try LRU cache (after flush_to_lru() was called)
                 if !value_found && is_lru_cache_initialized() {
                     if let Some(value) = get_lru_cache(item) {
@@ -406,11 +405,13 @@ pub fn flush() {
                         value_found = true;
                     }
                 }
-                
+
                 // If still not found, this is an error condition
                 if !value_found {
-                    panic!("flush(): Key in TO_FLUSH not found in any cache: {:?}",
-                           String::from_utf8_lossy(item.as_ref()));
+                    panic!(
+                        "flush(): Key in TO_FLUSH not found in any cache: {:?}",
+                        String::from_utf8_lossy(item.as_ref())
+                    );
                 }
             }
         }
@@ -438,7 +439,7 @@ pub fn flush() {
         // Always clear the immediate cache after flushing, regardless of success
         // This maintains consistency and prevents accumulation of stale data
         CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
-        
+
         // Force eviction if memory usage exceeds 1GB limit
         // This ensures we don't accumulate too much memory over time
         if is_lru_cache_initialized() {
@@ -496,22 +497,22 @@ pub fn input() -> Vec<u8> {
     #[cfg(not(feature = "test-utils"))]
     unsafe {
         let length: i32 = __host_len().into();
-        
+
         // CRITICAL FIX: Validate length to prevent capacity overflow
         // Reject negative lengths - this indicates corrupted host response
         if length < 0 {
             panic!("FATAL: Invalid negative length {} returned from __host_len. This indicates corrupted host response and indexer must halt to prevent incorrect results.", length);
         }
-        
+
         // CRITICAL FIX: Handle large allocations with LRU cache eviction and retry
         const MAX_ALLOCATION_SIZE: usize = 512 * 1024 * 1024; // 512MB
         let length_usize = length as usize;
         let total_size = length_usize + 4;
-        
+
         // First attempt: Try allocation normally
         let mut buffer = Vec::<u8>::new();
         let allocation_result = buffer.try_reserve_exact(total_size);
-        
+
         match allocation_result {
             Ok(()) => {
                 // Allocation succeeded, proceed normally
@@ -521,17 +522,19 @@ pub fn input() -> Vec<u8> {
             Err(allocation_error) => {
                 println!("WARNING: Initial input allocation failed for {} bytes. Attempting LRU cache eviction and retry. Error: {:?}",
                          total_size, allocation_error);
-                
+
                 // Second attempt: Force LRU cache eviction to ~50% utilization and retry
                 if is_lru_cache_initialized() {
                     println!("Forcing LRU cache eviction to 50% utilization to free memory...");
                     force_evict_to_target_percentage(50); // Evict to 50% of current usage
-                    
+
                     // Retry allocation after eviction
                     let mut retry_buffer = Vec::<u8>::new();
                     match retry_buffer.try_reserve_exact(total_size) {
                         Ok(()) => {
-                            println!("SUCCESS: Input allocation succeeded after LRU cache eviction");
+                            println!(
+                                "SUCCESS: Input allocation succeeded after LRU cache eviction"
+                            );
                             buffer = retry_buffer;
                             buffer.extend_from_slice(&length.to_le_bytes());
                             buffer.resize(total_size, 0);
@@ -555,7 +558,7 @@ pub fn input() -> Vec<u8> {
                 }
             }
         };
-        
+
         __load_input(to_ptr(&mut buffer) + 4);
         buffer[4..].to_vec()
     }
@@ -587,6 +590,10 @@ pub fn input() -> Vec<u8> {
 /// ```
 #[allow(static_mut_refs)]
 pub fn initialize() -> () {
+    // CRITICAL: Set cache mode to indexer for deterministic memory layout
+    // metashrew-core is used for indexer operations which need consistent memory layout
+    set_cache_allocation_mode(CacheAllocationMode::Indexer);
+
     // CRITICAL: Only enable preallocated allocator when the "allocator" feature is active
     // This ensures regular memory layout is used unless explicitly requested
     #[cfg(feature = "allocator")]
@@ -595,13 +602,14 @@ pub fn initialize() -> () {
         // This must happen before any other memory allocations to guarantee
         // consistent memory layout for WASM execution in indexer mode
         allocator::ensure_preallocated_memory();
-        
+
         // Enable the preallocated allocator for deterministic memory layout
         allocator::enable_preallocated_allocator();
-        println!("INFO: Enabled preallocated allocator for deterministic memory layout (indexer mode)");
+        println!(
+            "INFO: Enabled preallocated allocator for deterministic memory layout (indexer mode)"
+        );
     }
-    
-    
+
     unsafe {
         if CACHE.is_none() {
             reset();
@@ -701,21 +709,23 @@ pub fn flush_to_lru() {
             // Move all CACHE entries to LRU_CACHE
             if let Some(cache) = CACHE.as_ref() {
                 let cache_size = cache.len();
-                let total_data_size: usize = cache.iter()
-                    .map(|(k, v)| k.len() + v.len())
-                    .sum();
-                
-                println!("flush_to_lru: Moving {} items ({} bytes of data) from CACHE to LRU_CACHE",
-                         cache_size, total_data_size);
-                
+                let total_data_size: usize = cache.iter().map(|(k, v)| k.len() + v.len()).sum();
+
+                println!(
+                    "flush_to_lru: Moving {} items ({} bytes of data) from CACHE to LRU_CACHE",
+                    cache_size, total_data_size
+                );
+
                 for (key, value) in cache.iter() {
                     set_lru_cache(key.clone(), value.clone());
                 }
-                
+
                 // Log LRU cache stats after transfer
                 let stats = lru_cache_stats();
-                println!("flush_to_lru: LRU cache now has {} items, {} bytes memory usage",
-                         stats.items, stats.memory_usage);
+                println!(
+                    "flush_to_lru: LRU cache now has {} items, {} bytes memory usage",
+                    stats.items, stats.memory_usage
+                );
             }
 
             // DO NOT clear TO_FLUSH here - the subsequent flush() call needs it to write data to the database
@@ -1255,4 +1265,3 @@ pub fn parse_cache_key_enhanced(key: &[u8]) -> String {
 pub fn parse_cache_key_with_config(key: &[u8], config: &key_parser::KeyParseConfig) -> String {
     key_parser::parse_key_readable(key, config)
 }
-

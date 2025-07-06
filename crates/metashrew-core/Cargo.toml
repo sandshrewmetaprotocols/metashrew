@@ -34,3 +34,4 @@ protoc-bin-vendored = "3.0.0"
 default = []
 test-utils = []
 panic-hook = []
+allocator = []

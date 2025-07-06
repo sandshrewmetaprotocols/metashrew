@@ -4,8 +4,11 @@
 //! to ensure deterministic memory layout for WASM execution. This is critical for
 //! consistent behavior across different WASM runtimes and environments.
 
+#[cfg(feature = "allocator")]
 use std::alloc::{GlobalAlloc, Layout};
+#[cfg(feature = "allocator")]
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+#[cfg(feature = "allocator")]
 use std::sync::RwLock;
 
 /// Detect available memory and determine appropriate cache size
@@ -66,12 +69,16 @@ pub fn detect_available_memory() -> usize {
 }
 
 /// Actual memory limit determined at runtime based on available memory
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 static ACTUAL_LRU_CACHE_MEMORY_LIMIT: std::sync::LazyLock<usize> =
     std::sync::LazyLock::new(|| detect_available_memory());
 
 /// Preallocated memory region for LRU cache to ensure consistent memory layout
 /// This is allocated at startup to guarantee the same memory addresses regardless
 /// of whether the cache is actually used or not.
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 static PREALLOCATED_CACHE_MEMORY: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| {
     let actual_limit = *ACTUAL_LRU_CACHE_MEMORY_LIMIT;
 
@@ -139,6 +146,8 @@ static PREALLOCATED_CACHE_MEMORY: std::sync::LazyLock<Vec<u8>> = std::sync::Lazy
 /// This allocator provides deterministic memory layout by allocating from
 /// a preallocated memory region using a simple bump allocation strategy.
 /// It's designed specifically for LRU cache usage in WASM environments.
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub struct PreallocatedBumpAllocator {
     /// Current offset within the preallocated memory region
     offset: AtomicUsize,
@@ -150,12 +159,15 @@ pub struct PreallocatedBumpAllocator {
 
 // SAFETY: PreallocatedBumpAllocator is safe to send between threads
 // because it uses atomic operations for all mutable state
+#[cfg(feature = "allocator")]
 unsafe impl Send for PreallocatedBumpAllocator {}
 
 // SAFETY: PreallocatedBumpAllocator is safe to share between threads
 // because all operations are atomic and the base pointer is immutable after initialization
+#[cfg(feature = "allocator")]
 unsafe impl Sync for PreallocatedBumpAllocator {}
 
+#[cfg(feature = "allocator")]
 impl PreallocatedBumpAllocator {
     /// Create a new bump allocator using the preallocated memory region
     pub fn new() -> Self {
@@ -188,6 +200,7 @@ impl PreallocatedBumpAllocator {
     }
 }
 
+#[cfg(feature = "allocator")]
 unsafe impl GlobalAlloc for PreallocatedBumpAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
@@ -260,18 +273,25 @@ unsafe impl GlobalAlloc for PreallocatedBumpAllocator {
 }
 
 /// Global instance of our custom allocator (lazy initialization)
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 static PREALLOCATED_ALLOCATOR: std::sync::LazyLock<PreallocatedBumpAllocator> =
     std::sync::LazyLock::new(|| PreallocatedBumpAllocator::new());
 
 /// Flag to control whether to use the preallocated allocator
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 static USE_PREALLOCATED_ALLOCATOR: RwLock<bool> = RwLock::new(false);
 
 /// Wrapper allocator that conditionally uses preallocated memory
 ///
 /// This allocator checks the USE_PREALLOCATED_ALLOCATOR flag and either
 /// uses our custom bump allocator or falls back to the system allocator.
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub struct ConditionalPreallocatedAllocator;
 
+#[cfg(feature = "allocator")]
 unsafe impl GlobalAlloc for ConditionalPreallocatedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         if *USE_PREALLOCATED_ALLOCATOR.read().unwrap() {
@@ -294,6 +314,8 @@ unsafe impl GlobalAlloc for ConditionalPreallocatedAllocator {
 ///
 /// This allows us to control whether allocations use preallocated memory
 /// or the system allocator based on the USE_PREALLOCATED_ALLOCATOR flag.
+/// Only enabled when the "allocator" feature is active.
+#[cfg(feature = "allocator")]
 #[global_allocator]
 static GLOBAL: ConditionalPreallocatedAllocator = ConditionalPreallocatedAllocator;
 
@@ -303,6 +325,8 @@ static GLOBAL: ConditionalPreallocatedAllocator = ConditionalPreallocatedAllocat
 /// memory region. This provides deterministic memory layout for WASM environments.
 ///
 /// **IMPORTANT**: This should be called before any LRU cache operations.
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn enable_preallocated_allocator() {
     let mut use_allocator = USE_PREALLOCATED_ALLOCATOR.write().unwrap();
     *use_allocator = true;
@@ -316,6 +340,8 @@ pub fn enable_preallocated_allocator() {
 /// Disable the use of preallocated memory allocator
 ///
 /// This function disables the custom allocator and falls back to system allocation.
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn disable_preallocated_allocator() {
     let mut use_allocator = USE_PREALLOCATED_ALLOCATOR.write().unwrap();
     *use_allocator = false;
@@ -324,6 +350,8 @@ pub fn disable_preallocated_allocator() {
 }
 
 /// Check if preallocated allocator is enabled
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn is_preallocated_allocator_enabled() -> bool {
     *USE_PREALLOCATED_ALLOCATOR.read().unwrap()
 }
@@ -331,6 +359,8 @@ pub fn is_preallocated_allocator_enabled() -> bool {
 /// Get allocator usage statistics
 ///
 /// Returns (used_bytes, total_bytes, usage_percentage)
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn get_allocator_usage_stats() -> (usize, usize, f64) {
     if is_preallocated_allocator_enabled() {
         PREALLOCATED_ALLOCATOR.get_usage_stats()
@@ -340,6 +370,8 @@ pub fn get_allocator_usage_stats() -> (usize, usize, f64) {
 }
 
 /// Reset the preallocated allocator (for testing)
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn reset_preallocated_allocator() {
     if is_preallocated_allocator_enabled() {
         PREALLOCATED_ALLOCATOR.reset();
@@ -354,6 +386,8 @@ pub fn reset_preallocated_allocator() {
 /// NOTE: We don't reset the bump allocator because that would invalidate
 /// existing pointers that may still be in use. Instead, we just disable
 /// it for new allocations and clear the caches.
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn shutdown_preallocated_allocator() {
     // Clear all LRU caches to release any references to preallocated memory
     // This must be done BEFORE disabling the allocator to ensure proper cleanup
@@ -372,6 +406,8 @@ pub fn shutdown_preallocated_allocator() {
 }
 
 /// Get the actual LRU cache memory limit determined at runtime
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn get_actual_lru_cache_memory_limit() -> usize {
     *ACTUAL_LRU_CACHE_MEMORY_LIMIT
 }
@@ -379,6 +415,8 @@ pub fn get_actual_lru_cache_memory_limit() -> usize {
 /// Ensure the preallocated memory is initialized
 /// This function forces the lazy static to initialize, ensuring the memory
 /// is allocated before any other operations that might affect memory layout.
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn ensure_preallocated_memory() {
     // Access the lazy static to force initialization
     let memory_ptr = PREALLOCATED_CACHE_MEMORY.as_ptr();
@@ -408,4 +446,49 @@ pub fn ensure_preallocated_memory() {
     } else {
         println!("WARNING: LRU cache memory preallocation failed - using dynamic allocation only");
     }
+}
+
+// Stub functions when allocator feature is not enabled
+#[cfg(not(feature = "allocator"))]
+pub fn enable_preallocated_allocator() {
+    // No-op when allocator feature is disabled
+}
+
+#[cfg(not(feature = "allocator"))]
+pub fn disable_preallocated_allocator() {
+    // No-op when allocator feature is disabled
+}
+
+#[cfg(not(feature = "allocator"))]
+pub fn is_preallocated_allocator_enabled() -> bool {
+    false
+}
+
+#[cfg(not(feature = "allocator"))]
+pub fn get_allocator_usage_stats() -> (usize, usize, f64) {
+    (0, 0, 0.0)
+}
+
+#[cfg(not(feature = "allocator"))]
+pub fn reset_preallocated_allocator() {
+    // No-op when allocator feature is disabled
+}
+
+#[cfg(not(feature = "allocator"))]
+pub fn shutdown_preallocated_allocator() {
+    // Clear all LRU caches but don't do allocator-specific cleanup
+    crate::clear();
+}
+
+#[cfg(not(feature = "allocator"))]
+pub fn get_actual_lru_cache_memory_limit() -> usize {
+    // Return a reasonable default when allocator feature is disabled
+    // Use the same detection logic but without storing in static
+    detect_available_memory()
+}
+
+#[cfg(not(feature = "allocator"))]
+pub fn ensure_preallocated_memory() {
+    // No-op when allocator feature is disabled
+    println!("INFO: Preallocated memory not available (allocator feature not enabled)");
 }

@@ -587,10 +587,6 @@ pub fn input() -> Vec<u8> {
 /// ```
 #[allow(static_mut_refs)]
 pub fn initialize() -> () {
-    // CRITICAL: Set cache mode to indexer for deterministic memory layout
-    // metashrew-core is used for indexer operations which need consistent memory layout
-    set_cache_allocation_mode(CacheAllocationMode::Indexer);
-    
     // CRITICAL: Only enable preallocated allocator when the "allocator" feature is active
     // This ensures regular memory layout is used unless explicitly requested
     #[cfg(feature = "allocator")]

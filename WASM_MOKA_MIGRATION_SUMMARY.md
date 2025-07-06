@@ -31,6 +31,7 @@ Key features:
 - Provides monotonic ordering guarantees
 - Simulates time progression for cache operations
 - Automatically selected for WASM targets via conditional compilation
+- **Fixed**: `to_std_instant()` method now creates synthetic `std::time::Instant` values for WASM eviction logic
 
 ### 3. Dependency Configuration
 **File: `crates/metashrew-cache/Cargo.toml`**
@@ -64,6 +65,20 @@ rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
 - **Native targets**: Uses standard `std::time::Instant` for real time
 - **WASM targets**: Uses atomic counter simulation for ordering
 - **API consistency**: Same cache interface for both environments
+- **Eviction Support**: `to_std_instant()` creates synthetic `std::time::Instant` values for WASM eviction operations
+
+### WASM Eviction Fix
+The critical fix involved modifying the `to_std_instant()` method in [`crates/metashrew-cache/src/common/time/clock.rs`](crates/metashrew-cache/src/common/time/clock.rs:163) to handle WASM eviction scenarios:
+
+```rust
+// Instead of panicking, create synthetic StdInstant for WASM
+ClockType::WasmCompatible { start_counter, .. } => {
+    // Create synthetic StdInstant using atomic counter + fixed base time
+    // This allows Moka's eviction logic to work in WASM environments
+}
+```
+
+This prevents the panic that occurred when cache reached memory limits and Moka attempted to evict items.
 
 ### Memory Management
 - Preserved Moka's advanced LRU eviction algorithms

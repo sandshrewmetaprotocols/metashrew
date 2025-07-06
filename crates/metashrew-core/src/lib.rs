@@ -605,10 +605,6 @@ pub fn initialize() -> () {
         println!("INFO: Enabled preallocated allocator for deterministic memory layout (indexer mode)");
     }
     
-    #[cfg(not(feature = "allocator"))]
-    {
-        println!("INFO: Using regular memory layout (allocator feature not enabled)");
-    }
     
     unsafe {
         if CACHE.is_none() {

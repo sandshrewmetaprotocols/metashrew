@@ -12,6 +12,8 @@ use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::RwLock;
 
 /// Detect available memory and determine appropriate cache size
+/// Only available when the "allocator" feature is enabled.
+#[cfg(feature = "allocator")]
 pub fn detect_available_memory() -> usize {
     // Try to detect available memory by attempting progressively smaller allocations
     // Start with much more conservative sizes for WASM environments
@@ -483,8 +485,15 @@ pub fn shutdown_preallocated_allocator() {
 #[cfg(not(feature = "allocator"))]
 pub fn get_actual_lru_cache_memory_limit() -> usize {
     // Return a reasonable default when allocator feature is disabled
-    // Use the same detection logic but without storing in static
-    detect_available_memory()
+    // Don't do any actual memory detection or preallocation
+    1024 * 1024 * 1024 // 1GB default
+}
+
+/// Stub version of detect_available_memory for when allocator feature is disabled
+#[cfg(not(feature = "allocator"))]
+pub fn detect_available_memory() -> usize {
+    // Don't do any actual memory detection when allocator feature is disabled
+    1024 * 1024 * 1024 // 1GB default
 }
 
 #[cfg(not(feature = "allocator"))]

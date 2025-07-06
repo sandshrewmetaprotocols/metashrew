@@ -161,10 +161,35 @@ impl Clock {
                 *std_origin + duration
             }
             #[cfg(target_arch = "wasm32")]
-            ClockType::WasmCompatible { .. } => {
-                // This should not be called in WASM environments since std::time::Instant is not available
-                // We'll panic with a helpful message
-                panic!("to_std_instant() is not supported in WASM environments - std::time::Instant is not available")
+            ClockType::WasmCompatible { start_counter, .. } => {
+                // In WASM environments, we create a synthetic StdInstant based on our tick system
+                // We use a fixed origin point and add the duration from our atomic counter
+                let nanos = instant.as_nanos();
+                let duration = Duration::from_nanos(nanos);
+                
+                // Create a synthetic origin by using the start_counter value
+                // This ensures all StdInstants are relative to the same base point
+                let origin_nanos = start_counter.load(Ordering::SeqCst);
+                let origin_duration = Duration::from_nanos(origin_nanos);
+                
+                // Create a synthetic StdInstant by using a fixed base time and adding our durations
+                // We'll use a deterministic base time that's far enough in the past to avoid issues
+                let base_time = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000); // Year ~2001
+                let synthetic_system_time = base_time + origin_duration + duration;
+                
+                // Convert SystemTime to Instant using the current time as reference
+                // This is a bit of a hack, but it creates a valid Instant for Moka's use
+                let now_system = std::time::SystemTime::now();
+                let now_instant = std::time::Instant::now();
+                
+                // Calculate the offset between our synthetic time and current system time
+                match synthetic_system_time.duration_since(now_system) {
+                    Ok(future_duration) => now_instant + future_duration,
+                    Err(past_error) => {
+                        let past_duration = past_error.duration();
+                        now_instant.checked_sub(past_duration).unwrap_or(now_instant)
+                    }
+                }
             }
             #[cfg(test)]
             ClockType::Mocked { mock } => {

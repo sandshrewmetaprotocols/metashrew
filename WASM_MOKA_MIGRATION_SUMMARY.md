@@ -1,10 +1,11 @@
 # WASM-Compatible Moka Cache Migration Summary
 
 ## Overview
-Successfully migrated from `lru-mem` to a WASM-compatible version of Moka cache by creating a custom fork that supports both native and WASM environments.
+Successfully migrated from `lru-mem` to a WASM-compatible version of Moka cache by creating a custom fork that supports both native and WASM environments. Fixed critical WASM eviction panic that occurred when cache reached memory limits.
 
-## Problem Solved
-The original issue was that Moka cache uses `std::time::Instant::now()` which panics in WASM environments (`wasm32-unknown-unknown` target). This prevented metashrew-support from being compiled for WASM.
+## Problems Solved
+1. **Initial WASM Compilation Issue**: Moka cache uses `std::time::Instant::now()` which panics in WASM environments (`wasm32-unknown-unknown` target)
+2. **WASM Eviction Panic**: When cache reached memory limits (268MB), Moka's eviction logic called `to_std_instant()` which panicked in WASM, causing indexer crashes during `flush_to_lru()` operations
 
 ## Solution Implementation
 

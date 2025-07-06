@@ -1882,6 +1882,7 @@ pub fn generate_lru_debug_report() -> String {
 mod tests {
     use super::*;
     use lru_mem::MemSize;
+    use std::println;
 
     #[test]
     fn test_lru_cache_basic_operations() {

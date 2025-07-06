@@ -60,65 +60,7 @@ const MIN_LRU_CACHE_MEMORY_LIMIT: usize = 64 * 1024 * 1024; // 64MB
 
 /// Detect available memory and determine appropriate cache size
 pub fn detect_available_memory() -> usize {
-    // Try to detect available memory by attempting progressively smaller allocations
-    // Start with much more conservative sizes for WASM environments
-    let test_sizes = [
-        1024 * 1024 * 1024, // 1GB (target)
-        512 * 1024 * 1024,  // 512MB
-        256 * 1024 * 1024,  // 256MB
-        128 * 1024 * 1024,  // 128MB
-        64 * 1024 * 1024,   // 64MB
-        32 * 1024 * 1024,   // 32MB
-        16 * 1024 * 1024,   // 16MB
-        8 * 1024 * 1024,    // 8MB (absolute minimum)
-    ];
-
-    for &size in &test_sizes {
-        // Try to allocate a test vector to see if this size is feasible
-        // Use try_reserve_exact to avoid capacity overflow panics
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut test_vec = Vec::new();
-            // Use try_reserve_exact to safely test allocation
-            match test_vec.try_reserve_exact(size) {
-                Ok(()) => {
-                    // Try to actually allocate a small portion to test if the capacity is realistic
-                    let test_allocation_size = (size / 1000).max(1024).min(1024 * 1024); // Test with 0.1% or at least 1KB, max 1MB
-                    test_vec.resize(test_allocation_size, 0);
-                    test_vec.shrink_to_fit(); // Release the test allocation
-                    true
-                }
-                Err(_) => false,
-            }
-        })) {
-            Ok(true) => {
-                if size < MIN_LRU_CACHE_MEMORY_LIMIT {
-                    println!("WARNING: Detected cache size {} bytes ({} MB) is below recommended minimum of {} bytes ({} MB)",
-                              size, size / (1024 * 1024),
-                              MIN_LRU_CACHE_MEMORY_LIMIT, MIN_LRU_CACHE_MEMORY_LIMIT / (1024 * 1024));
-                } else {
-                    println!(
-                        "INFO: Detected feasible LRU cache size: {} bytes ({} MB)",
-                        size,
-                        size / (1024 * 1024)
-                    );
-                }
-                return size;
-            }
-            Ok(false) | Err(_) => {
-                println!(
-                    "DEBUG: Failed to allocate {} bytes for LRU cache, trying smaller size",
-                    size
-                );
-                continue;
-            }
-        }
-    }
-
-    // If all sizes fail, use a very conservative fallback but warn about it
-    let fallback_size = 4 * 1024 * 1024; // 4MB absolute minimum for WASM
-    println!("WARNING: Could not allocate any of the preferred cache sizes, falling back to {} bytes ({} MB). Performance may be degraded.",
-               fallback_size, fallback_size / (1024 * 1024));
-    fallback_size
+    1024 * 1024 * 1024
 }
 
 /// Actual memory limit determined at runtime based on available memory

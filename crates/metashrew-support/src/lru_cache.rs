@@ -911,7 +911,7 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
 /// when the memory limit is approached. The eviction process is transparent to
 /// the caller.
 pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
-    let cache_key = CacheKey::from(key);
+    let cache_key = CacheKey::from(key.clone());
     let cache_value = CacheValue::from(value);
 
     let mut cache_guard = LRU_CACHE.write().unwrap();
@@ -919,8 +919,10 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
         let old_len = cache.len();
         let _old_memory = cache.current_size();
         
+        // Check if this is a key replacement by seeing if the key already exists
+        let is_replacement = cache.contains(&cache_key);
+        
         // Insert the entry - the LRU cache will handle key replacement internally
-        // We don't need to check if the key exists beforehand since insert() handles this
         let _ = cache.insert(cache_key, cache_value);
         
         let new_len = cache.len();
@@ -932,15 +934,13 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
             stats.items = new_len;
             stats.memory_usage = new_memory;
 
-            // Calculate evictions: if we tried to insert but the cache size didn't increase,
-            // then evictions occurred (either due to replacement or memory pressure)
-            if new_len <= old_len {
-                // Either key replacement or evictions occurred
-                let expected_new_len = old_len + 1;
-                if new_len < expected_new_len {
-                    // Cache evicted items to make room
-                    stats.evictions += (expected_new_len - new_len) as u64;
-                }
+            // Only count evictions if:
+            // 1. This was NOT a key replacement (new key)
+            // 2. The cache length decreased (items were actually evicted)
+            if !is_replacement && new_len < old_len {
+                // Cache evicted items to make room for the new entry
+                let evicted_count = old_len - new_len;
+                stats.evictions += evicted_count as u64;
             }
         }
     }
@@ -1055,6 +1055,9 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
         
+        // Check if this is a key replacement by seeing if the key already exists
+        let is_replacement = cache.contains(&cache_key);
+        
         // Insert the entry - the LRU cache will handle key replacement internally
         let _ = cache.insert(cache_key, cache_value);
         
@@ -1066,15 +1069,13 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
             stats.items = new_len;
             stats.memory_usage = cache.current_size();
 
-            // Calculate evictions: if we tried to insert but the cache size didn't increase,
-            // then evictions occurred (either due to replacement or memory pressure)
-            if new_len <= old_len {
-                // Either key replacement or evictions occurred
-                let expected_new_len = old_len + 1;
-                if new_len < expected_new_len {
-                    // Cache evicted items to make room
-                    stats.evictions += (expected_new_len - new_len) as u64;
-                }
+            // Only count evictions if:
+            // 1. This was NOT a key replacement (new key)
+            // 2. The cache length decreased (items were actually evicted)
+            if !is_replacement && new_len < old_len {
+                // Cache evicted items to make room for the new entry
+                let evicted_count = old_len - new_len;
+                stats.evictions += evicted_count as u64;
             }
         }
     }
@@ -1293,6 +1294,9 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
     if let Some(cache) = cache_guard.as_mut() {
         let old_len = cache.len();
         
+        // Check if this is a key replacement by seeing if the key already exists
+        let is_replacement = cache.contains(&cache_key);
+        
         // Insert the entry - the LRU cache will handle key replacement internally
         let _ = cache.insert(cache_key, cache_value);
         
@@ -1304,15 +1308,13 @@ pub fn set_height_partitioned_cache(height: u32, key: Arc<Vec<u8>>, value: Arc<V
             stats.items = new_len;
             stats.memory_usage = cache.current_size();
 
-            // Calculate evictions: if we tried to insert but the cache size didn't increase,
-            // then evictions occurred (either due to replacement or memory pressure)
-            if new_len <= old_len {
-                // Either key replacement or evictions occurred
-                let expected_new_len = old_len + 1;
-                if new_len < expected_new_len {
-                    // Cache evicted items to make room
-                    stats.evictions += (expected_new_len - new_len) as u64;
-                }
+            // Only count evictions if:
+            // 1. This was NOT a key replacement (new key)
+            // 2. The cache length decreased (items were actually evicted)
+            if !is_replacement && new_len < old_len {
+                // Cache evicted items to make room for the new entry
+                let evicted_count = old_len - new_len;
+                stats.evictions += evicted_count as u64;
             }
         }
     }
@@ -2510,5 +2512,49 @@ mod tests {
         assert!(parsed6.contains("/data/"));
 
         println!("✅ Key parser functionality test passed!");
+    }
+
+    #[test]
+    fn test_evictions_counting_fix() {
+        // Test that evictions are only counted when they actually occur
+        // This verifies the fix for the issue where key replacements were incorrectly counted as evictions
+        
+        set_cache_allocation_mode(CacheAllocationMode::Indexer);
+        force_reinitialize_caches();
+        initialize_lru_cache();
+
+        let key = Arc::new(b"test_key".to_vec());
+        let value1 = Arc::new(b"original_value".to_vec());
+        let value2 = Arc::new(b"updated_value".to_vec());
+
+        // Insert original value
+        set_lru_cache(key.clone(), value1);
+        let stats_after_insert = get_cache_stats();
+        println!("After initial insert: evictions = {}", stats_after_insert.evictions);
+
+        // Replace with new value (same key) - this should NOT count as eviction
+        set_lru_cache(key.clone(), value2);
+        let stats_after_replace = get_cache_stats();
+        println!("After key replacement: evictions = {}", stats_after_replace.evictions);
+
+        // Verify evictions didn't increase for key replacement
+        assert_eq!(stats_after_insert.evictions, stats_after_replace.evictions,
+                   "Key replacement should NOT increase eviction count");
+
+        // Add several unique keys - should not cause evictions until memory limit
+        for i in 0..5 {
+            let unique_key = Arc::new(format!("unique_key_{}", i).into_bytes());
+            let unique_value = Arc::new(format!("value_{}", i).into_bytes());
+            set_lru_cache(unique_key, unique_value);
+        }
+
+        let stats_after_unique_keys = get_cache_stats();
+        println!("After adding 5 unique keys: evictions = {}", stats_after_unique_keys.evictions);
+
+        // Should still be 0 evictions since we haven't hit memory limit
+        assert_eq!(stats_after_unique_keys.evictions, 0,
+                   "Adding unique keys below memory limit should NOT cause evictions");
+
+        println!("✅ Evictions counting fix verified: only actual evictions are counted");
     }
 }

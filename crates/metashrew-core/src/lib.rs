@@ -89,6 +89,7 @@ pub mod imports;
 pub mod index_pointer;
 pub mod macros;
 pub mod stdio;
+pub mod wasi_threads;
 
 // Re-export the procedural macros from metashrew-macros
 pub use metashrew_macros::{main, view};
@@ -556,7 +557,7 @@ pub fn input() -> Vec<u8> {
             }
         };
         
-        __load_input(to_ptr(&mut buffer) + 4);
+        __load_input(to_ptr(&mut buffer) + 4, length);
         buffer[4..].to_vec()
     }
 }

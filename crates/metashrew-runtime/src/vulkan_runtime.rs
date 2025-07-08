@@ -34,7 +34,7 @@ use vulkano::{
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use log::{debug, info, warn};
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 /// Input structure for Vulkan GPU execution

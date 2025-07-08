@@ -78,6 +78,7 @@ pub mod index_pointer;
 pub mod lru_cache;
 pub mod lru_cache_memory_detection_test;
 pub mod proto;
+pub mod threading;
 pub mod utils;
 
 // Re-export commonly used items
@@ -90,4 +91,9 @@ pub use lru_cache::{
     initialize_lru_cache, is_lru_cache_initialized, set_cache_allocation_mode,
     set_height_partitioned_cache, set_lru_cache, set_view_height, CacheAllocationMode,
     CacheStats,
+};
+pub use threading::{
+    ThreadIdGenerator,
+    coordination::{ThreadStatus, WorkItem, ThreadPoolConfig},
+    utils::{generate_unique_id, make_thread_safe_key, parse_thread_id_from_key, encode_values, decode_values},
 };

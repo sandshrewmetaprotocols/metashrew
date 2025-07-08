@@ -8,3 +8,4 @@ pub mod stateful_benchmark_test;
 pub mod stateful_oom_test;
 pub mod stateful_view_test;
 pub mod view_pool_test;
+pub mod wasi_threads_test;

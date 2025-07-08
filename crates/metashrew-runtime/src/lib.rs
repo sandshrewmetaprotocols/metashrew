@@ -12,6 +12,7 @@ pub mod smt;
 pub mod traits;
 pub mod view_pool;
 pub mod vulkan_runtime;
+pub mod wasi_threads;
 
 #[cfg(test)]
 pub mod tests;
@@ -28,6 +29,7 @@ pub use view_pool::{ViewPoolConfig, ViewPoolStats, ViewPoolSupport, ViewRuntimeP
 // Re-export helper types
 pub use key_utils::decode_historical_key;
 pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
+pub use wasi_threads::{ThreadManager, add_wasi_threads_support, setup_wasi_threads_linker};
 
 // Utility functions that are storage-backend agnostic
 static mut _LABEL: Option<String> = None;

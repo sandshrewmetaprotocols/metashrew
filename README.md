@@ -172,12 +172,14 @@ A new JSON-RPC method, `metashrew_prefixroot`, is available to query the SMT roo
 
 Your WASM program has access to these key host functions:
 
+#### Core Database Functions
+
 ```typescript
 // Get input data length (block height + serialized block)
 __host_len(): i32
 
 // Load input data into WASM memory
-__load_input(ptr: i32): void
+__load_input(ptr: i32, len: i32): i32
 
 // Write to stdout (UTF-8 encoded)
 __log(ptr: i32): void
@@ -190,6 +192,50 @@ __get_len(ptr: i32): i32
 
 // Read value for a key
 __get(key_ptr: i32, value_ptr: i32): void
+```
+
+#### WASI Threading Functions
+
+Metashrew supports standardized WASI threads for parallel processing:
+
+```typescript
+// Basic threading
+__thread_spawn(start_arg: u32): i32
+__thread_get_result(thread_id: u32): i32
+__thread_wait_result(thread_id: u32, timeout_ms: u32): i32
+__thread_get_memory(thread_id: u32, output_ptr: i32): i32
+__thread_get_custom_data(thread_id: u32, output_ptr: i32): i32
+
+// Pipeline threading (custom entrypoints)
+__thread_spawn_pipeline(entrypoint_ptr: i32, entrypoint_len: i32, input_ptr: i32, input_len: i32): i32
+__thread_free(thread_id: i32): i32
+__read_thread_memory(thread_id: i32, offset: i32, buffer_ptr: i32, len: i32): i32
+```
+
+**Threading Features:**
+- **Instance-per-Thread**: Each thread gets a fresh WASM instance with isolated memory
+- **Database Sharing**: All threads share the same database backend for coordination
+- **Custom Entrypoints**: Spawn threads with specific function names (e.g., `__pipeline`)
+- **Input Data Loading**: Pass structured data to threads via `__host_len` and `__load_input`
+- **Memory Reading**: Read arbitrary amounts of result data from completed threads
+- **Resource Management**: Proper cleanup with `__thread_free` to prevent memory leaks
+
+**Example Pipeline Threading:**
+```typescript
+// Spawn a pipeline thread to process protocol messages
+const threadId = __thread_spawn_pipeline(
+  entrypointPtr, entrypointLen,  // "__pipeline" function name
+  inputDataPtr, inputDataLen     // Protocol message data
+);
+
+// Wait for completion
+const resultLength = __thread_wait_result(threadId, 10000);
+
+// Read result data from thread memory
+const resultData = __read_thread_memory(threadId, 0, buffer, resultLength);
+
+// Clean up thread resources
+__thread_free(threadId);
 ```
 
 ### Memory Layout
@@ -211,6 +257,32 @@ Your WASM program must export:
    - Receive: function-specific input
    - Return: function-specific output
    - Read-only access to database
+
+3. Pipeline functions (optional)
+   - Custom named exports for threading (e.g., `__pipeline`)
+   - Called by `__thread_spawn_pipeline()` with custom entrypoints
+   - Receive: structured input data via `__host_len()` and `__load_input()`
+   - Return: i32 result length for host to read via `__read_thread_memory()`
+   - Full database access for parallel processing
+
+**Example Pipeline Function:**
+```typescript
+export function __pipeline(): i32 {
+  // Get input data length from host
+  const inputLen = __host_len();
+  
+  // Load input data into memory
+  const buffer = new ArrayBuffer(inputLen);
+  __load_input(changetype<i32>(buffer), inputLen);
+  
+  // Process protocol messages...
+  const resultData = processProtocolMessages(buffer);
+  
+  // Store result in memory and return length
+  // Host will read this via __read_thread_memory()
+  return resultData.byteLength;
+}
+```
 
 ## Building an Indexer
 
@@ -240,6 +312,62 @@ export function getBalance(address: string): u64 {
 
 For a complete example, see the [alkanes-rs](https://github.com/kungfuflex/alkanes-rs) indexer.
 
+## Threading and Parallel Processing
+
+Metashrew supports standardized WASI threads for parallel processing within WASM indexers. This enables efficient processing of complex metaprotocols that can benefit from concurrent execution.
+
+### Threading Features
+
+- **WASI Standards Compliant**: Based on the official WASI threads specification
+- **Instance-per-Thread**: Each thread gets a fresh WASM instance with isolated memory
+- **Database Coordination**: All threads share the same database backend for state coordination
+- **Custom Entrypoints**: Spawn threads with specific function names beyond just `_start`
+- **Pipeline Processing**: Ideal for processing protocol messages in parallel
+
+### Basic Threading
+
+```typescript
+// Spawn a basic worker thread
+const threadId = __thread_spawn(42); // Pass start argument
+
+// Wait for completion
+const result = __thread_wait_result(threadId, 5000); // 5 second timeout
+
+// Get memory export from thread
+const memoryData = __thread_get_memory(threadId, bufferPtr);
+```
+
+### Pipeline Threading
+
+For more advanced use cases, use pipeline threading with custom entrypoints:
+
+```typescript
+// Prepare protocol message data
+const protocolData = serializeMessages(messages);
+
+// Spawn pipeline thread with custom entrypoint
+const threadId = __thread_spawn_pipeline(
+  "__pipeline",     // Custom function name
+  protocolData      // Input data for processing
+);
+
+// Wait for completion and get result length
+const resultLength = __thread_wait_result(threadId, 10000);
+
+// Read result data from thread memory
+const resultData = __read_thread_memory(threadId, 0, resultLength);
+
+// Clean up thread resources
+__thread_free(threadId);
+```
+
+### Use Cases
+
+- **Protocol Message Processing**: Process multiple protocol messages concurrently
+- **Batch Operations**: Distribute large datasets across multiple threads
+- **Complex Calculations**: Offload computationally intensive work to worker threads
+- **Pipeline Workflows**: Chain multiple processing steps across different threads
+
 ## Database Architecture
 
 Metashrew uses RocksDB with an append-only architecture:
@@ -255,6 +383,7 @@ The database structure allows:
 - Easy rollbacks during reorgs
 - Historical state queries
 - High performance reads/writes
+- Thread-safe concurrent access
 
 ## Development Guide
 

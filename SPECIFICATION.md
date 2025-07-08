@@ -381,11 +381,23 @@ The runtime provides the following WASM imports available to metashrew programs:
 ```rust
 // Storage operations
 __host_len() -> i32          // Get length of input data
-__load_input(ptr: i32)       // Load input data to WASM memory
+__load_input(ptr: i32, len: i32) -> i32  // Load input data to WASM memory
 __get(ptr: i32, v: i32)      // Get value by key
 __get_len(ptr: i32) -> i32   // Get length of value by key
 __flush(ptr: i32)            // Flush pending writes to storage
 __log(ptr: i32)              // Log message from WASM module
+
+// WASI Threading operations
+__thread_spawn(start_arg: u32) -> i32                    // Spawn basic thread
+__thread_get_result(thread_id: u32) -> i32               // Get thread result
+__thread_wait_result(thread_id: u32, timeout_ms: u32) -> i32  // Wait for thread completion
+__thread_get_memory(thread_id: u32, output_ptr: i32) -> i32   // Get thread memory export
+__thread_get_custom_data(thread_id: u32, output_ptr: i32) -> i32  // Get custom thread data
+
+// Pipeline Threading operations
+__thread_spawn_pipeline(entrypoint_ptr: i32, entrypoint_len: i32, input_ptr: i32, input_len: i32) -> i32  // Spawn pipeline thread
+__thread_free(thread_id: i32) -> i32                     // Free thread resources
+__read_thread_memory(thread_id: i32, offset: i32, buffer_ptr: i32, len: i32) -> i32  // Read thread memory
 ```
 
 **Host Function Implementations:**
@@ -434,6 +446,148 @@ Data exchange between host and guest uses ArrayBuffer layout with length prefix:
 - **Pointer Arithmetic**: Safe conversion between Rust pointers and WASM addresses
 - **Lifetime Management**: Proper handling of memory ownership transfer through `Box::leak()`
 - **Layout Consistency**: Standardized data structure layout across host-guest boundary
+
+### 2.4 WASI Threading Support
+
+Metashrew implements standardized WASI threads for parallel processing within WASM indexers, enabling efficient processing of complex metaprotocols that benefit from concurrent execution.
+
+#### 2.4.1 Threading Architecture
+**Location:** [`crates/metashrew-runtime/src/wasi_threads.rs`](crates/metashrew-runtime/src/wasi_threads.rs)
+
+**Core Design Principles:**
+- **WASI Standards Compliant**: Based on the official WASI threads specification
+- **Instance-per-Thread**: Each thread gets a fresh WASM instance with isolated memory
+- **Database Coordination**: All threads share the same database backend for state coordination
+- **Custom Entrypoints**: Support for spawning threads with specific function names beyond `_start`
+
+**Threading Model:**
+```
+Main Thread                    Worker Threads
+     │                              │
+     ├─ thread_spawn() ────────────► │ Fresh WASM Instance
+     │                              │ Isolated Memory
+     ├─ thread_spawn_pipeline() ───► │ Custom Entrypoint
+     │                              │ Input Data Loading
+     │                              │
+     ├─ thread_wait_result() ◄──────┤ Return Value
+     ├─ read_thread_memory() ◄──────┤ Memory Export
+     └─ thread_free() ──────────────► Cleanup
+```
+
+#### 2.4.2 Basic Threading Functions
+**Location:** [`crates/metashrew-runtime/src/wasi_threads.rs`](crates/metashrew-runtime/src/wasi_threads.rs:337)
+
+**Host Function Implementations:**
+- [`thread_spawn(start_arg: u32)`](crates/metashrew-runtime/src/wasi_threads.rs:337): Spawn basic worker thread with start argument
+- [`thread_get_result(thread_id: u32)`](crates/metashrew-runtime/src/wasi_threads.rs:405): Get return value from completed thread
+- [`thread_wait_result(thread_id: u32, timeout_ms: u32)`](crates/metashrew-runtime/src/wasi_threads.rs:426): Wait for thread completion with timeout
+- [`thread_get_memory(thread_id: u32, output_ptr: i32)`](crates/metashrew-runtime/src/wasi_threads.rs:448): Export first 4KB of thread memory
+- [`thread_get_custom_data(thread_id: u32, output_ptr: i32)`](crates/metashrew-runtime/src/wasi_threads.rs:480): Get custom data from thread
+
+#### 2.4.3 Pipeline Threading Functions
+**Location:** [`crates/metashrew-runtime/src/wasi_threads.rs`](crates/metashrew-runtime/src/wasi_threads.rs:515)
+
+**Advanced Threading Capabilities:**
+- [`thread_spawn_pipeline(entrypoint_ptr, entrypoint_len, input_ptr, input_len)`](crates/metashrew-runtime/src/wasi_threads.rs:515): Spawn thread with custom entrypoint and input data
+- [`thread_free(thread_id: i32)`](crates/metashrew-runtime/src/wasi_threads.rs:545): Clean up thread resources and prevent memory leaks
+- [`read_thread_memory(thread_id, offset, buffer_ptr, len)`](crates/metashrew-runtime/src/wasi_threads.rs:555): Read arbitrary amounts of data from thread memory
+
+#### 2.4.4 Guest-Side Threading API
+**Location:** [`crates/metashrew-core/src/wasi_threads.rs`](crates/metashrew-core/src/wasi_threads.rs)
+
+**WASM Module Threading Interface:**
+```rust
+// Basic threading
+pub fn thread_spawn(start_arg: u32) -> Result<u32, ThreadError>
+pub fn thread_get_result(thread_id: u32) -> Result<i32, ThreadError>
+pub fn thread_wait_result(thread_id: u32, timeout_ms: u32) -> Result<i32, ThreadError>
+
+// Pipeline threading
+pub fn thread_spawn_pipeline(entrypoint: &str, input_data: &[u8]) -> Result<u32, ThreadError>
+pub fn host_len() -> u32
+pub fn load_input(ptr: *mut u8, len: u32) -> u32
+pub fn read_thread_memory(thread_id: u32, offset: u32, len: u32) -> Result<Vec<u8>, ThreadError>
+pub fn thread_free(thread_id: u32) -> Result<(), ThreadError>
+```
+
+#### 2.4.5 Pipeline Workflow Example
+
+**Host-Side Pipeline Execution:**
+```rust
+// 1. Prepare protocol message data
+let protocol_data = serialize_messages(&messages);
+
+// 2. Spawn pipeline thread with custom entrypoint
+let thread_id = thread_spawn_pipeline("__pipeline", &protocol_data)?;
+
+// 3. Wait for completion and get result length
+let result_length = thread_wait_result(thread_id, 10000)?;
+
+// 4. Read result data from thread memory
+let result_data = read_thread_memory(thread_id, 0, result_length as u32)?;
+
+// 5. Clean up thread resources
+thread_free(thread_id)?;
+```
+
+**Thread-Side Implementation:**
+```rust
+#[no_mangle]
+pub extern "C" fn __pipeline() -> i32 {
+    // Initialize thread cache system
+    initialize();
+    
+    // Get input data from host
+    let input_len = host_len();
+    let mut buffer = vec![0u8; input_len as usize];
+    load_input(buffer.as_mut_ptr(), input_len);
+    
+    // Process protocol messages
+    let result_data = process_protocol_messages(&buffer);
+    
+    // Store result in memory and return length
+    result_data.len() as i32
+}
+```
+
+#### 2.4.6 Threading Use Cases
+
+**Protocol Message Processing:**
+- Process multiple protocol messages concurrently
+- Distribute complex parsing and validation across threads
+- Parallel execution of independent message handlers
+
+**Batch Operations:**
+- Distribute large datasets across multiple worker threads
+- Parallel processing of transaction batches
+- Concurrent validation of multiple blocks
+
+**Complex Calculations:**
+- Offload computationally intensive work to worker threads
+- Parallel cryptographic operations
+- Concurrent state tree computations
+
+**Pipeline Workflows:**
+- Chain multiple processing steps across different threads
+- Parallel execution of different metaprotocol components
+- Concurrent indexing of multiple data streams
+
+#### 2.4.7 Thread Safety and Coordination
+
+**Database Sharing:**
+- All threads share the same database backend through the host runtime
+- Database operations are thread-safe through the storage abstraction layer
+- Threads can coordinate through shared database state
+
+**Memory Isolation:**
+- Each thread has completely isolated WASM memory space
+- No shared memory between threads (WASI threads design)
+- Communication happens through database operations and result retrieval
+
+**Resource Management:**
+- Automatic cleanup of thread resources through `thread_free()`
+- Bounded execution time and memory usage per thread
+- Thread pool management for high-throughput scenarios
 
 ---
 

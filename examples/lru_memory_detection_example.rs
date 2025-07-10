@@ -7,7 +7,7 @@
 use metashrew_support::lru_cache::{
     detect_available_memory, get_actual_lru_cache_memory_limit, get_min_lru_cache_memory_limit,
     is_cache_below_recommended_minimum, initialize_lru_cache, set_cache_allocation_mode,
-    CacheAllocationMode, set_lru_cache, get_lru_cache, get_cache_stats, ensure_preallocated_memory
+    CacheAllocationMode, set_lru_cache, get_lru_cache, get_cache_stats
 };
 use std::sync::Arc;
 
@@ -41,7 +41,6 @@ fn main() {
     set_cache_allocation_mode(CacheAllocationMode::Indexer);
     
     // This will gracefully handle memory allocation based on detected limits
-    ensure_preallocated_memory();
     initialize_lru_cache();
     println!("   ✅ Cache system initialized successfully");
 
@@ -120,7 +119,6 @@ mod tests {
         
         // Initialize cache system
         set_cache_allocation_mode(CacheAllocationMode::Indexer);
-        ensure_preallocated_memory();
         initialize_lru_cache();
         
         // Test basic operations

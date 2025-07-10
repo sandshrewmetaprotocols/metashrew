@@ -18,6 +18,8 @@ log = "0.4"
 protobuf = "3.7.1"
 lru-mem = "0.3.0"
 metashrew-println = { workspace = true }
+prost = "0.12.6"
+rlp = "0.5.2"
 
 [build-dependencies]
 anyhow = "1.0.90"

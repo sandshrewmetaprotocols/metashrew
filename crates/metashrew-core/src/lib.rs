@@ -706,27 +706,7 @@ pub fn flush_to_lru() {
 
         // Only proceed if LRU cache is initialized and we're not in a view function
         if is_lru_cache_initialized() && get_view_height().is_none() {
-            // Move all CACHE entries to LRU_CACHE
-            if let Some(cache) = CACHE.as_ref() {
-                let cache_size = cache.len();
-                let total_data_size: usize = cache.iter().map(|(k, v)| k.len() + v.len()).sum();
-
-                println!(
-                    "flush_to_lru: Moving {} items ({} bytes of data) from CACHE to LRU_CACHE",
-                    cache_size, total_data_size
-                );
-
-                for (key, value) in cache.iter() {
-                    set_lru_cache(key.clone(), value.clone());
-                }
-
-                // Log LRU cache stats after transfer
-                let stats = lru_cache_stats();
-                println!(
-                    "flush_to_lru: LRU cache now has {} items, {} bytes memory usage",
-                    stats.items, stats.memory_usage
-                );
-            }
+            // The `set` function already populates the LRU cache, so we just need to clear the immediate cache.
 
             // DO NOT clear TO_FLUSH here - the subsequent flush() call needs it to write data to the database
             // Only clear the immediate cache since the data is now in LRU_CACHE

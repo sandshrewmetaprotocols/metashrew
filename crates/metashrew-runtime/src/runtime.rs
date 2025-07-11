@@ -75,6 +75,7 @@ use crate::context::MetashrewRuntimeContext;
 use crate::smt::SMTHelper;
 use crate::traits::{BatchLike, KeyValueStoreLike};
 
+
 /// Internal key used to store the current blockchain tip height
 ///
 /// This key is used internally by the runtime to track the highest block
@@ -113,7 +114,7 @@ pub struct State {
     /// Set to maximum values to ensure deterministic behavior by avoiding
     /// dynamic resource allocation during execution.
     limits: StoreLimits,
-    
+
     /// Tracks execution failures in host functions
     ///
     /// When a host function encounters an error (e.g., database failure,
@@ -211,10 +212,12 @@ impl State {
 ///
 /// # Memory Management
 ///
-/// The runtime ensures deterministic execution through:
-/// - **Memory isolation**: Fresh memory for each block execution
+/// The runtime supports persistent memory between blocks and view calls:
+/// - **Memory persistence**: WASM memory state is retained between normal block processing
+/// - **Stateful views**: WASM memory persists between view calls (enabled by default)
 /// - **Resource limits**: Pre-allocated maximum memory to avoid growth
-/// - **Automatic refresh**: Memory is reset after each block for consistency
+/// - **LRU cache**: metashrew-core redesign prevents unbounded memory growth
+/// - **Reorg refresh**: Memory is only refreshed during chain reorganizations
 ///
 /// # Thread Safety
 ///
@@ -256,7 +259,7 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     /// Protected by [`Arc<Mutex<_>>`] for thread-safe access across
     /// different execution modes and concurrent view operations.
     pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
-    
+
     /// Synchronous Wasmtime engine for block processing
     ///
     /// Configured for deterministic execution with:
@@ -264,42 +267,106 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     /// - Relaxed SIMD determinism
     /// - Static memory allocation
     pub engine: wasmtime::Engine,
-    
+
     /// Asynchronous Wasmtime engine for view functions
     ///
     /// Supports cooperative yielding and fuel-based execution limits
     /// for long-running view operations that need to yield control.
     pub async_engine: wasmtime::Engine,
-    
+
     /// WASM execution store with state tracking
     ///
     /// Contains the execution state including resource limits and
     /// failure tracking. Reset after each block for deterministic behavior.
     pub wasmstore: wasmtime::Store<State>,
-    
+
     /// Compiled WASM module for asynchronous execution
     ///
     /// Used by view functions and other operations that need
     /// cooperative yielding and async execution.
     pub async_module: wasmtime::Module,
-    
+
     /// Compiled WASM module for synchronous execution
     ///
     /// Used for block processing and other operations that
     /// need deterministic, non-yielding execution.
     pub module: wasmtime::Module,
-    
+
     /// Host function linker providing database and I/O operations
     ///
     /// Binds host functions like `__get`, `__flush`, `__log` that
     /// WASM modules can call to interact with the database and runtime.
     pub linker: wasmtime::Linker<State>,
-    
+
     /// Instantiated WASM module ready for execution
     ///
     /// Contains the loaded and linked WASM instance with all
     /// host functions bound and ready to execute.
     pub instance: wasmtime::Instance,
+
+    /// Stateful view runtime for retaining WASM memory between view calls
+    ///
+    /// This field contains a persistent WASM runtime that retains its memory
+    /// and instance state between view function calls. When present, view
+    /// functions will reuse this runtime instead of creating new instances.
+    /// This enables stateful view operations where WASM memory persists.
+    ///
+    /// **DEFAULT BEHAVIOR**: Stateful views are now enabled by default for
+    /// better performance and to support stateful operations.
+    pub stateful_view_runtime: Option<StatefulViewRuntime<T>>,
+
+    /// Flag to disable WASM __log host function
+    ///
+    /// When true, the __log host function will silently ignore all WASM log calls.
+    /// This provides the same behavior as the old --features logs flag but controlled
+    /// at runtime instead of compile time.
+    pub disable_wasmtime_log: bool,
+}
+
+/// Stateful view runtime that retains WASM memory and instance between calls
+///
+/// This struct maintains a persistent WASM execution environment specifically
+/// for view functions. Unlike the main runtime which resets memory after each
+/// block, this runtime preserves WASM memory state between view calls, enabling
+/// stateful view operations.
+///
+/// # Key Features
+///
+/// - **Memory Persistence**: WASM memory is retained between view calls
+/// - **Instance Reuse**: Same WASM instance used for all view operations
+/// - **Thread Safety**: Protected by mutex for concurrent access
+/// - **Lazy Initialization**: Created on first view call if enabled
+///
+/// # Memory Management
+///
+/// The WASM author is responsible for managing memory within their WASM module.
+/// The runtime simply provides a persistent execution environment without
+/// automatic memory cleanup between calls.
+pub struct StatefulViewRuntime<T: KeyValueStoreLike> {
+    /// Asynchronous WASM store for view execution
+    ///
+    /// Maintains the WASM execution state including memory, globals,
+    /// and other runtime state that persists between view calls.
+    /// Protected by mutex for thread-safe access.
+    pub wasmstore: Arc<tokio::sync::Mutex<wasmtime::Store<State>>>,
+
+    /// WASM instance for view execution
+    ///
+    /// The instantiated WASM module that will be reused for all
+    /// view function calls, maintaining its memory state.
+    pub instance: wasmtime::Instance,
+
+    /// Host function linker for view operations
+    ///
+    /// Provides the view-specific host functions like `__get` and `__log`
+    /// that view functions can call to interact with the database.
+    pub linker: wasmtime::Linker<State>,
+
+    /// Execution context for view operations
+    ///
+    /// Contains the database reference and other context needed for
+    /// view function execution. Updated for each view call.
+    pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
 }
 
 pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Result<Vec<u8>> {
@@ -428,6 +495,17 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         mut store: T,
         prefix_configs: Vec<(String, Vec<u8>)>,
     ) -> Result<Self> {
+        // CRITICAL: Set cache mode to indexer for deterministic memory layout
+        // Runtime is used for indexer operations which need consistent memory layout
+        metashrew_support::lru_cache::set_cache_allocation_mode(
+            metashrew_support::lru_cache::CacheAllocationMode::Indexer
+        );
+        
+        // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
+        // This must happen before any WASM engine configuration to guarantee
+        // consistent memory layout for deterministic execution
+        metashrew_core::allocator::ensure_preallocated_memory();
+        
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -461,17 +539,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         };
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(MetashrewRuntimeContext::new(
-            store,
-            tip_height,
-            vec![],
-            prefix_configs,
-        )));
+        >::new(
+            MetashrewRuntimeContext::new(store, tip_height, vec![], prefix_configs),
+        ));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
         {
-            Self::setup_linker(context.clone(), &mut linker)
+            Self::setup_linker_with_log_flag(context.clone(), &mut linker, false)
                 .context("Failed to setup basic linker")?;
             Self::setup_linker_indexer(context.clone(), &mut linker)
                 .context("Failed to setup indexer linker")?;
@@ -480,7 +555,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let instance = linker
             .instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
-        Ok(MetashrewRuntime {
+        let mut runtime = MetashrewRuntime {
             wasmstore,
             async_engine,
             engine,
@@ -489,7 +564,20 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
-        })
+            stateful_view_runtime: None,
+            disable_wasmtime_log: false,
+        };
+
+        // Enable stateful views by default
+        // This allows WASM memory to persist between view calls for better performance
+        // and stateful operations
+        log::info!("Enabling stateful views by default for persistent WASM memory");
+        if let Err(e) = runtime.enable_stateful_views_sync() {
+            log::warn!("Failed to enable stateful views by default: {}", e);
+            // Continue without stateful views if initialization fails
+        }
+
+        Ok(runtime)
     }
 
     pub fn new(
@@ -497,6 +585,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         mut store: T,
         prefix_configs: Vec<(String, Vec<u8>)>,
     ) -> Result<Self> {
+        
         // Configure the engine with settings for deterministic execution
         let mut config = wasmtime::Config::default();
         // Enable NaN canonicalization for deterministic floating point operations
@@ -530,17 +619,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         };
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(MetashrewRuntimeContext::new(
-            store,
-            tip_height,
-            vec![],
-            prefix_configs,
-        )));
+        >::new(
+            MetashrewRuntimeContext::new(store, tip_height, vec![], prefix_configs),
+        ));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
         {
-            Self::setup_linker(context.clone(), &mut linker)
+            Self::setup_linker_with_log_flag(context.clone(), &mut linker, false)
                 .context("Failed to setup basic linker")?;
             Self::setup_linker_indexer(context.clone(), &mut linker)
                 .context("Failed to setup indexer linker")?;
@@ -558,6 +644,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
+            stateful_view_runtime: None,
+            disable_wasmtime_log: false,
         })
     }
 
@@ -638,8 +726,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         // Create a new runtime with preview db using the synchronous engine
         // Process the preview block at height + 1 to simulate adding it after the target height
         let preview_height = height + 1;
-        let mut runtime =
-            Self::new_with_db(preview_db, preview_height, self.engine.clone(), self.module.clone())?;
+        let mut runtime = Self::new_with_db(
+            preview_db,
+            preview_height,
+            self.engine.clone(),
+            self.module.clone(),
+        )?;
         runtime.context.lock().map_err(lock_err)?.block = block.clone();
 
         // Execute block via _start to populate preview db
@@ -692,6 +784,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 linker,
                 context: view_context,
                 instance,
+                stateful_view_runtime: None,
+                disable_wasmtime_log: false,
             }
         };
 
@@ -804,6 +898,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - WASM execution encounters an error
     /// - Memory access violations occur
     pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
+        // Check if we have a stateful view runtime and should use it
+        if let Some(ref stateful_runtime) = self.stateful_view_runtime {
+            return self
+                .view_stateful(stateful_runtime, symbol, input, height)
+                .await;
+        }
+
+        // Fall back to the original non-stateful implementation
         let db = {
             let guard = self.context.lock().map_err(lock_err)?;
             guard.db.clone()
@@ -850,18 +952,24 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         ))
     }
 
+    /// Refresh WASM memory by creating a new instance
+    ///
+    /// **NEW USAGE**: This function is now only called during chain reorganizations
+    /// to ensure clean state after rollback. It is no longer called after normal
+    /// block processing to allow memory persistence between blocks.
+    ///
+    /// The LRU cache in metashrew-core prevents unbounded memory growth, making
+    /// persistent memory safe for normal operation.
     pub fn refresh_memory(&mut self) -> Result<()> {
-        // Only refresh memory if there was actual execution or failure
-        // This reduces overhead for blocks with minimal processing
-        if self.wasmstore.data().had_failure || self.context.lock().map_err(lock_err)?.state == 1 {
-            let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-            wasmstore.limiter(|state| &mut state.limits);
-            self.instance = self
-                .linker
-                .instantiate(&mut wasmstore, &self.module)
-                .context("Failed to instantiate module during memory refresh")?;
-            self.wasmstore = wasmstore;
-        }
+        // Always refresh when explicitly called (typically during reorgs)
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        wasmstore.limiter(|state| &mut state.limits);
+        self.instance = self
+            .linker
+            .instantiate(&mut wasmstore, &self.module)
+            .context("Failed to instantiate module during memory refresh")?;
+        self.wasmstore = wasmstore;
+        log::info!("WASM memory refreshed (typically due to chain reorganization)");
         Ok(())
     }
 
@@ -869,39 +977,27 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///
     /// This is the core block processing method that executes the WASM module's
     /// `_start` function to process the current block data. It handles the complete
-    /// block processing lifecycle including chain reorganization detection,
-    /// execution, and memory cleanup.
+    /// block processing lifecycle with persistent memory between blocks.
     ///
     /// # Block Processing Flow
     ///
     /// 1. **Initialize state**: Reset execution state to 0 (starting)
-    /// 2. **Handle reorgs**: Check for and handle chain reorganizations
-    /// 3. **Execute WASM**: Call the `_start` function with current block data
-    /// 4. **Validate completion**: Ensure indexer completed successfully (state = 1)
-    /// 5. **Refresh memory**: Reset WASM memory for deterministic execution
-    ///
-    /// # Deterministic Execution
-    ///
-    /// The runtime ensures deterministic behavior through:
-    /// - **Memory isolation**: Fresh WASM memory for each block
-    /// - **State validation**: Strict execution state checking
-    /// - **Error handling**: Consistent error propagation
-    /// - **Resource limits**: Bounded execution resources
-    ///
-    /// # Chain Reorganization Handling
-    ///
-    /// Before processing, the method:
-    /// - Compares context height with database tip height
-    /// - Detects potential chain reorganizations
-    /// - Handles rollback scenarios (implementation pending)
+    /// 2. **Execute WASM**: Call the `_start` function with current block data
+    /// 3. **Validate completion**: Ensure indexer completed successfully (state = 1)
+    /// 4. **Retain memory**: WASM memory persists between blocks (LRU cache prevents unbounded growth)
     ///
     /// # Memory Management
     ///
-    /// After each block execution:
-    /// - WASM memory is completely refreshed
-    /// - Module instance is recreated
-    /// - No state persists between blocks
-    /// - Ensures consistent execution environment
+    /// **NEW BEHAVIOR**: Memory is now retained between blocks:
+    /// - **Persistent memory**: WASM memory state persists between normal block processing
+    /// - **LRU cache**: metashrew-core redesign prevents unbounded memory growth
+    /// - **No automatic refresh**: Memory is only refreshed during reorganizations
+    /// - **Crash on unexpected exit**: If WASM exits unexpectedly, the indexer crashes (no retry)
+    ///
+    /// # Chain Reorganization Handling
+    ///
+    /// Chain reorganization detection is handled at the sync framework level.
+    /// When a reorg occurs, memory will be refreshed to ensure clean state.
     ///
     /// # State Validation
     ///
@@ -909,6 +1005,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Indexer reaches completion state (state = 1)
     /// - No host function failures occurred
     /// - WASM execution completed without traps
+    /// - If any validation fails, the indexer crashes immediately
     ///
     /// # Example Usage
     ///
@@ -920,19 +1017,19 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///     guard.height = height;
     /// }
     ///
-    /// // Process the block
+    /// // Process the block (memory persists after this call)
     /// runtime.run()?;
     /// ```
     ///
     /// # Errors
     ///
     /// Returns an error if:
-    /// - Chain reorganization handling fails
     /// - `_start` function is not found in WASM module
     /// - WASM execution traps or fails
     /// - Indexer exits without reaching completion state
-    /// - Memory refresh fails after execution
     /// - Host function failures occur during execution
+    ///
+    /// **Note**: Any unexpected exit will cause the indexer to crash rather than retry.
     pub fn run(&mut self) -> Result<(), anyhow::Error> {
         self.context.lock().map_err(lock_err)?.state = 0;
         let start = self
@@ -945,26 +1042,42 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
         let execution_result = match start.call(&mut self.wasmstore, ()) {
             Ok(_) => {
-                if self.context.lock().map_err(lock_err)?.state != 1
-                    && !self.wasmstore.data().had_failure
-                {
-                    Err(anyhow!("indexer exited unexpectedly"))
+                let context_state = self.context.lock().map_err(lock_err)?.state;
+                let had_failure = self.wasmstore.data().had_failure;
+
+                log::debug!(
+                    "WASM execution completed: context_state={}, had_failure={}",
+                    context_state,
+                    had_failure
+                );
+
+                if context_state != 1 && !had_failure {
+                    log::error!(
+                        "Indexer exited unexpectedly: context_state={}, had_failure={}",
+                        context_state,
+                        had_failure
+                    );
+                    // NEW BEHAVIOR: Crash the indexer instead of returning an error for retry
+                    std::process::exit(1);
                 } else {
+                    log::debug!(
+                        "Indexer completed successfully: context_state={}",
+                        context_state
+                    );
                     Ok(())
                 }
             }
-            Err(e) => Err(e).context("Error calling _start function"),
+            Err(e) => {
+                log::error!("Error calling _start function: {}", e);
+                // NEW BEHAVIOR: Crash the indexer instead of returning an error for retry
+                std::process::exit(1);
+            }
         };
 
-        // ALWAYS refresh memory after block execution for deterministic behavior
-        // This ensures no WASM state persists between blocks
-        if let Err(refresh_err) = self.refresh_memory() {
-            log::error!("Failed to refresh memory after block execution: {}", refresh_err);
-            // Return the refresh error as it's critical for deterministic execution
-            return Err(refresh_err).context("Memory refresh failed after block execution");
-        }
-
-        log::debug!("Memory refreshed after block execution for deterministic state isolation");
+        // NEW BEHAVIOR: Do NOT refresh memory after normal block execution
+        // Memory is now retained between blocks to enable persistent state
+        // LRU cache in metashrew-core prevents unbounded memory growth
+        log::debug!("Block execution completed, memory retained for persistent state");
         execution_result
     }
 
@@ -1077,6 +1190,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
+        Self::setup_linker_with_log_flag(context, linker, false)
+    }
+
+    pub fn setup_linker_with_log_flag(
+        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        linker: &mut Linker<State>,
+        disable_wasmtime_log: bool,
+    ) -> Result<()> {
         let context_ref_len = context.clone();
         let context_ref_input = context.clone();
 
@@ -1148,7 +1269,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .func_wrap(
                 "env",
                 "__log",
-                |mut caller: Caller<'_, State>, data_start: i32| {
+                move |mut caller: Caller<'_, State>, data_start: i32| {
+                    // Check the runtime flag to determine if logging should be disabled
+                    if disable_wasmtime_log {
+                        // Silently ignore WASM log calls when wasmtime logging is disabled
+                        return;
+                    }
+
                     let mem = match caller.get_export("memory") {
                         Some(export) => match export.into_memory() {
                             Some(memory) => memory,
@@ -1287,7 +1414,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use append-only store for historical queries in view functions
-                            match Self::get_value_at_height(context_get_len.clone(), &key_vec, height) {
+                            match Self::get_value_at_height(
+                                context_get_len.clone(),
+                                &key_vec,
+                                height,
+                            ) {
                                 Ok(value) => value.len() as i32,
                                 Err(_) => 0,
                             }
@@ -1311,12 +1442,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(MetashrewRuntimeContext::new(
-            db,
-            height,
-            vec![],
-            vec![],
-        )));
+        >::new(
+            MetashrewRuntimeContext::new(db, height, vec![], vec![]),
+        ));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -1330,7 +1458,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let instance = linker
             .instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
-        Ok(MetashrewRuntime {
+        let mut runtime = MetashrewRuntime {
             wasmstore,
             engine: engine.clone(),
             async_engine: engine,
@@ -1339,7 +1467,21 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
-        })
+            stateful_view_runtime: None,
+            disable_wasmtime_log: false,
+        };
+
+        // Enable stateful views by default for preview/internal runtimes too
+        log::debug!("Enabling stateful views by default for internal runtime");
+        if let Err(e) = runtime.enable_stateful_views_sync() {
+            log::warn!(
+                "Failed to enable stateful views for internal runtime: {}",
+                e
+            );
+            // Continue without stateful views if initialization fails
+        }
+
+        Ok(runtime)
     }
 
     async fn new_with_db_async(
@@ -1352,12 +1494,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let mut wasmstore = Store::<State>::new(&engine, State::new());
         let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
             MetashrewRuntimeContext<T>,
-        >::new(MetashrewRuntimeContext::new(
-            db,
-            height,
-            vec![],
-            vec![],
-        )));
+        >::new(
+            MetashrewRuntimeContext::new(db, height, vec![], vec![]),
+        ));
         {
             wasmstore.limiter(|state| &mut state.limits)
         }
@@ -1372,7 +1511,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .instantiate_async(&mut wasmstore, &module)
             .await
             .context("Failed to instantiate WASM module")?;
-        Ok(MetashrewRuntime {
+        let mut runtime = MetashrewRuntime {
             wasmstore,
             engine: engine.clone(),
             async_engine: engine,
@@ -1381,7 +1520,18 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             linker,
             context,
             instance,
-        })
+            stateful_view_runtime: None,
+            disable_wasmtime_log: false,
+        };
+
+        // Enable stateful views by default for async runtimes too
+        log::debug!("Enabling stateful views by default for async runtime");
+        if let Err(e) = runtime.enable_stateful_views().await {
+            log::warn!("Failed to enable stateful views for async runtime: {}", e);
+            // Continue without stateful views if initialization fails
+        }
+
+        Ok(runtime)
     }
 
     fn setup_linker_preview(
@@ -1440,18 +1590,20 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
                             ctx.state = 1;
-                            
+
                             // Use append-only store for preview operations with batching
                             let mut batch = ctx.db.create_batch();
                             let smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
-                            
+
                             // Write all operations to a single batch for atomicity
                             for (k, v) in decoded.list.iter().tuples() {
                                 let k_owned = <Vec<u8> as Clone>::clone(k);
                                 let v_owned = <Vec<u8> as Clone>::clone(v);
 
                                 // Add to batch using append-only logic
-                                if let Err(_) = smt_helper.put_to_batch(&mut batch, &k_owned, &v_owned, height) {
+                                if let Err(_) =
+                                    smt_helper.put_to_batch(&mut batch, &k_owned, &v_owned, height)
+                                {
                                     caller.data_mut().had_failure = true;
                                     return;
                                 }
@@ -1559,7 +1711,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use append-only store for preview queries
-                            match Self::get_value_at_height(context_get_len.clone(), &key_vec, height) {
+                            match Self::get_value_at_height(
+                                context_get_len.clone(),
+                                &key_vec,
+                                height,
+                            ) {
                                 Ok(value) => value.len() as i32,
                                 Err(_) => 0,
                             }
@@ -1593,7 +1749,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             return;
                         }
                     };
-
 
                     let mem = match caller.get_export("memory") {
                         Some(export) => match export.into_memory() {
@@ -1676,9 +1831,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 key_values.len(),
                                 hex::encode(state_root)
                             );
-                        },
+                        }
                         Err(e) => {
-                            log::error!("failed to calculate state root for height {}: {:?}", height, e);
+                            log::error!(
+                                "failed to calculate state root for height {}: {:?}",
+                                height,
+                                e
+                            );
                             caller.data_mut().had_failure = true;
                             return;
                         }
@@ -1703,13 +1862,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         }
                     }
 
-
                     // Set completion state
                     match context_ref.clone().lock() {
                         Ok(mut ctx) => {
+                            log::debug!("Host __flush function called, setting context state to 1");
                             ctx.state = 1;
                         }
                         Err(_) => {
+                            log::error!("Failed to lock context in __flush function");
                             caller.data_mut().had_failure = true;
                             return;
                         }
@@ -1759,7 +1919,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                             // Use get_value_at_height to get the value from the previous canonical state.
                             // This function correctly performs a binary search on the append-only data.
-                            match Self::get_value_at_height(context_get.clone(), &key_vec, target_height) {
+                            match Self::get_value_at_height(
+                                context_get.clone(),
+                                &key_vec,
+                                target_height,
+                            ) {
                                 Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1988,34 +2152,26 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             Ok(_) => {
                 let state_root = self.calculate_state_root()?;
                 let batch_data = self.get_accumulated_batch()?;
-                
+
                 // Log the state root for atomic block processing
                 log::info!(
                     "processed block {} atomically, state root: {}",
                     height,
                     hex::encode(&state_root)
                 );
-                
+
                 (state_root, batch_data)
             }
             Err(e) => {
-                // ALWAYS refresh memory even on execution failure for deterministic behavior
-                if let Err(refresh_err) = self.refresh_memory() {
-                    log::error!("Failed to refresh memory after failed atomic block execution: {}", refresh_err);
-                }
-                return Err(e);
+                // NEW BEHAVIOR: Crash the indexer instead of returning an error for retry
+                log::error!("Atomic block execution failed: {}", e);
+                std::process::exit(1);
             }
         };
 
-        // ALWAYS refresh memory after block execution for deterministic behavior
-        // This ensures no WASM state persists between blocks
-        if let Err(refresh_err) = self.refresh_memory() {
-            log::error!("Failed to refresh memory after atomic block execution: {}", refresh_err);
-            // Return the refresh error as it's critical for deterministic execution
-            return Err(refresh_err).context("Memory refresh failed after atomic block execution");
-        }
-
-        log::debug!("Memory refreshed after atomic block execution for deterministic state isolation");
+        // NEW BEHAVIOR: Do NOT refresh memory after atomic block execution
+        // Memory is now retained between blocks to enable persistent state
+        log::debug!("Atomic block execution completed, memory retained for persistent state");
 
         // Return the atomic result
         Ok(crate::traits::AtomicBlockResult {
@@ -2044,5 +2200,315 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     pub async fn get_state_root(&self, height: u32) -> Result<Vec<u8>> {
         let state_root = Self::get_state_root_at_height(self.context.clone(), height)?;
         Ok(state_root.to_vec())
+    }
+
+    /// Enable stateful view mode by creating a persistent WASM runtime
+    ///
+    /// This method initializes a stateful view runtime that retains WASM memory
+    /// and instance state between view function calls. Once enabled, all view
+    /// function calls will reuse the same WASM instance instead of creating
+    /// new ones, allowing for stateful operations.
+    ///
+    /// # Memory Management
+    ///
+    /// The WASM author is responsible for managing memory within their WASM module.
+    /// The runtime provides a persistent execution environment without automatic
+    /// memory cleanup between view calls.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the stateful runtime was successfully created,
+    /// or an error if initialization failed.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Enable stateful view mode
+    /// runtime.enable_stateful_views().await?;
+    ///
+    /// // Now all view calls will reuse the same WASM instance
+    /// let result1 = runtime.view("function1".to_string(), &input1, height).await?;
+    /// let result2 = runtime.view("function2".to_string(), &input2, height).await?;
+    /// // WASM memory state persists between these calls
+    /// ```
+    pub async fn enable_stateful_views(&mut self) -> Result<()> {
+        let db = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+
+        // Create the stateful view runtime
+        let stateful_runtime = StatefulViewRuntime::new(
+            db,
+            0, // Initial height, will be updated per view call
+            self.async_engine.clone(),
+            self.async_module.clone(),
+        )
+        .await?;
+
+        self.stateful_view_runtime = Some(stateful_runtime);
+        log::info!("Stateful view mode enabled - WASM memory will persist between view calls");
+        Ok(())
+    }
+
+    /// Enable stateful view mode synchronously (used during initialization)
+    ///
+    /// This is a synchronous version of `enable_stateful_views` that can be called
+    /// during runtime initialization. It uses `tokio::task::block_in_place` to
+    /// handle the async operations within a sync context.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` if the stateful runtime was successfully created,
+    /// or an error if initialization failed.
+    pub fn enable_stateful_views_sync(&mut self) -> Result<()> {
+        let db = {
+            let guard = self.context.lock().map_err(lock_err)?;
+            guard.db.clone()
+        };
+
+        // Use block_in_place to handle async operations in sync context
+        let stateful_runtime = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                StatefulViewRuntime::new(
+                    db,
+                    0, // Initial height, will be updated per view call
+                    self.async_engine.clone(),
+                    self.async_module.clone(),
+                )
+                .await
+            })
+        })?;
+
+        self.stateful_view_runtime = Some(stateful_runtime);
+        log::info!("Stateful view mode enabled synchronously - WASM memory will persist between view calls");
+        Ok(())
+    }
+
+    /// Disable stateful view mode and return to creating new instances per call
+    ///
+    /// This method removes the stateful view runtime, causing subsequent view
+    /// function calls to create fresh WASM instances with clean memory state.
+    /// This is the default behavior.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Disable stateful view mode
+    /// runtime.disable_stateful_views();
+    ///
+    /// // Now view calls will create fresh WASM instances
+    /// let result = runtime.view("function".to_string(), &input, height).await?;
+    /// ```
+    pub fn disable_stateful_views(&mut self) {
+        self.stateful_view_runtime = None;
+        log::info!("Stateful view mode disabled - view calls will create fresh WASM instances");
+    }
+
+    /// Check if stateful view mode is currently enabled
+    ///
+    /// # Returns
+    ///
+    /// `true` if stateful view mode is enabled, `false` otherwise.
+    pub fn is_stateful_views_enabled(&self) -> bool {
+        self.stateful_view_runtime.is_some()
+    }
+
+    /// Set the disable wasmtime log flag
+    ///
+    /// When set to true, the __log host function will silently ignore all WASM log calls.
+    /// This provides the same behavior as the old --features logs flag but controlled
+    /// at runtime instead of compile time.
+    ///
+    /// # Parameters
+    ///
+    /// - `disable`: Whether to disable WASM logging
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Disable WASM logging
+    /// runtime.set_disable_wasmtime_log(true);
+    /// ```
+    pub fn set_disable_wasmtime_log(&mut self, disable: bool) {
+        self.disable_wasmtime_log = disable;
+        if disable {
+            log::info!("WASM __log host function disabled - WASM log calls will be silently ignored");
+        } else {
+            log::info!("WASM __log host function enabled - WASM log calls will be processed");
+        }
+        
+        // Rebuild the linker and instance with the new log setting
+        if let Err(e) = self.rebuild_linker_with_log_setting() {
+            log::error!("Failed to rebuild linker with new log setting: {}", e);
+        }
+    }
+
+    /// Rebuild the linker and instance with the current log setting
+    fn rebuild_linker_with_log_setting(&mut self) -> Result<()> {
+        let mut linker = Linker::<State>::new(&self.engine);
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        
+        wasmstore.limiter(|state| &mut state.limits);
+        
+        Self::setup_linker_with_log_flag(self.context.clone(), &mut linker, self.disable_wasmtime_log)
+            .context("Failed to setup basic linker with log flag")?;
+        Self::setup_linker_indexer(self.context.clone(), &mut linker)
+            .context("Failed to setup indexer linker")?;
+        linker.define_unknown_imports_as_traps(&self.module)?;
+        
+        let instance = linker
+            .instantiate(&mut wasmstore, &self.module)
+            .context("Failed to instantiate WASM module with new log setting")?;
+        
+        self.linker = linker;
+        self.wasmstore = wasmstore;
+        self.instance = instance;
+        
+        Ok(())
+    }
+
+    /// Check if WASM logging is disabled
+    ///
+    /// # Returns
+    ///
+    /// `true` if WASM logging is disabled, `false` otherwise.
+    pub fn is_wasmtime_log_disabled(&self) -> bool {
+        self.disable_wasmtime_log
+    }
+
+    /// Execute a view function using the stateful runtime
+    ///
+    /// This method executes a view function using the persistent WASM runtime,
+    /// maintaining memory state between calls. It updates the context for the
+    /// current call but preserves WASM memory across invocations.
+    ///
+    /// # Parameters
+    ///
+    /// - `stateful_runtime`: Reference to the stateful view runtime
+    /// - `symbol`: Name of the view function to execute
+    /// - `input`: Input data for the view function
+    /// - `height`: Block height for the query context
+    ///
+    /// # Returns
+    ///
+    /// The result of the view function execution as raw bytes
+    async fn view_stateful(
+        &self,
+        stateful_runtime: &StatefulViewRuntime<T>,
+        symbol: String,
+        input: &Vec<u8>,
+        height: u32,
+    ) -> Result<Vec<u8>> {
+        // Update the context for this view call
+        {
+            let mut guard = stateful_runtime.context.lock().map_err(lock_err)?;
+            guard.block = input.clone();
+            guard.height = height;
+
+            // Update the database reference to ensure we're using the current state
+            let current_db = {
+                let main_guard = self.context.lock().map_err(lock_err)?;
+                main_guard.db.clone()
+            };
+            guard.db = current_db;
+        }
+
+        // Execute the view function using the stateful runtime
+        let mut wasmstore_guard = stateful_runtime.wasmstore.lock().await;
+
+        // Set fuel for cooperative yielding
+        wasmstore_guard.set_fuel(u64::MAX)?;
+        wasmstore_guard.fuel_async_yield_interval(Some(10000))?;
+
+        // Get the view function
+        let func = stateful_runtime
+            .instance
+            .get_typed_func::<(), i32>(&mut *wasmstore_guard, symbol.as_str())
+            .with_context(|| {
+                format!("Failed to get view function '{}' in stateful mode", symbol)
+            })?;
+
+        // Execute the function asynchronously
+        let result = func
+            .call_async(&mut *wasmstore_guard, ())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to execute view function '{}' in stateful mode",
+                    symbol
+                )
+            })?;
+
+        // Get the memory to read the result
+        let memory = stateful_runtime
+            .instance
+            .get_memory(&mut *wasmstore_guard, "memory")
+            .ok_or_else(|| anyhow!("Failed to get memory for stateful view result"))?;
+
+        // Read the result from WASM memory
+        let result_data = read_arraybuffer_as_vec(memory.data(&*wasmstore_guard), result);
+
+        log::debug!(
+            "Executed view function '{}' in stateful mode, memory state preserved",
+            symbol
+        );
+        Ok(result_data)
+    }
+}
+
+impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> StatefulViewRuntime<T> {
+    /// Create a new stateful view runtime
+    ///
+    /// This initializes a persistent WASM execution environment that can be
+    /// reused across multiple view function calls, maintaining memory state.
+    ///
+    /// # Parameters
+    ///
+    /// - `db`: Database backend for view operations
+    /// - `height`: Initial block height (updated per view call)
+    /// - `engine`: Async WASM engine for execution
+    /// - `module`: Compiled WASM module to instantiate
+    ///
+    /// # Returns
+    ///
+    /// A new stateful view runtime ready for persistent execution
+    pub async fn new(
+        db: T,
+        height: u32,
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+    ) -> Result<Self> {
+        let mut linker = Linker::<State>::new(&engine);
+        let mut wasmstore = Store::<State>::new(&engine, State::new());
+
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+            MetashrewRuntimeContext<T>,
+        >::new(
+            MetashrewRuntimeContext::new(db, height, vec![], vec![]),
+        ));
+
+        // Set up store limits
+        wasmstore.limiter(|state| &mut state.limits);
+
+        // Set up host functions for view operations
+        MetashrewRuntime::<T>::setup_linker(context.clone(), &mut linker)
+            .context("Failed to setup basic linker for stateful view")?;
+        MetashrewRuntime::<T>::setup_linker_view(context.clone(), &mut linker)
+            .context("Failed to setup view linker for stateful view")?;
+        linker.define_unknown_imports_as_traps(&module)?;
+
+        // Instantiate the WASM module
+        let instance = linker
+            .instantiate_async(&mut wasmstore, &module)
+            .await
+            .context("Failed to instantiate WASM module for stateful view")?;
+
+        Ok(StatefulViewRuntime {
+            wasmstore: Arc::new(tokio::sync::Mutex::new(wasmstore)),
+            instance,
+            linker,
+            context,
+        })
     }
 }

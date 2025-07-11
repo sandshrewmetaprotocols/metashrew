@@ -8,7 +8,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use hex;
-use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
+use metashrew_runtime::{
+    KeyValueStoreLike, MetashrewRuntime, ViewPoolConfig, ViewPoolStats, ViewPoolSupport,
+    ViewRuntimePool,
+};
 use metashrew_sync::{
     AtomicBlockResult, BitcoinNodeAdapter, BlockInfo, ChainTip, PreviewCall, RuntimeAdapter,
     RuntimeStats, SyncError, SyncResult, ViewCall, ViewResult,
@@ -113,7 +116,12 @@ impl BitcoinRpcAdapter {
                     return Ok(tunneled_response);
                 }
                 Err(e) => {
-                    log::warn!("Request failed (attempt {}): {}. Retrying in {:?}...", attempt + 1, e, retry_delay);
+                    log::warn!(
+                        "Request failed (attempt {}): {}. Retrying in {:?}...",
+                        attempt + 1,
+                        e,
+                        retry_delay
+                    );
                     if let Some(guard) = &mut active_tunnel_guard {
                         **guard = None;
                     }
@@ -222,9 +230,13 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 }
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime and is snapshot-aware.
+/// Now includes a parallelized view pool for concurrent view execution.
+#[derive(Clone)]
 pub struct MetashrewRuntimeAdapter {
     runtime: Arc<RwLock<MetashrewRuntime<RocksDBKeyValueAdapter>>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
+    view_pool: Arc<RwLock<Option<ViewRuntimePool<RocksDBKeyValueAdapter>>>>,
+    disable_lru_cache: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MetashrewRuntimeAdapter {
@@ -232,15 +244,74 @@ impl MetashrewRuntimeAdapter {
         Self {
             runtime,
             snapshot_manager: Arc::new(RwLock::new(None)),
+            view_pool: Arc::new(RwLock::new(None)),
+            disable_lru_cache: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    pub async fn set_snapshot_manager(&self, manager: Arc<RwLock<crate::snapshot::SnapshotManager>>) {
+    /// Initialize the view pool with the specified configuration
+    pub async fn initialize_view_pool(&self, config: ViewPoolConfig) -> Result<()> {
+        let runtime = self.runtime.read().await;
+        let pool = runtime
+            .create_view_pool(config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create view pool: {}", e))?;
+
+        let mut view_pool_guard = self.view_pool.write().await;
+        *view_pool_guard = Some(pool);
+
+        log::info!("View pool initialized successfully");
+        Ok(())
+    }
+
+    /// Get view pool statistics for monitoring
+    pub async fn get_view_pool_stats(&self) -> Option<ViewPoolStats> {
+        if let Some(pool) = self.view_pool.read().await.as_ref() {
+            Some(pool.get_stats().await)
+        } else {
+            None
+        }
+    }
+
+    /// Disable stateful views to use non-stateful async wasmtime
+    pub async fn disable_stateful_views(&self) {
+        let mut runtime = self.runtime.write().await;
+        runtime.disable_stateful_views();
+        log::info!("Stateful views disabled - will use non-stateful async wasmtime");
+    }
+
+    /// Check if stateful views are enabled
+    pub async fn is_stateful_views_enabled(&self) -> bool {
+        let runtime = self.runtime.read().await;
+        runtime.is_stateful_views_enabled()
+    }
+
+    /// Set the disable LRU cache flag
+    pub fn set_disable_lru_cache(&self, disable: bool) {
+        self.disable_lru_cache.store(disable, std::sync::atomic::Ordering::SeqCst);
+        if disable {
+            log::info!("LRU cache disabled - will refresh memory for each WASM invocation");
+        } else {
+            log::info!("LRU cache enabled - memory will persist between blocks");
+        }
+    }
+
+    /// Check if LRU cache is disabled
+    pub fn is_lru_cache_disabled(&self) -> bool {
+        self.disable_lru_cache.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub async fn set_snapshot_manager(
+        &self,
+        manager: Arc<RwLock<crate::snapshot::SnapshotManager>>,
+    ) {
         let mut snapshot_manager = self.snapshot_manager.write().await;
         *snapshot_manager = Some(manager);
     }
 
-    pub async fn get_snapshot_manager(&self) -> Option<Arc<RwLock<crate::snapshot::SnapshotManager>>> {
+    pub async fn get_snapshot_manager(
+        &self,
+    ) -> Option<Arc<RwLock<crate::snapshot::SnapshotManager>>> {
         self.snapshot_manager.read().await.as_ref().cloned()
     }
 }
@@ -285,6 +356,14 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
                     .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
                 context.db.set_kv_tracker(None);
             }
+            
+            // Refresh memory after each block if LRU cache is disabled
+            if self.is_lru_cache_disabled() {
+                log::debug!("Refreshing WASM memory after block {} (LRU cache disabled)", height);
+                runtime
+                    .refresh_memory()
+                    .map_err(|e| SyncError::Runtime(format!("Failed to refresh memory after block: {}", e)))?;
+            }
         } else {
             let mut runtime = self.runtime.write().await;
             {
@@ -299,6 +378,14 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
             runtime
                 .run()
                 .map_err(|e| SyncError::Runtime(format!("Runtime execution failed: {}", e)))?;
+            
+            // Refresh memory after each block if LRU cache is disabled
+            if self.is_lru_cache_disabled() {
+                log::debug!("Refreshing WASM memory after block {} (LRU cache disabled)", height);
+                runtime
+                    .refresh_memory()
+                    .map_err(|e| SyncError::Runtime(format!("Failed to refresh memory after block: {}", e)))?;
+            }
         }
         Ok(())
     }
@@ -340,12 +427,26 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.read().await;
-        let result = runtime
-            .view(call.function_name, &call.input_data, call.height)
-            .await
-            .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
-        Ok(ViewResult { data: result })
+        // Try to use view pool first if available
+        if let Some(pool) = self.view_pool.read().await.as_ref() {
+            log::debug!("Using view pool for function: {}", call.function_name);
+            let result = pool
+                .view(call.function_name, &call.input_data, call.height)
+                .await
+                .map_err(|e| {
+                    SyncError::ViewFunction(format!("View pool execution failed: {}", e))
+                })?;
+            Ok(ViewResult { data: result })
+        } else {
+            // Fallback to direct runtime execution
+            log::debug!("Using direct runtime for function: {}", call.function_name);
+            let runtime = self.runtime.read().await;
+            let result = runtime
+                .view(call.function_name, &call.input_data, call.height)
+                .await
+                .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
+            Ok(ViewResult { data: result })
+        }
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
@@ -363,6 +464,11 @@ impl RuntimeAdapter for MetashrewRuntimeAdapter {
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {
+        log::info!("Memory refresh requested (typically during chain reorganization)");
+        let mut runtime = self.runtime.write().await;
+        runtime
+            .refresh_memory()
+            .map_err(|e| SyncError::Runtime(format!("Failed to refresh runtime memory: {}", e)))?;
         Ok(())
     }
 

@@ -1,9 +1,7 @@
 //! In-memory adapters for comprehensive e2e testing
 use async_trait::async_trait;
-use bitcoin::{Block, hashes::Hash};
-use metashrew_sync::{
-    BitcoinNodeAdapter, BlockInfo, ChainTip, SyncError, SyncResult,
-};
+use bitcoin::{hashes::Hash, Block};
+use metashrew_sync::{BitcoinNodeAdapter, BlockInfo, ChainTip, SyncError, SyncResult};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -67,7 +65,9 @@ impl BitcoinNodeAdapter for InMemoryBitcoinNode {
             .unwrap()
             .get(&height)
             .cloned()
-            .ok_or_else(|| SyncError::BitcoinNode(format!("Block not found at height {}", height)))?;
+            .ok_or_else(|| {
+                SyncError::BitcoinNode(format!("Block not found at height {}", height))
+            })?;
         Ok(BlockInfo {
             height,
             hash: block.block_hash().as_byte_array().to_vec(),

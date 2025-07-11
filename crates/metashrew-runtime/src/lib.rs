@@ -10,16 +10,20 @@ pub mod proto;
 pub mod runtime;
 pub mod smt;
 pub mod traits;
+pub mod view_pool;
 
+#[cfg(test)]
+pub mod tests;
 
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;
-pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
+pub use runtime::{MetashrewRuntime, State, StatefulViewRuntime, TIP_HEIGHT_KEY};
 pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
+pub use view_pool::{ViewPoolConfig, ViewPoolStats, ViewPoolSupport, ViewRuntimePool};
 
 // Re-export helper types
-pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
 pub use key_utils::decode_historical_key;
+pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
 
 // Utility functions that are storage-backend agnostic
 static mut _LABEL: Option<String> = None;

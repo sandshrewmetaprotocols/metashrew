@@ -13,7 +13,7 @@ futures = "0.3.31"
 env_logger = "0.11.6"
 hex = "0.4.3"
 anyhow = "1.0.95"
-bitcoin = { version = "0.32.5", features = ["serde", "rand"] }
+bitcoin = { version = "0.32.6", features = ["serde", "rand"] }
 log = "0.4.25"
 actix-cors = "0.7.0"
 serde = { version = "1.0.217", features = ["derive"] }

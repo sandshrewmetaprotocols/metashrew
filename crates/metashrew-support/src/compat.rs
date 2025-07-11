@@ -1,168 +1,114 @@
-//! # WASM Compatibility and Memory Management Utilities
-//!
-//! This module provides essential utilities for WebAssembly (WASM) host-guest communication
-//! and memory management. These functions handle the low-level details of passing data
-//! between the Metashrew runtime (host) and WASM indexer modules (guest), ensuring
-//! safe and efficient memory operations across the WASM boundary.
-//!
-//! ## Core Concepts
-//!
-//! ### WASM Memory Layout
-//! WASM modules use linear memory that must be carefully managed when passing data
-//! between host and guest. This module implements the ArrayBuffer layout convention:
-//! - **Length prefix**: 4-byte little-endian length at the beginning
-//! - **Data payload**: Actual data following the length prefix
-//! - **Pointer arithmetic**: Safe conversion between Rust pointers and WASM addresses
-//!
-//! ### Memory Safety
-//! All functions in this module handle the unsafe aspects of WASM memory management:
-//! - **Pointer conversion**: Safe casting between Rust and WASM address spaces
-//! - **Memory layout**: Consistent data structure layout across boundaries
-//! - **Lifetime management**: Proper handling of memory ownership transfer
-//!
-//! ## Usage Examples
-//!
-//! ```rust,ignore
-//! use metashrew_support::compat::*;
-//!
-//! // Prepare data for export to WASM
-//! let data = vec![1, 2, 3, 4, 5];
-//! let wasm_ptr = export_bytes(data);
-//!
-//! // Convert data to ArrayBuffer layout
-//! let buffer = to_arraybuffer_layout(&[1, 2, 3]);
-//! // Result: [3, 0, 0, 0, 1, 2, 3] (length + data)
-//!
-//! // Get pointer for passing to WASM
-//! let mut data = vec![1, 2, 3];
-//! let ptr = to_ptr(&mut data);
-//! ```
-//!
-//! ## Integration with Metashrew
-//!
-//! These utilities are fundamental to Metashrew's WASM execution model:
-//! - **Host functions**: Passing data from runtime to WASM modules
-//! - **Return values**: Getting results back from WASM indexer functions
-//! - **Memory management**: Safe handling of dynamic data across boundaries
+use crate::byte_view::ByteView;
+use bitcoin::p2p::address::Address;
+use bitcoin::p2p::message_network::VersionMessage;
+use bitcoin::p2p::ServiceFlags;
+use prost::Message;
+use rlp::{Decodable as RlpDecodable, Encodable as RlpEncodable, RlpStream};
+use std::io::Cursor;
+use std::net::SocketAddr;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Convert a mutable vector reference to a WASM-compatible pointer.
-///
-/// This function extracts the raw pointer from a Rust vector and converts it
-/// to a 32-bit integer suitable for use in WASM linear memory addressing.
-/// The pointer points directly to the vector's data buffer.
-///
-/// # Parameters
-/// - `v`: Mutable reference to the vector to get pointer for
-///
-/// # Returns
-/// 32-bit integer representing the WASM memory address of the vector data
-///
-/// # Safety
-/// The returned pointer is only valid as long as the vector remains alive
-/// and is not reallocated. The caller must ensure proper lifetime management.
-///
-/// # Usage
-/// This function is typically used when passing vector data to WASM functions
-/// that expect raw memory pointers.
-pub fn to_ptr(v: &mut Vec<u8>) -> i32 {
-    return v.as_mut_ptr() as usize as i32;
+#[cfg(target_arch = "wasm32")]
+use metashrew_println::wasm::{to_arraybuffer_layout, to_passback_ptr};
+
+#[derive(Message)]
+pub struct EncodableVersionMessage {
+    #[prost(uint32, tag = "1")]
+    pub version: u32,
+    #[prost(uint64, tag = "2")]
+    pub services: u64,
+    #[prost(int64, tag = "3")]
+    pub timestamp: i64,
+    #[prost(message, optional, tag = "4")]
+    pub receiver: Option<EncodableAddress>,
+    #[prost(message, optional, tag = "5")]
+    pub sender: Option<EncodableAddress>,
+    #[prost(uint64, tag = "6")]
+    pub nonce: u64,
+    #[prost(string, tag = "7")]
+    pub user_agent: String,
+    #[prost(int32, tag = "8")]
+    pub start_height: i32,
+    #[prost(bool, tag = "9")]
+    pub relay: bool,
 }
 
-/// Convert a mutable vector reference to a passback pointer.
-///
-/// This function creates a pointer that points 4 bytes past the start of the
-/// vector data, skipping over the length prefix in ArrayBuffer layout. This
-/// is used when the WASM module expects to receive data without the length
-/// prefix.
-///
-/// # Parameters
-/// - `v`: Mutable reference to the vector to get passback pointer for
-///
-/// # Returns
-/// 32-bit integer representing the WASM memory address 4 bytes into the vector
-///
-/// # ArrayBuffer Layout
-/// When data is stored in ArrayBuffer layout:
-/// - Bytes 0-3: Length as little-endian u32
-/// - Bytes 4+: Actual data payload
-/// 
-/// This function returns a pointer to the data payload, skipping the length.
-pub fn to_passback_ptr(v: &mut Vec<u8>) -> i32 {
-    to_ptr(v) + 4
+#[derive(Message)]
+pub struct EncodableAddress {
+    #[prost(uint64, tag = "1")]
+    pub services: u64,
+    #[prost(bytes, tag = "2")]
+    pub address: Vec<u8>,
+    #[prost(uint32, tag = "3")]
+    pub port: u32,
 }
 
-/// Convert data to ArrayBuffer layout with length prefix.
-///
-/// This function creates a new vector that follows the ArrayBuffer convention
-/// used in WASM communication. The resulting vector contains a 4-byte
-/// little-endian length prefix followed by the original data.
-///
-/// # Type Parameters
-/// - `T`: Type that can be converted to a byte slice reference
-///
-/// # Parameters
-/// - `v`: Data to convert to ArrayBuffer layout
-///
-/// # Returns
-/// New vector containing length prefix followed by data
-///
-/// # Layout
-/// The returned vector has the following structure:
-/// ```text
-/// [length_byte_0, length_byte_1, length_byte_2, length_byte_3, data_byte_0, data_byte_1, ...]
-/// ```
-/// Where the length is stored in little-endian format.
-///
-/// # Examples
-/// ```rust,ignore
-/// use metashrew_support::compat::to_arraybuffer_layout;
-///
-/// let data = vec![0x41, 0x42, 0x43]; // "ABC"
-/// let buffer = to_arraybuffer_layout(&data);
-/// // Result: [3, 0, 0, 0, 0x41, 0x42, 0x43]
-/// //         ^length=3^  ^---data---^
-/// ```
-pub fn to_arraybuffer_layout<T: AsRef<[u8]>>(v: T) -> Vec<u8> {
+#[cfg(target_arch = "wasm32")]
+pub fn to_arraybuffer_layout_for_wasm<T: AsRef<[u8]>>(v: T) -> Vec<u8> {
+    let response: Vec<u8> = to_arraybuffer_layout(&v);
+    response
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn to_arraybuffer_layout_for_wasm<T: AsRef<[u8]>>(v: T) -> Vec<u8> {
     let mut buffer = Vec::<u8>::new();
     buffer.extend_from_slice(&(v.as_ref().len() as u32).to_le_bytes());
     buffer.extend_from_slice(v.as_ref());
     return buffer;
 }
 
-/// Export bytes to WASM memory with ArrayBuffer layout and return pointer.
-///
-/// This function is the primary interface for returning data from host functions
-/// to WASM modules. It converts the input data to ArrayBuffer layout, allocates
-/// it in WASM-accessible memory, and returns a pointer that the WASM module
-/// can use to access the data.
-///
-/// # Parameters
-/// - `v`: Vector of bytes to export to WASM memory
-///
-/// # Returns
-/// 32-bit integer pointer to the data in WASM memory (pointing past length prefix)
-///
-/// # Memory Management
-/// This function uses `Box::leak()` to transfer ownership of the data to the
-/// WASM memory space. The caller (typically the WASM module) becomes responsible
-/// for the memory's lifetime. The returned pointer points to the data payload,
-/// not the length prefix.
-///
-/// # Usage Pattern
-/// This function is typically used in host function implementations:
-/// ```rust,ignore
-/// // In a host function that returns data to WASM
-/// fn host_function() -> i32 {
-///     let result_data = vec![1, 2, 3, 4];
-///     export_bytes(result_data) // Returns pointer for WASM
-/// }
-/// ```
-///
-/// # Memory Layout
-/// The allocated memory has ArrayBuffer layout:
-/// - Bytes -4 to -1: Length as little-endian u32
-/// - Bytes 0+: Data payload (returned pointer points here)
-pub fn export_bytes(v: Vec<u8>) -> i32 {
-    let response: Vec<u8> = to_arraybuffer_layout(&v);
-    Box::leak(Box::new(response)).as_mut_ptr() as usize as i32 + 4
+impl From<VersionMessage> for EncodableVersionMessage {
+    fn from(v: VersionMessage) -> Self {
+        Self {
+            version: v.version,
+            services: v.services.to_u64(),
+            timestamp: v.timestamp,
+            receiver: Some(v.receiver.into()),
+            sender: Some(v.sender.into()),
+            nonce: v.nonce,
+            user_agent: v.user_agent,
+            start_height: v.start_height,
+            relay: v.relay,
+        }
+    }
+}
+
+impl From<Address> for EncodableAddress {
+    fn from(a: Address) -> Self {
+        Self {
+            services: a.services.to_u64(),
+            address: a.address.iter().flat_map(|&x| x.to_be_bytes()).collect(),
+            port: a.port as u32,
+        }
+    }
+}
+
+impl From<EncodableVersionMessage> for VersionMessage {
+    fn from(v: EncodableVersionMessage) -> Self {
+        Self {
+            version: v.version,
+            services: ServiceFlags::from(v.services),
+            timestamp: v.timestamp,
+            receiver: v.receiver.unwrap().into(),
+            sender: v.sender.unwrap().into(),
+            nonce: v.nonce,
+            user_agent: v.user_agent,
+            start_height: v.start_height,
+            relay: v.relay,
+        }
+    }
+}
+
+impl From<EncodableAddress> for Address {
+    fn from(a: EncodableAddress) -> Self {
+        let mut address: [u16; 8] = [0; 8];
+        for (i, chunk) in a.address.chunks(2).enumerate() {
+            address[i] = u16::from_be_bytes([chunk[0], chunk[1]]);
+        }
+        Self {
+            services: ServiceFlags::from(a.services),
+            address,
+            port: a.port as u16,
+        }
+    }
 }

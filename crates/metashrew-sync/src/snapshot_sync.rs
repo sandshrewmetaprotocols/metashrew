@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
@@ -466,11 +466,7 @@ where
             snapshots_applied: self.snapshots_applied.load(Ordering::SeqCst),
             last_snapshot_height: {
                 let height = self.last_snapshot_height.load(Ordering::SeqCst);
-                if height > 0 {
-                    Some(height)
-                } else {
-                    None
-                }
+                if height > 0 { Some(height) } else { None }
             },
             blocks_synced_normally: self.blocks_synced_normally.load(Ordering::SeqCst),
             blocks_synced_from_snapshots: self.blocks_synced_from_snapshots.load(Ordering::SeqCst),
@@ -516,7 +512,8 @@ where
         }
 
         let block_data = self.node.get_block_data(height).await?;
-        self.process_block_with_snapshots(height, block_data).await?;
+        self.process_block_with_snapshots(height, block_data)
+            .await?;
         Ok(Some(height + 1))
     }
 }
@@ -605,7 +602,6 @@ where
         let block_data = self.node.get_block_data(height).await?;
         self.process_block_with_snapshots(height, block_data).await
     }
-
 }
 
 fn parse_height_string(height_str: &str) -> SyncResult<u32> {
@@ -758,19 +754,23 @@ where
 mod tests {
     use super::*;
     use crate::{
-        mock::{MockBitcoinNode, MockRuntime, MockStorage},
         SyncConfig,
+        mock::{MockBitcoinNode, MockRuntime, MockStorage},
     };
 
     #[tokio::test]
     async fn test_metashrew_prefixroot() {
         let node = MockBitcoinNode::new();
         let storage = MockStorage::new();
-        let mut runtime = MockRuntime::new();
+        let runtime = MockRuntime::new();
 
         let prefix_name = "test_prefix".to_string();
         let expected_root = [1; 32];
-        runtime.prefix_roots.lock().await.insert(prefix_name.clone(), expected_root.clone());
+        runtime
+            .prefix_roots
+            .lock()
+            .await
+            .insert(prefix_name.clone(), expected_root.clone());
 
         let sync_engine = SnapshotMetashrewSync::new(
             node,

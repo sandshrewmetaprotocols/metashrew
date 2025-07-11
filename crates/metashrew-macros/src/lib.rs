@@ -281,7 +281,7 @@ pub fn view(_attr: TokenStream, item: TokenStream) -> TokenStream {
             // Clear view height and immediate cache
             metashrew_core::clear_view_cache();
 
-            metashrew_support::compat::export_bytes(result)
+            metashrew_core::export_bytes(result)
         }
     };
 

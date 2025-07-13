@@ -14,6 +14,7 @@ rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 metashrew-sync = { path = "crates/metashrew-sync" }
 memshrew-runtime = { path = "crates/memshrew" }
 metashrew-println = { path = "crates/metashrew-println" }
+getrandom = { version = "0.2", features = ["js"] }
 
 # Root package for running tests
 [package]

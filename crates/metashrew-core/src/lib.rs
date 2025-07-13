@@ -596,14 +596,15 @@ pub fn initialize() -> () {
 
     // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
     // This must happen before any other memory allocations to guarantee
+    
     // consistent memory layout for WASM execution in indexer mode
-    allocator::ensure_preallocated_memory();
+    // allocator::ensure_preallocated_memory();
 
     // Enable the preallocated allocator for deterministic memory layout
-    allocator::enable_preallocated_allocator();
-    println!(
-        "INFO: Enabled preallocated allocator for deterministic memory layout (indexer mode)"
-    );
+    // allocator::enable_preallocated_allocator();
+    // println!(
+    //     "INFO: Enabled preallocated allocator for deterministic memory layout (indexer mode)"
+    // );
 
     unsafe {
         if CACHE.is_none() {

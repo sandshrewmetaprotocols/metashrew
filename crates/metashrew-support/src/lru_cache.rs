@@ -728,13 +728,6 @@ pub fn initialize_lru_cache() {
                         .build();
                     
                     *cache = Some(new_cache);
-=======
-                    println!(
-                        "DEBUG: Creating LruCache::new with safe_memory_limit={} bytes ({} MB)",
-                        safe_memory_limit,
-                        safe_memory_limit / (1024 * 1024)
-                    );
-                    *cache = Some(LruCache::new(safe_memory_limit)); // All memory to main cache
                 }
             }
 

@@ -125,13 +125,6 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
             // CRITICAL: Set cache allocation mode to Indexer (all memory to main LRU cache)
             metashrew_core::set_cache_mode(metashrew_support::CacheAllocationMode::Indexer);
             
-            // CRITICAL: Ensure preallocated memory is set up for deterministic memory layout (only if allocator feature enabled)
-            #[cfg(feature = "allocator")]
-            metashrew_core::allocator::ensure_preallocated_memory();
-            
-            // CRITICAL: Enable the preallocated allocator for deterministic execution (only if allocator feature enabled)
-            #[cfg(feature = "allocator")]
-            metashrew_core::allocator::enable_preallocated_allocator();
 
             let mut host_input = std::io::Cursor::new(metashrew_core::input());
             let height = metashrew_support::utils::consume_sized_int::<u32>(&mut host_input)
@@ -264,13 +257,6 @@ pub fn view(_attr: TokenStream, item: TokenStream) -> TokenStream {
             // CRITICAL: Set cache allocation mode to View (memory split between height-partitioned and API caches)
             metashrew_core::set_cache_mode(metashrew_support::CacheAllocationMode::View);
             
-            // CRITICAL: Ensure preallocated memory is set up for deterministic memory layout (only if allocator feature enabled)
-            #[cfg(feature = "allocator")]
-            metashrew_core::allocator::ensure_preallocated_memory();
-            
-            // CRITICAL: Enable the preallocated allocator for deterministic execution (only if allocator feature enabled)
-            #[cfg(feature = "allocator")]
-            metashrew_core::allocator::enable_preallocated_allocator();
 
             let mut host_input = std::io::Cursor::new(metashrew_core::input());
             let height = metashrew_support::utils::consume_sized_int::<u32>(&mut host_input)

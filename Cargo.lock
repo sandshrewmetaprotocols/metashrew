@@ -3178,6 +3178,7 @@ dependencies = [
  "bitcoin 0.32.6",
  "bytes",
  "cfg-if",
+ "getrandom 0.2.16",
  "hex",
  "metashrew-macros",
  "metashrew-println",

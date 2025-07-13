@@ -501,10 +501,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             metashrew_support::lru_cache::CacheAllocationMode::Indexer
         );
         
-        // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode and if allocator feature enabled)
+        // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)
         // This must happen before any WASM engine configuration to guarantee
         // consistent memory layout for deterministic execution
-        #[cfg(feature = "allocator")]
         metashrew_core::allocator::ensure_preallocated_memory();
         
         // Configure the engine with settings for deterministic execution

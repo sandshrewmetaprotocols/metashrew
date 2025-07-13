@@ -10,10 +10,13 @@ use metashrew_support::lru_cache::{
     get_lru_cache, get_total_memory_usage, initialize_lru_cache, is_lru_cache_initialized,
     set_lru_cache,
 };
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex};
+
+static TEST_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 #[tokio::test]
 async fn test_lru_cache_initialization() -> Result<()> {
+    let _guard = TEST_MUTEX.lock().unwrap();
     // Clear any existing state
     clear_lru_cache();
 
@@ -33,6 +36,7 @@ async fn test_lru_cache_initialization() -> Result<()> {
 
 #[tokio::test]
 async fn test_lru_cache_persistence() -> Result<()> {
+    let _guard = TEST_MUTEX.lock().unwrap();
     clear_lru_cache();
     initialize_lru_cache();
 
@@ -54,6 +58,7 @@ async fn test_lru_cache_persistence() -> Result<()> {
 
 #[tokio::test]
 async fn test_api_cache_functionality() -> Result<()> {
+    let _guard = TEST_MUTEX.lock().unwrap();
     clear_lru_cache();
     initialize_lru_cache();
 
@@ -106,6 +111,7 @@ async fn test_api_cache_functionality() -> Result<()> {
 
 #[tokio::test]
 async fn test_cache_stats_accuracy() -> Result<()> {
+    let _guard = TEST_MUTEX.lock().unwrap();
     clear_lru_cache();
     initialize_lru_cache();
 
@@ -132,6 +138,7 @@ async fn test_cache_stats_accuracy() -> Result<()> {
 
 #[tokio::test]
 async fn test_clear_functionality() -> Result<()> {
+    let _guard = TEST_MUTEX.lock().unwrap();
     clear_lru_cache();
     initialize_lru_cache();
 

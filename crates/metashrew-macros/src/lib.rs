@@ -260,6 +260,7 @@ pub fn view(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[cfg(not(test))]
         #[no_mangle]
         pub fn #original_fn_name() -> i32 {
+            use metashrew_core;
             // CRITICAL: Set cache allocation mode to View (memory split between height-partitioned and API caches)
             metashrew_core::set_cache_mode(metashrew_support::CacheAllocationMode::View);
             
@@ -284,7 +285,7 @@ pub fn view(_attr: TokenStream, item: TokenStream) -> TokenStream {
             // Clear view height and immediate cache
             metashrew_core::clear_view_cache();
 
-            metashrew_support::compat::export_bytes(result)
+            metashrew_core::export_bytes(result)
         }
     };
 

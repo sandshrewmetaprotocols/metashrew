@@ -409,10 +409,11 @@ pub async fn run_prod(args: Args) -> Result<()> {
     info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
 
     let (runtime_adapter, storage_adapter) = if let Some(fork_path) = args.fork.clone() {
+        info!("Fork mode enabled, forking from: {}", fork_path.display());
         let db_path = args.db_path.to_string_lossy().to_string();
-        let fork_path = fork_path.to_string_lossy().to_string();
+        let fork_path_str = fork_path.to_string_lossy().to_string();
         let opts = RocksDBRuntimeAdapter::get_optimized_options();
-        let adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path, opts)?;
+        let adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         (

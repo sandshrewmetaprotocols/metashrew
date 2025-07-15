@@ -331,7 +331,8 @@ impl MetashrewRocksDBSync {
                 
                 Ok(())
             },
-            Err(_e) => {
+            Err(e) => {
+                error!("Initial runtime execution failed: {}", e);
                 // Try to refresh memory with better error handling
                 match runtime.refresh_memory() {
                     Ok(_) => {

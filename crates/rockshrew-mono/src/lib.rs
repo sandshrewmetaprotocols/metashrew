@@ -56,7 +56,7 @@ mod tests;
 
 use actix_cors::Cors;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder, Result as ActixResult};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::Parser;
 use log::{error, info, warn};
 use std::path::PathBuf;
@@ -241,8 +241,18 @@ where
         set_label(label.clone());
     }
 
+    let start_block = if let Some(fork_path) = &args.fork {
+        let fork_db_path = fork_path.to_string_lossy().to_string();
+        let opts = RocksDBRuntimeAdapter::get_optimized_options();
+        let fork_db = rocksdb::DB::open_for_read_only(&opts, fork_db_path, false)?;
+        let tip_height = rockshrew_runtime::query_height(Arc::new(fork_db), 0).await?;
+        args.start_block.unwrap_or(tip_height)
+    } else {
+        args.start_block.unwrap_or(0)
+    };
+
     let sync_config = SyncConfig {
-        start_block: args.start_block.unwrap_or(0),
+        start_block,
         exit_at: args.exit_at,
         pipeline_size: args.pipeline_size,
         max_reorg_depth: args.max_reorg_depth,
@@ -398,28 +408,29 @@ pub async fn run_prod(args: Args) -> Result<()> {
     info!("Database path: {}", args.db_path.display());
     info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
 
-    // Use the optimized configuration from rockshrew-runtime based on performance analysis
-    let runtime = if let Some(fork_path) = args.fork.clone() {
+    let (runtime_adapter, storage_adapter) = if let Some(fork_path) = args.fork.clone() {
         let db_path = args.db_path.to_string_lossy().to_string();
         let fork_path = fork_path.to_string_lossy().to_string();
         let opts = RocksDBRuntimeAdapter::get_optimized_options();
         let adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path, opts)?;
-        MetashrewRuntime::load(args.indexer.clone(), adapter)?
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
+        let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
+        (
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime))),
+            storage_adapter,
+        )
     } else {
-        MetashrewRuntime::load(
-            args.indexer.clone(),
-            RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
-        )?
-    };
-
-    let db = {
-        let context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;
-        context.db.db.clone()
+        let adapter =
+            RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
+        let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
+        (
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime))),
+            storage_adapter,
+        )
     };
 
     let node_adapter = BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
-    let storage_adapter = RocksDBStorageAdapter::new(db.clone());
-    let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
 
     run(args, node_adapter, storage_adapter, runtime_adapter, None).await
 }

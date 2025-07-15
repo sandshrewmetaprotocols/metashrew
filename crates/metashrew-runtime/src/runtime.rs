@@ -1,3 +1,15 @@
+// Chadson-v69.1.0: Journal
+//
+// Objective: Modify the runtime to halt on any WASM error during `runtime.run()`.
+//
+// 1.  Identified `run()` and `process_block_atomic()` in `crates/metashrew-runtime/src/runtime.rs`
+//     as the key functions handling WASM execution via `start.call()`.
+// 2.  The current implementation catches `wasmtime::Error` and returns it as a `Result`.
+// 3.  The requirement is to panic instead of returning an error, to halt the process.
+// 4.  Modified the `Err` arm of the `match start.call(...)` in both functions to `panic!`.
+// 5.  The `preview` function was intentionally left unchanged as it is likely used in contexts
+//     where halting the entire process is undesirable (e.g., read-only queries).
+
 //! Core WebAssembly runtime for executing Bitcoin indexers
 //!
 //! This module provides the main [`MetashrewRuntime`] struct that executes WebAssembly
@@ -939,7 +951,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     Ok(())
                 }
             }
-            Err(e) => Err(e).context("Error calling _start function"),
+            Err(e) => panic!("WASM execution failed in run: {:?}", e),
         };
 
         // ALWAYS refresh memory after block execution for deterministic behavior
@@ -1940,7 +1952,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     Ok(())
                 }
             }
-            Err(e) => Err(e).context("Error calling _start function in atomic processing"),
+            Err(e) => panic!("WASM execution failed in atomic processing: {:?}", e),
         };
 
         // Calculate the state root and batch data before memory refresh

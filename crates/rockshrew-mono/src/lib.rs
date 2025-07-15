@@ -66,14 +66,19 @@ use std::time::Instant;
 use tokio::signal;
 use tracing::{debug, instrument};
 
-use crate::adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter};
+use crate::adapters::BitcoinRpcAdapter;
+use crate::adapters::MetashrewRuntimeAdapter;
 use crate::ssh_tunnel::parse_daemon_rpc_url;
 use metashrew_runtime::{set_label, MetashrewRuntime};
 use metashrew_sync::{
     BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync,
     SnapshotProvider, StorageAdapter, SyncConfig, SyncMode, SnapshotSyncEngine,
 };
-use rockshrew_runtime::{RocksDBRuntimeAdapter, RocksDBStorageAdapter};
+use rockshrew_runtime::{
+    adapter::{query_height_legacy, RocksDBRuntimeAdapter},
+    fork_adapter::{ForkAdapter, LegacyRocksDBRuntimeAdapter},
+    query_height, RocksDBStorageAdapter,
+};
 
 /// Command-line arguments for `rockshrew-mono`.
 #[derive(Parser, Debug, Clone)]
@@ -87,6 +92,8 @@ pub struct Args {
     pub db_path: PathBuf,
     #[arg(long)]
     pub fork: Option<PathBuf>,
+    #[arg(long)]
+    pub legacy_fork: bool,
     #[arg(long)]
     pub start_block: Option<u32>,
     #[arg(long)]
@@ -245,7 +252,12 @@ where
         let fork_db_path = fork_path.to_string_lossy().to_string();
         let opts = RocksDBRuntimeAdapter::get_optimized_options();
         let fork_db = rocksdb::DB::open_for_read_only(&opts, fork_db_path, false)?;
-        let tip_height = rockshrew_runtime::query_height(Arc::new(fork_db), 0).await?;
+        let tip_height = if args.legacy_fork {
+            query_height_legacy(Arc::new(fork_db), 0).await?
+        } else {
+            query_height(Arc::new(fork_db), 0).await?
+        };
+        info!("Forking from height: {}", tip_height);
         args.start_block.unwrap_or(tip_height)
     } else {
         args.start_block.unwrap_or(0)
@@ -400,38 +412,61 @@ where
 // for better organization and reusability across the codebase.
 
 /// Production-specific run function.
-pub async fn run_prod(args: Args) -> Result<()> {
+async fn run_generic<R: RuntimeAdapter + 'static>(
+    args: Args,
+    runtime_adapter: R,
+    storage_adapter: RocksDBStorageAdapter,
+) -> Result<()> {
     let (rpc_url, bypass_ssl, tunnel_config) =
         parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
+    let node_adapter = BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
+    run(args, node_adapter, storage_adapter, runtime_adapter, None).await
+}
 
+pub async fn run_prod(args: Args) -> Result<()> {
     info!("Initializing RocksDB with performance-optimized configuration");
     info!("Database path: {}", args.db_path.display());
     info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
 
-    let (runtime_adapter, storage_adapter) = if let Some(fork_path) = args.fork.clone() {
+    if let Some(fork_path) = args.fork.clone() {
         info!("Fork mode enabled, forking from: {}", fork_path.display());
         let db_path = args.db_path.to_string_lossy().to_string();
         let fork_path_str = fork_path.to_string_lossy().to_string();
         let opts = RocksDBRuntimeAdapter::get_optimized_options();
-        let adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
-        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
-        let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
-        (
-            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime))),
-            storage_adapter,
-        )
+        let adapter = if args.legacy_fork {
+            info!("Using legacy fork adapter.");
+            let primary_db = rocksdb::DB::open(&opts, db_path)?;
+            let fork_db = rocksdb::DB::open_for_read_only(&opts, fork_path_str, false)?;
+            let legacy_adapter = LegacyRocksDBRuntimeAdapter {
+                db: Arc::new(primary_db),
+                fork_db: Some(Arc::new(fork_db)),
+                height: 0,
+                kv_tracker: Arc::new(std::sync::Mutex::new(None)),
+            };
+            ForkAdapter::Legacy(legacy_adapter)
+        } else {
+            let modern_adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
+            ForkAdapter::Modern(modern_adapter)
+        };
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter)?;
+        let storage_adapter = match runtime.context.lock().unwrap().db {
+            ForkAdapter::Modern(ref modern_adapter) => {
+                RocksDBStorageAdapter::new(modern_adapter.db.clone())
+            }
+            ForkAdapter::Legacy(ref legacy_adapter) => {
+                RocksDBStorageAdapter::new(legacy_adapter.db.clone())
+            }
+        };
+        let runtime_adapter =
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+        run_generic(args, runtime_adapter, storage_adapter).await
     } else {
         let adapter =
             RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
-        (
-            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime))),
-            storage_adapter,
-        )
-    };
-
-    let node_adapter = BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
-
-    run(args, node_adapter, storage_adapter, runtime_adapter, None).await
+        let runtime_adapter =
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+        run_generic(args, runtime_adapter, storage_adapter).await
+    }
 }

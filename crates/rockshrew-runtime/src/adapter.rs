@@ -321,3 +321,22 @@ pub async fn query_height(db: Arc<DB>, start_block: u32) -> Result<u32> {
     }
     Ok(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
 }
+/// Query height from a legacy RocksDB instance
+pub async fn query_height_legacy(db: Arc<DB>, start_block: u32) -> Result<u32> {
+    let height_key = TIP_HEIGHT_KEY.as_bytes();
+    let labeled_key = if metashrew_runtime::has_label() {
+        metashrew_runtime::to_labeled_key(&height_key.to_vec())
+    } else {
+        height_key.to_vec()
+    };
+    let bytes = match db.get(&labeled_key)? {
+        Some(v) => v,
+        None => {
+            return Ok(start_block);
+        }
+    };
+    if bytes.is_empty() {
+        return Ok(start_block);
+    }
+    Ok(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
+}

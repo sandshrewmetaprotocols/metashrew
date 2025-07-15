@@ -25,6 +25,7 @@ fn make_labeled_key_fast(key: &[u8]) -> Vec<u8> {
 #[derive(Clone)]
 pub struct RocksDBRuntimeAdapter {
     pub db: Arc<DB>,
+    pub fork_db: Option<Arc<DB>>,
     pub height: u32,
     pub kv_tracker: Arc<Mutex<Option<KVTrackerFn>>>,
 }
@@ -34,19 +35,22 @@ impl RocksDBRuntimeAdapter {
     pub fn new(db: Arc<DB>) -> Self {
         RocksDBRuntimeAdapter {
             db,
+            fork_db: None,
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn open_secondary(
+    pub fn open_fork(
         primary_path: String,
-        secondary_path: String,
-        opts: rocksdb::Options,
-    ) -> Result<Self, rocksdb::Error> {
-        let db = rocksdb::DB::open_as_secondary(&opts, &primary_path, &secondary_path)?;
+        fork_path: String,
+        opts: Options,
+    ) -> Result<RocksDBRuntimeAdapter> {
+        let db = DB::open(&opts, primary_path)?;
+        let fork_db = DB::open_for_read_only(&opts, fork_path, false)?;
         Ok(RocksDBRuntimeAdapter {
             db: Arc::new(db),
+            fork_db: Some(Arc::new(fork_db)),
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
         })
@@ -56,6 +60,7 @@ impl RocksDBRuntimeAdapter {
         let db = DB::open(&opts, path)?;
         Ok(RocksDBRuntimeAdapter {
             db: Arc::new(db),
+            fork_db: None,
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
         })
@@ -83,6 +88,7 @@ impl RocksDBRuntimeAdapter {
     pub fn from_db(db: Arc<DB>) -> Self {
         RocksDBRuntimeAdapter {
             db,
+            fork_db: None,
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
         }
@@ -197,12 +203,30 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         let labeled_key = make_labeled_key_fast(key.as_ref());
-        self.db.get(labeled_key).map(|opt| opt.map(|v| v.to_vec()))
+        match self.db.get(&labeled_key)? {
+            Some(value) => Ok(Some(value.to_vec())),
+            None => {
+                if let Some(fork_db) = &self.fork_db {
+                    fork_db.get(labeled_key).map(|opt| opt.map(|v| v.to_vec()))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     }
 
     fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         let labeled_key = make_labeled_key_fast(key.as_ref());
-        self.db.get(labeled_key).map(|opt| opt.map(|v| v.to_vec()))
+        match self.db.get(&labeled_key)? {
+            Some(value) => Ok(Some(value.to_vec())),
+            None => {
+                if let Some(fork_db) = &self.fork_db {
+                    fork_db.get(labeled_key).map(|opt| opt.map(|v| v.to_vec()))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     }
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
@@ -280,6 +304,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         self.height
     }
 }
+
 
 /// Query height from RocksDB
 pub async fn query_height(db: Arc<DB>, start_block: u32) -> Result<u32> {

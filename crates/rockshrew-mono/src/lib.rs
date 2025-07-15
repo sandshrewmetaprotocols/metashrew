@@ -86,6 +86,8 @@ pub struct Args {
     #[arg(long)]
     pub db_path: PathBuf,
     #[arg(long)]
+    pub fork: Option<PathBuf>,
+    #[arg(long)]
     pub start_block: Option<u32>,
     #[arg(long)]
     pub auth: Option<String>,
@@ -403,10 +405,18 @@ pub async fn run_prod(args: Args) -> Result<()> {
     info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
 
     // Use the optimized configuration from rockshrew-runtime based on performance analysis
-    let runtime = MetashrewRuntime::load(
-        args.indexer.clone(),
-        RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
-    )?;
+    let runtime = if let Some(fork_path) = args.fork.clone() {
+        let db_path = args.db_path.to_string_lossy().to_string();
+        let fork_path = fork_path.to_string_lossy().to_string();
+        let opts = RocksDBRuntimeAdapter::get_optimized_options();
+        let adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path, opts)?;
+        MetashrewRuntime::load(args.indexer.clone(), adapter)?
+    } else {
+        MetashrewRuntime::load(
+            args.indexer.clone(),
+            RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
+        )?
+    };
 
     let db = {
         let context = runtime.context.lock().map_err(|_| anyhow!("Failed to lock context"))?;

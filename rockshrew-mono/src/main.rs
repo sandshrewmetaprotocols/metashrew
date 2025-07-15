@@ -344,7 +344,7 @@ impl MetashrewRocksDBSync {
                             },
                             Err(run_err) => {
                                 error!("Runtime execution failed after memory refresh: {}", run_err);
-                                Err(anyhow!(run_err))
+                                panic!("Runtime execution failed after memory refresh: {}", run_err);
                             }
                         }
                     },

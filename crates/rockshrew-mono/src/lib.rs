@@ -317,14 +317,8 @@ where
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                     Err(e) => {
-                        // CRITICAL FIX: Don't advance to next block on error!
-                        // The process_next_block() method internally manages height,
-                        // but on error we need to retry the SAME block, not skip it.
-                        let error_duration = block_start.elapsed();
-                        error!("Indexer error after {:?}: {}", error_duration, e);
-                        drop(engine); // Release the lock before sleeping
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                        // Continue the loop to retry the same block
+                        error!("Fatal indexer error: {}. Shutting down.", e);
+                        break; // Exit the loop on any error for graceful shutdown
                     }
                 }
             }

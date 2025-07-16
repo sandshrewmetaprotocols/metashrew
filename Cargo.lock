@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "memshrew"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "memshrew-p2p"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -2880,7 +2880,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-core"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-runtime"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.2",
@@ -2924,7 +2924,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-support"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "anyhow",
  "bech32 0.11.0",
@@ -3949,7 +3949,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3975,7 +3975,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-diff"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3996,7 +3996,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-mono"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -4025,7 +4025,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-runtime"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "anyhow",
  "env_logger 0.11.8",
@@ -4040,7 +4040,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-view"
-version = "8.8.2"
+version = "8.8.3"
 dependencies = [
  "actix-cors",
  "actix-web",

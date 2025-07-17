@@ -111,6 +111,8 @@ pub struct Args {
     pub max_reorg_depth: u32,
     #[arg(long, default_value_t = 6)]
     pub reorg_check_threshold: u32,
+    #[arg(long)]
+    pub prefixroot: Vec<String>,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -137,6 +139,7 @@ where
 {
     let request: serde_json::Value = body.into_inner();
     let method = request["method"].as_str().unwrap_or_default();
+    info!("Received RPC method: '{}'", method);
     let empty_params = vec![];
     let params = request["params"].as_array().unwrap_or(&empty_params);
     let id = request["id"].clone();
@@ -176,6 +179,11 @@ where
             state.sync_engine.read().await.metashrew_stateroot(height).await
         }
         "metashrew_snapshot" => state.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
+        "metashrew_prefixroot" => {
+            let name = params[0].as_str().unwrap_or_default().to_string();
+            let height = params[1].as_str().unwrap_or("latest").to_string();
+            state.sync_engine.read().await.metashrew_prefixroot(name, height).await
+        }
         _ => Err(anyhow::anyhow!("Method not found").into()),
     };
 
@@ -307,6 +315,17 @@ where
                         }
                         
                         debug!("Processed block {} in {:?}", height, block_duration);
+
+                        // Log prefix roots
+                        let runtime_adapter = engine.runtime.read().await;
+                        if let Err(e) = runtime_adapter.log_prefix_roots().await {
+                            error!("Failed to log prefix roots: {}", e);
+                        }
+
+
+                        if Some(height) == engine.config.exit_at {
+                            break;
+                        }
                         // Successfully processed a block, continue immediately
                         continue;
                     }
@@ -387,6 +406,8 @@ where
 // RocksDB configuration has been moved to rockshrew-runtime/src/optimized_config.rs
 // for better organization and reusability across the codebase.
 
+use hex::FromHex;
+
 /// Production-specific run function.
 pub async fn run_prod(args: Args) -> Result<()> {
     let (rpc_url, bypass_ssl, tunnel_config) =
@@ -396,10 +417,27 @@ pub async fn run_prod(args: Args) -> Result<()> {
     info!("Database path: {}", args.db_path.display());
     info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
 
+    let prefix_configs = args
+        .prefixroot
+        .iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| {
+            let parts: Vec<&str> = s.split(':').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("Invalid prefixroot format: {}", s));
+            }
+            let name = parts[0].to_string();
+            let prefix_hex = parts[1].strip_prefix("0x").unwrap_or(parts[1]);
+            let prefix = Vec::from_hex(prefix_hex)?;
+            Ok((name, prefix))
+        })
+        .collect::<Result<Vec<(String, Vec<u8>)>>>()?;
+
     // Use the optimized configuration from rockshrew-runtime based on performance analysis
     let runtime = MetashrewRuntime::load(
         args.indexer.clone(),
         RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
+        prefix_configs,
     )?;
 
     let db = {

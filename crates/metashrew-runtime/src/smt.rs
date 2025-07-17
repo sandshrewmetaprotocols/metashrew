@@ -260,9 +260,12 @@ pub struct SMTHelper<T: KeyValueStoreLike> {
 ///
 /// This struct is not thread-safe due to internal mutable caches.
 /// Use separate instances for concurrent operations.
+#[derive(Clone)]
 pub struct BatchedSMTHelper<T: KeyValueStoreLike> {
     /// Storage backend for persisting SMT nodes and data
     pub storage: T,
+    /// The current root of this SMT instance.
+    root: [u8; 32],
     /// In-memory cache for SMT nodes during current block processing
     ///
     /// This cache stores frequently accessed nodes to reduce database I/O.
@@ -279,9 +282,24 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
     pub fn new(storage: T) -> Self {
         Self {
             storage,
+            root: EMPTY_NODE_HASH,
             node_cache: HashMap::new(),
             key_hash_cache: HashMap::new(),
         }
+    }
+
+    /// Returns the current SMT root.
+    pub fn root(&self) -> [u8; 32] {
+        self.root
+    }
+
+    /// Incrementally updates the SMT with a batch of key-values.
+    pub fn update(&mut self, key_values: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+        if key_values.is_empty() {
+            return Ok(());
+        }
+        self.root = self.compute_minimal_smt_root(self.root, key_values)?;
+        Ok(())
     }
 
     /// Clear caches after block processing (no persistent state between blocks)
@@ -414,6 +432,16 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         self.clear_caches();
 
         Ok(new_root)
+    }
+
+    /// Calculate SMT root for a subset of keys (for prefix roots) without storing anything.
+    pub fn calculate_prefix_root(
+        &mut self,
+        key_values: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<[u8; 32]> {
+        // For a prefix root, we always start from an empty tree.
+        let initial_root = EMPTY_NODE_HASH;
+        self.compute_minimal_smt_root(initial_root, key_values)
     }
 
     /// Fast lookup using the new append-only approach with binary search
@@ -2426,5 +2454,160 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         Ok(EMPTY_NODE_HASH)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::traits::{BatchLike, KeyValueStoreLike};
+    use std::collections::HashMap;
+
+    #[derive(Debug)]
+    pub struct TestError(anyhow::Error);
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.fmt(f)
+        }
+    }
+
+    impl std::error::Error for TestError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            self.0.source()
+        }
+    }
+
+    impl From<anyhow::Error> for TestError {
+        fn from(err: anyhow::Error) -> Self {
+            TestError(err)
+        }
+    }
+
+    #[derive(Clone, Default)]
+    pub struct MemoryDB {
+        pub db: HashMap<Vec<u8>, Vec<u8>>,
+    }
+
+    enum Op {
+        Put(Vec<u8>, Vec<u8>),
+        Delete(Vec<u8>),
+    }
+
+    #[derive(Default)]
+    pub struct MemoryDBBatch {
+        ops: Vec<Op>,
+    }
+
+    impl BatchLike for MemoryDBBatch {
+        fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) {
+            self.ops
+                .push(Op::Put(key.as_ref().to_vec(), value.as_ref().to_vec()));
+        }
+
+        fn delete<K: AsRef<[u8]>>(&mut self, key: K) {
+            self.ops.push(Op::Delete(key.as_ref().to_vec()));
+        }
+
+        fn default() -> Self {
+            Self { ops: Vec::new() }
+        }
+    }
+
+    impl KeyValueStoreLike for MemoryDB {
+        type Batch = MemoryDBBatch;
+        type Error = TestError;
+
+        fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(self.db.get(key.as_ref()).cloned())
+        }
+
+        fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(self.db.get(key.as_ref()).cloned())
+        }
+
+        fn put<K, V>(&mut self, key: K, value: V) -> Result<(), Self::Error>
+        where
+            K: AsRef<[u8]>,
+            V: AsRef<[u8]>,
+        {
+            self.db
+                .insert(key.as_ref().to_vec(), value.as_ref().to_vec());
+            Ok(())
+        }
+
+        fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
+            self.db.remove(key.as_ref());
+            Ok(())
+        }
+
+        fn scan_prefix<K: AsRef<[u8]>>(
+            &self,
+            prefix: K,
+        ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
+            Ok(self
+                .db
+                .iter()
+                .filter(|(k, _)| k.starts_with(prefix.as_ref()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect())
+        }
+
+        fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
+            Ok(Box::new(self.db.keys().cloned()))
+        }
+
+        fn write(&mut self, batch: Self::Batch) -> Result<(), Self::Error> {
+            for op in batch.ops {
+                match op {
+                    Op::Put(key, value) => {
+                        self.db.insert(key, value);
+                    }
+                    Op::Delete(key) => {
+                        self.db.remove(&key);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn create_batch(&self) -> Self::Batch {
+            <Self::Batch as BatchLike>::default()
+        }
+    }
+
+    #[test]
+    fn test_calculate_prefix_root() {
+        let db = MemoryDB::default();
+        let mut smt = BatchedSMTHelper::new(db);
+
+        let key_values = vec![
+            (b"balances:alice".to_vec(), b"100".to_vec()),
+            (b"balances:bob".to_vec(), b"200".to_vec()),
+            (b"sequence:alice".to_vec(), b"1".to_vec()),
+        ];
+
+        let prefix = b"balances:".to_vec();
+        let prefixed_kvs: Vec<(Vec<u8>, Vec<u8>)> = key_values
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+
+        let prefix_root = smt.calculate_prefix_root(&prefixed_kvs).unwrap();
+
+        let mut expected_smt = BatchedSMTHelper::new(MemoryDB::default());
+        let expected_root = expected_smt
+            .compute_minimal_smt_root(EMPTY_NODE_HASH, &prefixed_kvs)
+            .unwrap();
+
+        assert_eq!(prefix_root, expected_root);
+
+        let mut all_smt = BatchedSMTHelper::new(MemoryDB::default());
+        let all_root = all_smt
+            .compute_minimal_smt_root(EMPTY_NODE_HASH, &key_values)
+            .unwrap();
+
+        assert_ne!(prefix_root, all_root);
     }
 }

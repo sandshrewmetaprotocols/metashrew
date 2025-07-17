@@ -50,6 +50,25 @@ pub fn make_historical_key(prefix: &[u8], key: &[u8], height: u32) -> Vec<u8> {
     result
 }
 
+pub fn decode_historical_key(key: &[u8]) -> Result<(Vec<u8>, u32), &'static str> {
+    let hist_prefix = PREFIXES.historical_value;
+    if !key.starts_with(hist_prefix) {
+        return Err("Key does not have historical prefix");
+    }
+    let key_without_hist = &key[hist_prefix.len()..];
+    let separator_pos = key_without_hist
+        .iter()
+        .rposition(|&b| b == b':')
+        .ok_or("Invalid historical key format: missing separator")?;
+    let height_str = std::str::from_utf8(&key_without_hist[separator_pos + 1..])
+        .map_err(|_| "Invalid historical key format: non-UTF8 height")?;
+    let height = height_str
+        .parse::<u32>()
+        .map_err(|_| "Invalid historical key format: invalid height")?;
+    let original_key = key_without_hist[..separator_pos].to_vec();
+    Ok((original_key, height))
+}
+
 /// Optimized key builder for height index keys
 /// Stores keys as raw bytes without hex encoding to prevent database explosion
 #[inline]
@@ -151,8 +170,8 @@ mod tests {
         let prefix = b"hist:";
         let key = b"test_key";
         let height = 12345u32;
-        let height_str = height.to_string();
         let mut expected = Vec::new();
+        let height_str = height.to_string();
         expected.extend_from_slice(prefix);
         expected.extend_from_slice(key);
         expected.push(b':');

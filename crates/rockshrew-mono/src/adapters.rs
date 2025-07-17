@@ -13,7 +13,6 @@ use metashrew_sync::{
     AtomicBlockResult, BitcoinNodeAdapter, BlockInfo, ChainTip, PreviewCall, RuntimeAdapter,
     RuntimeStats, SyncError, SyncResult, ViewCall, ViewResult,
 };
-use rockshrew_runtime::RocksDBRuntimeAdapter as RocksDBKeyValueAdapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use std::sync::Arc;
@@ -222,13 +221,13 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 }
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime and is snapshot-aware.
-pub struct MetashrewRuntimeAdapter {
-    runtime: Arc<RwLock<MetashrewRuntime<RocksDBKeyValueAdapter>>>,
+pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
+    runtime: Arc<RwLock<MetashrewRuntime<T>>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
 }
 
-impl MetashrewRuntimeAdapter {
-    pub fn new(runtime: Arc<RwLock<MetashrewRuntime<RocksDBKeyValueAdapter>>>) -> Self {
+impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapter<T> {
+    pub fn new(runtime: Arc<RwLock<MetashrewRuntime<T>>>) -> Self {
         Self {
             runtime,
             snapshot_manager: Arc::new(RwLock::new(None)),
@@ -246,7 +245,7 @@ impl MetashrewRuntimeAdapter {
 }
 
 #[async_trait]
-impl RuntimeAdapter for MetashrewRuntimeAdapter {
+impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for MetashrewRuntimeAdapter<T> {
     async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         if let Some(manager_arc) = self.get_snapshot_manager().await {
             {

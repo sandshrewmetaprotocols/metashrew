@@ -378,6 +378,10 @@ pub trait KeyValueStoreLike {
     {
         self.clone()
     }
+
+    fn set_kv_tracker(&mut self, _tracker: Option<KVTrackerFn>) {
+        // Default implementation does nothing
+    }
 }
 
 /// Type definition for key-value tracker function

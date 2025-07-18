@@ -111,8 +111,8 @@ use metashrew_support::{
         key_parser, set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache,
         set_view_height, CacheAllocationMode, CacheStats, KeyPrefixStats, LruDebugStats,
         PrefixAnalysisConfig,
-    },
         run_pending_tasks,
+    },
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
 

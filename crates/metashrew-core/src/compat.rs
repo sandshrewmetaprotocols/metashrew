@@ -1,4 +1,4 @@
-use metashrew_println::log;
+use metashrew_println::wasm::log;
 use std::panic;
 use std::sync::Arc;
 pub fn panic_hook(info: &panic::PanicHookInfo) {

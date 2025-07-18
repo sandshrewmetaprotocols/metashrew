@@ -8,6 +8,7 @@ use rocksdb::DB;
 use std::sync::Arc;
 
 use crate::adapter::RocksDBRuntimeAdapter;
+use crate::retry::with_retry;
 
 /// RocksDB storage adapter for persistent storage.
 #[derive(Clone)]
@@ -44,15 +45,13 @@ impl StorageAdapter for RocksDBStorageAdapter {
     async fn set_indexed_height(&mut self, height: u32) -> SyncResult<()> {
         let height_key = b"__INTERNAL/height".to_vec();
         let height_bytes = height.to_le_bytes();
-        self.db
-            .put(&height_key, &height_bytes)
+        with_retry(&self.db, |db| db.put(&height_key, &height_bytes))
             .map_err(|e| SyncError::Storage(format!("Failed to store height: {}", e)))
     }
 
     async fn store_block_hash(&mut self, height: u32, hash: &[u8]) -> SyncResult<()> {
         let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
-        self.db
-            .put(&blockhash_key, hash)
+        with_retry(&self.db, |db| db.put(&blockhash_key, hash))
             .map_err(|e| SyncError::Storage(format!("Failed to store blockhash: {}", e)))
     }
 

@@ -4,6 +4,7 @@ use anyhow::Result;
 use metashrew_runtime::{BatchLike, KVTrackerFn, KeyValueStoreLike, TIP_HEIGHT_KEY};
 use rocksdb::{Options, WriteBatch, WriteBatchIterator, DB};
 use std::sync::{Arc, Mutex};
+use crate::retry::with_retry;
 
 /// Optimized labeled key creation that avoids unnecessary allocations
 #[inline]
@@ -134,6 +135,13 @@ impl RocksDBRuntimeAdapter {
 
 pub struct RocksDBBatch(pub WriteBatch);
 
+impl Clone for RocksDBBatch {
+    fn clone(&self) -> Self {
+        let raw = self.0.data();
+        Self(WriteBatch::from_data(raw))
+    }
+}
+
 impl BatchLike for RocksDBBatch {
     fn default() -> Self {
         Self(WriteBatch::default())
@@ -186,11 +194,12 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     }
 
     fn write(&mut self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        // Create atomic batch with height update
-        let atomic_batch = self.create_atomic_batch(batch);
-
-        // Write atomically
-        self.write_atomic_batch(atomic_batch)
+        with_retry(&self.db, |_| {
+            // Create atomic batch with height update
+            let atomic_batch = self.create_atomic_batch(batch.clone());
+            // Write atomically
+            self.write_atomic_batch(atomic_batch)
+        })
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -205,7 +214,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
         let labeled_key = make_labeled_key_fast(key.as_ref());
-        self.db.delete(labeled_key)
+        with_retry(&self.db, |db| db.delete(labeled_key.clone()))
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
@@ -226,7 +235,7 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
         // Perform the actual database update
         let labeled_key = make_labeled_key_fast(key_slice);
-        self.db.put(labeled_key, value_slice)
+        with_retry(&self.db, |db| db.put(labeled_key.clone(), value_slice))
     }
 
     fn scan_prefix<K: AsRef<[u8]>>(

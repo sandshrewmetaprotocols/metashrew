@@ -12,6 +12,7 @@ metashrew-sync = { path = "../metashrew-sync" }
 async-trait = "0.1.83"
 tokio = { version = "1.43.0", features = ["full"] }
 num_cpus = "1.16.0"
+fs2 = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3.8.1"

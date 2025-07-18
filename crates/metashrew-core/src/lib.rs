@@ -174,8 +174,9 @@ pub fn get_cache() -> &'static HashMap<Arc<Vec<u8>>, Arc<Vec<u8>>> {
 /// 2. A persistent LRU cache (`LRU_CACHE`) that lives across block processing.
 /// 3. A height-partitioned cache for view functions.
 ///
-/// The `metashrew-cache` crate automatically handles eviction, so no manual
-/// eviction logic is needed here.
+/// The `metashrew-cache` crate automatically handles eviction based on memory
+/// pressure, so no manual eviction logic is needed here. The simplified logic
+/// relies on the underlying cache implementation to manage its size.
 ///
 /// # Example
 ///

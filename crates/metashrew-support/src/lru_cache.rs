@@ -884,11 +884,8 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
     if let Some(cache) = cache_guard.as_ref() {
         // Our metashrew-cache handles eviction automatically based on the weigher function
         cache.insert(cache_key, cache_value);
-        cache.run_pending_tasks();
-        cache.run_pending_tasks();
-        cache.run_pending_tasks();
 
-        // Run pending tasks to ensure accurate statistics and immediate availability
+        // Run pending tasks to ensure the insert is processed and stats are updated.
         cache.run_pending_tasks();
 
         // Update statistics

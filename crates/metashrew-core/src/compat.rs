@@ -1,4 +1,4 @@
-use crate::stdio::log;
+use metashrew_println::log;
 use std::panic;
 use std::sync::Arc;
 pub fn panic_hook(info: &panic::PanicHookInfo) {

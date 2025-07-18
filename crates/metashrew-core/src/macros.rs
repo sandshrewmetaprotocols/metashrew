@@ -60,7 +60,7 @@ macro_rules! declare_indexer {
             /// Generated view function
             #[no_mangle]
             pub extern "C" fn $view_fn_name() -> i32 {
-                use metashrew_core::stdio::stdout;
+                use metashrew_println::stdout;
 
                 // Get input data
                 let data = input();

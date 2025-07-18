@@ -54,7 +54,7 @@
 // Use our local metashrew-cache (modified moka) instead of external moka
 use metashrew_cache::sync::Cache;
 
-use metashrew_println::{println, stdout};
+use metashrew_println::{println};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::{Arc, RwLock};

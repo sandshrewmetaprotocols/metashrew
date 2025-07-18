@@ -1471,7 +1471,7 @@ checksum = "2a2330da5de22e8a3cb63252ce2abb30116bf5265e89c0e01bc17015ce30a476"
 
 [[package]]
 name = "debshrew-mono"
-version = "1.0.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "memshrew-p2p"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -3127,7 +3127,7 @@ dependencies = [
 
 [[package]]
 name = "memshrew-runtime"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3139,7 +3139,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-cache"
-version = "9.0.1"
+version = "9.1.0"
 dependencies = [
  "actix-rt",
  "ahash",
@@ -3172,7 +3172,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-core"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "bitcoin 0.32.6",
@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-macros"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-minimal"
-version = "0.1.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "bitcoin 0.32.6",
@@ -3223,11 +3223,11 @@ dependencies = [
 
 [[package]]
 name = "metashrew-println"
-version = "0.1.0"
+version = "9.1.0"
 
 [[package]]
 name = "metashrew-runtime"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "env_logger 0.11.8",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-support"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "bech32 0.11.0",
@@ -3277,7 +3277,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-sync"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3295,7 +3295,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-tests"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -4525,7 +4525,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-diff"
-version = "0.1.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4534,7 +4534,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-mono"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -4578,7 +4578,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-runtime"
-version = "9.0.0"
+version = "9.1.0"
 dependencies = [
  "anyhow",
  "async-trait",

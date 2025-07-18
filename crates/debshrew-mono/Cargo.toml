@@ -1,6 +1,6 @@
 [package]
 name = "debshrew-mono"
-version = "1.0.0"
+version.workspace = true
 edition = "2021"
 description = "CDC-enabled Bitcoin indexer with Kafka streaming"
 

@@ -1,12 +1,7 @@
-use crate::byte_view::ByteView;
 use bitcoin::p2p::address::Address;
 use bitcoin::p2p::message_network::VersionMessage;
 use bitcoin::p2p::ServiceFlags;
 use prost::Message;
-use rlp::{Decodable as RlpDecodable, Encodable as RlpEncodable, RlpStream};
-use std::io::Cursor;
-use std::net::SocketAddr;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(target_arch = "wasm32")]
 use metashrew_println::wasm::{to_arraybuffer_layout, to_passback_ptr};

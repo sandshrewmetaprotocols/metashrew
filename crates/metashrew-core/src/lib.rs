@@ -112,6 +112,7 @@ use metashrew_support::{
         set_view_height, CacheAllocationMode, CacheStats, KeyPrefixStats, LruDebugStats,
         PrefixAnalysisConfig,
     },
+        run_pending_tasks,
     proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
 
@@ -338,6 +339,10 @@ pub fn set(k: Arc<Vec<u8>>, v: Arc<Vec<u8>>) {
 #[allow(static_mut_refs)]
 pub fn flush() {
     unsafe {
+        // Run pending async tasks to ensure cache is up-to-date before flushing
+        if is_lru_cache_initialized() {
+            run_pending_tasks();
+        }
         // Ensure initialization before proceeding
         if CACHE.is_none() || TO_FLUSH.is_none() {
             initialize();

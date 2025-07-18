@@ -64,7 +64,7 @@ const MIN_LRU_CACHE_MEMORY_LIMIT: usize = 64 * 1024 * 1024; // 64MB
 
 /// Detect available memory and determine appropriate cache size
 pub fn detect_available_memory() -> usize {
-    1024 * 1024 * 1024
+    64 * 1024 * 1024
 }
 
 /// Actual memory limit determined at runtime based on available memory
@@ -825,9 +825,6 @@ pub fn get_lru_cache(key: &Arc<Vec<u8>>) -> Option<Arc<Vec<u8>>> {
 
     let cache_guard = LRU_CACHE.read().unwrap();
     if let Some(cache) = cache_guard.as_ref() {
-        // Run pending tasks first to ensure cache is up to date
-        cache.run_pending_tasks();
-        
         let result = cache.get(&cache_key).map(|v| v.into());
 
         // Track prefix statistics for debugging
@@ -887,6 +884,9 @@ pub fn set_lru_cache(key: Arc<Vec<u8>>, value: Arc<Vec<u8>>) {
     if let Some(cache) = cache_guard.as_ref() {
         // Our metashrew-cache handles eviction automatically based on the weigher function
         cache.insert(cache_key, cache_value);
+        cache.run_pending_tasks();
+        cache.run_pending_tasks();
+        cache.run_pending_tasks();
 
         // Run pending tasks to ensure accurate statistics and immediate availability
         cache.run_pending_tasks();
@@ -942,6 +942,33 @@ pub fn clear_lru_cache() {
 
 /// Force complete reinitialization of all caches (for testing)
 ///
+/// Run pending tasks on all caches
+///
+/// This function explicitly runs the maintenance tasks on the main LRU cache,
+/// API cache, and height-partitioned cache. This is useful for testing to ensure
+/// that cache operations are processed immediately.
+pub fn run_pending_tasks() {
+    {
+        let cache_guard = LRU_CACHE.read().unwrap();
+        if let Some(cache) = cache_guard.as_ref() {
+            cache.run_pending_tasks();
+        }
+    }
+
+    {
+        let cache_guard = API_CACHE.read().unwrap();
+        if let Some(cache) = cache_guard.as_ref() {
+            cache.run_pending_tasks();
+        }
+    }
+
+    {
+        let cache_guard = HEIGHT_PARTITIONED_CACHE.read().unwrap();
+        if let Some(cache) = cache_guard.as_ref() {
+            cache.run_pending_tasks();
+        }
+    }
+}
 /// This function completely reinitializes all cache instances, which is useful
 /// for testing to ensure clean state between tests.
 pub fn force_reinitialize_caches() {

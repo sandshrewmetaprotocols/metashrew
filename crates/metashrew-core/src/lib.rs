@@ -167,6 +167,16 @@ pub fn get_cache() -> &'static HashMap<Arc<Vec<u8>>, Arc<Vec<u8>>> {
 /// data from the underlying database. The host functions use the AssemblyScript
 /// ArrayBuffer memory layout.
 ///
+/// # Caching
+///
+/// This function uses a three-tier caching system:
+/// 1. An immediate in-memory cache (`CACHE`) for the current block processing.
+/// 2. A persistent LRU cache (`LRU_CACHE`) that lives across block processing.
+/// 3. A height-partitioned cache for view functions.
+///
+/// The `metashrew-cache` crate automatically handles eviction, so no manual
+/// eviction logic is needed here.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -223,59 +233,10 @@ pub fn get(v: Arc<Vec<u8>>) -> Arc<Vec<u8>> {
                    length, String::from_utf8_lossy(v.as_ref()));
         }
 
-        // CRITICAL FIX: Handle large allocations with LRU cache eviction and retry
-        const MAX_ALLOCATION_SIZE: usize = 512 * 1024 * 1024; // 512MB
         let length_usize = length as usize;
-        let total_size = length_usize + 4;
-
-        // First attempt: Try allocation normally
-        let mut buffer = Vec::<u8>::new();
-        let allocation_result = buffer.try_reserve_exact(total_size);
-
-        match allocation_result {
-            Ok(()) => {
-                // Allocation succeeded, proceed normally
-                buffer.extend_from_slice(&length.to_le_bytes());
-                buffer.resize(total_size, 0);
-            }
-            Err(allocation_error) => {
-                println!("WARNING: Initial allocation failed for {} bytes. Attempting LRU cache eviction and retry. Error: {:?}",
-                         total_size, allocation_error);
-
-                // Second attempt: Force LRU cache eviction to ~50% utilization and retry
-                if is_lru_cache_initialized() {
-                    println!("Forcing LRU cache eviction to 50% utilization to free memory...");
-                    force_evict_to_target_percentage(50); // Evict to 50% of current usage
-
-                    // Retry allocation after eviction
-                    let mut retry_buffer = Vec::<u8>::new();
-                    match retry_buffer.try_reserve_exact(total_size) {
-                        Ok(()) => {
-                            println!("SUCCESS: Allocation succeeded after LRU cache eviction");
-                            buffer = retry_buffer;
-                            buffer.extend_from_slice(&length.to_le_bytes());
-                            buffer.resize(total_size, 0);
-                        }
-                        Err(retry_error) => {
-                            // Final failure: Panic to halt indexer and prevent incorrect results
-                            panic!("FATAL: Failed to allocate {} bytes for buffer even after LRU cache eviction. Key: {:?}. Initial error: {:?}. Retry error: {:?}. Indexer must halt to prevent incorrect results.",
-                                   total_size, String::from_utf8_lossy(v.as_ref()), allocation_error, retry_error);
-                        }
-                    }
-                } else {
-                    // No LRU cache available for eviction, check if size is unreasonable
-                    if length_usize > MAX_ALLOCATION_SIZE {
-                        panic!("FATAL: Requested allocation size {} bytes exceeds maximum reasonable size {} bytes for key: {:?}. This likely indicates corrupted host response. Indexer must halt to prevent incorrect results.",
-                               length_usize, MAX_ALLOCATION_SIZE, String::from_utf8_lossy(v.as_ref()));
-                    } else {
-                        // Reasonable size but allocation failed - system memory issue
-                        panic!("FATAL: Failed to allocate {} bytes for buffer (reasonable size but insufficient system memory). Key: {:?}. Error: {:?}. Indexer must halt to prevent incorrect results.",
-                               total_size, String::from_utf8_lossy(v.as_ref()), allocation_error);
-                    }
-                }
-            }
-        };
-
+        let mut buffer = Vec::with_capacity(length_usize + 4);
+        buffer.extend_from_slice(&length.to_le_bytes());
+        buffer.resize(length_usize + 4, 0);
         __get(
             to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())),
             to_passback_ptr(&mut buffer),

@@ -33,6 +33,7 @@ pub mod wasm {
     #[allow(unused_unsafe)]
     #[cfg(all(not(feature = "test-utils"), target_arch = "wasm32"))]
     pub fn log(v: Arc<Vec<u8>>) -> () {
+        #[link(wasm_import_module = "env")]
         extern "C" {
             fn __log(ptr: i32);
         }

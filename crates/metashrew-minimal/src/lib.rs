@@ -1,8 +1,10 @@
 use bitcoin;
-use metashrew_core::{get, index_pointer::IndexPointer};
+use metashrew_core::{println, get, index_pointer::IndexPointer};
 use metashrew_support::index_pointer::KeyValuePointer;
+use std::fmt::Write;
 use std::io::Cursor;
 use std::sync::Arc;
+use hex;
 
 pub mod benchmark;
 
@@ -21,6 +23,7 @@ pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>>
     let mut tracker = IndexPointer::from_keyword("/blocktracker");
     let mut new_tracker = tracker.get().as_ref().clone();
     new_tracker.extend((&[parsed_block.header.block_hash()[0]]).to_vec());
+    println!("newtracker: {}", hex::encode(&new_tracker.clone()));
     tracker.set(Arc::new(new_tracker));
 
     // Benchmark: Create 1000 storage entries for benchmarking view function performance

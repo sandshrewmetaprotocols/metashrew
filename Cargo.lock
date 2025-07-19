@@ -3190,10 +3190,10 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.16",
  "hex",
+ "metashrew-cache",
  "metashrew-macros",
- "metashrew-println",
- "metashrew-support",
  "ordinals",
+ "prost",
  "protobuf 3.7.2",
  "protobuf-codegen 3.7.2",
  "protoc-bin-vendored",
@@ -3227,14 +3227,6 @@ version = "0.1.0"
 dependencies = [
  "bitcoin 0.29.2",
  "metashrew-core",
- "metashrew-support",
-]
-
-[[package]]
-name = "metashrew-println"
-version = "9.1.0"
-dependencies = [
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -3277,7 +3269,6 @@ dependencies = [
  "hex",
  "log",
  "metashrew-cache",
- "metashrew-println",
  "prost",
  "protobuf 3.7.2",
  "protobuf-codegen 3.7.2",
@@ -3319,6 +3310,7 @@ dependencies = [
  "hex",
  "log",
  "memshrew-runtime",
+ "metashrew-core",
  "metashrew-runtime",
  "metashrew-support",
  "metashrew-sync",

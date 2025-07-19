@@ -60,10 +60,10 @@ macro_rules! declare_indexer {
             /// Generated view function
             #[no_mangle]
             pub extern "C" fn $view_fn_name() -> i32 {
-                use metashrew_println::stdout;
-
-                // Get input data
-                let data = input();
+                use crate::stdio::stdout;
+ 
+                 // Get input data
+                 let data = input();
 
                 // Parse the request protobuf
                 let request = match protobuf::Message::parse_from_bytes::<$view_param_type>(&data) {
@@ -127,5 +127,19 @@ macro_rules! declare_indexer {
                 Err(_) => -1,
             }
         }
+    };
+}
+
+#[macro_export]
+macro_rules! println {
+    ($($arg:tt)*) => {
+        let _ = writeln!($crate::stdio::stdout(), $($arg)*);
+    };
+}
+
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        let _ = write!($crate::stdio::stdout(), $($arg)*);
     };
 }

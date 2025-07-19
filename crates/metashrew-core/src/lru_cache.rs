@@ -34,7 +34,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use metashrew_support::lru_cache::{initialize_lru_cache, get_lru_cache, set_lru_cache, clear_lru_cache};
+//! use metashrew_core::lru_cache::{initialize_lru_cache, get_lru_cache, set_lru_cache, clear_lru_cache};
 //! use std::sync::Arc;
 //!
 //! // Initialize the LRU cache
@@ -54,7 +54,7 @@
 // Use our local metashrew-cache (modified moka) instead of external moka
 use metashrew_cache::sync::Cache;
 
-use metashrew_println::{println};
+use crate::{println};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 use std::sync::{Arc, RwLock};
@@ -215,7 +215,7 @@ pub mod key_parser {
     /// # Example
     ///
     /// ```rust
-    /// use metashrew_support::lru_cache::key_parser::{parse_key_readable, KeyParseConfig};
+    /// use crate::lru_cache::key_parser::{parse_key_readable, KeyParseConfig};
     ///
     /// let key = b"/blockhash/byheight/\x01\x00\x00\x00";
     /// let config = KeyParseConfig::default();
@@ -1018,7 +1018,7 @@ pub fn get_cache_stats() -> CacheStats {
 /// # Example
 ///
 /// ```rust,no_run
-/// use metashrew_support::lru_cache::api_cache_set;
+/// use crate::lru_cache::api_cache_set;
 /// use std::sync::Arc;
 ///
 /// let computed_result = Arc::new(b"expensive_computation_result".to_vec());
@@ -1061,7 +1061,7 @@ pub fn api_cache_set(key: String, value: Arc<Vec<u8>>) {
 /// # Example
 ///
 /// ```rust,no_run
-/// use metashrew_support::lru_cache::api_cache_get;
+/// use crate::lru_cache::api_cache_get;
 ///
 /// if let Some(cached_result) = api_cache_get("computation_key") {
 ///     println!("Found cached result: {:?}", cached_result);

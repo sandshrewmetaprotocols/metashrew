@@ -83,14 +83,21 @@ use std::panic;
 use std::sync::Arc;
 
 pub mod allocator;
-#[cfg(feature = "panic-hook")]
+pub mod byte_view;
 pub mod compat;
 pub mod imports;
 pub mod index_pointer;
 pub mod macros;
+pub mod stdio;
+pub mod wasm;
+pub mod utils;
+pub mod lru_cache;
 
 // Re-export the procedural macros from metashrew-macros
 pub use metashrew_macros::{main, view};
+pub use stdio::stdout;
+pub use wasm::{to_arraybuffer_layout, to_passback_ptr, to_ptr};
+
 
 #[cfg(test)]
 pub mod tests;
@@ -98,10 +105,7 @@ pub mod tests;
 #[cfg(feature = "panic-hook")]
 use crate::compat::panic_hook;
 use crate::imports::{__flush, __get, __get_len, __host_len, __load_input};
-pub use metashrew_println::wasm::{to_arraybuffer_layout, to_passback_ptr, to_ptr};
-pub use metashrew_println::{self, println, stdout};
-#[allow(unused_imports)]
-use metashrew_support::{
+pub use crate::{
     lru_cache::{
         api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
         force_evict_to_target, force_evict_to_target_percentage, get_actual_lru_cache_memory_limit,
@@ -113,8 +117,9 @@ use metashrew_support::{
         PrefixAnalysisConfig,
         run_pending_tasks,
     },
-    proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
+pub mod proto;
+use crate::proto::metashrew::{KeyValueFlush};
 
 /// Global cache for storing key-value pairs read from the database
 ///
@@ -1039,17 +1044,17 @@ pub fn is_cache_below_minimum() -> bool {
 /// println!("{}", report);
 /// ```
 pub fn enable_lru_debug_mode() {
-    metashrew_support::lru_cache::enable_lru_debug_mode();
+    crate::lru_cache::enable_lru_debug_mode();
 }
 
 /// Disable LRU cache debugging mode
 pub fn disable_lru_debug_mode() {
-    metashrew_support::lru_cache::disable_lru_debug_mode();
+    crate::lru_cache::disable_lru_debug_mode();
 }
 
 /// Check if LRU cache debugging mode is enabled
 pub fn is_lru_debug_mode_enabled() -> bool {
-    metashrew_support::lru_cache::is_lru_debug_mode_enabled()
+    crate::lru_cache::is_lru_debug_mode_enabled()
 }
 
 /// Set the prefix analysis configuration
@@ -1071,12 +1076,12 @@ pub fn is_lru_debug_mode_enabled() -> bool {
 /// set_prefix_analysis_config(config);
 /// ```
 pub fn set_prefix_analysis_config(config: PrefixAnalysisConfig) {
-    metashrew_support::lru_cache::set_prefix_analysis_config(config);
+    crate::lru_cache::set_prefix_analysis_config(config);
 }
 
 /// Get the current prefix analysis configuration
 pub fn get_prefix_analysis_config() -> PrefixAnalysisConfig {
-    metashrew_support::lru_cache::get_prefix_analysis_config()
+    crate::lru_cache::get_prefix_analysis_config()
 }
 
 /// Clear all prefix hit statistics
@@ -1084,7 +1089,7 @@ pub fn get_prefix_analysis_config() -> PrefixAnalysisConfig {
 /// This resets all collected prefix statistics. Useful when you want to start
 /// fresh analysis for a new period.
 pub fn clear_prefix_hit_stats() {
-    metashrew_support::lru_cache::clear_prefix_hit_stats();
+    crate::lru_cache::clear_prefix_hit_stats();
 }
 
 /// Get comprehensive LRU debug statistics
@@ -1095,7 +1100,7 @@ pub fn clear_prefix_hit_stats() {
 ///
 /// `LruDebugStats` containing overall cache stats and prefix analysis
 pub fn get_lru_debug_stats() -> LruDebugStats {
-    metashrew_support::lru_cache::get_lru_debug_stats()
+    crate::lru_cache::get_lru_debug_stats()
 }
 
 /// Generate a formatted debug report
@@ -1121,7 +1126,7 @@ pub fn get_lru_debug_stats() -> LruDebugStats {
 /// println!("{}", report);
 /// ```
 pub fn generate_lru_debug_report() -> String {
-    metashrew_support::lru_cache::generate_lru_debug_report()
+    crate::lru_cache::generate_lru_debug_report()
 }
 
 /// Parse a cache key into human-readable format

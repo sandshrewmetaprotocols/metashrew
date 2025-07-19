@@ -123,13 +123,13 @@ pub fn main(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[no_mangle]
         pub fn _start() {
             // CRITICAL: Set cache allocation mode to Indexer (all memory to main LRU cache)
-            metashrew_core::set_cache_mode(metashrew_support::CacheAllocationMode::Indexer);
+            metashrew_core::set_cache_mode(metashrew_core::CacheAllocationMode::Indexer);
             
 
             let mut host_input = std::io::Cursor::new(metashrew_core::input());
-            let height = metashrew_support::utils::consume_sized_int::<u32>(&mut host_input)
+            let height = metashrew_core::utils::consume_sized_int::<u32>(&mut host_input)
                 .expect("failed to parse height");
-            let input_vec = metashrew_support::utils::consume_to_end(&mut host_input)
+            let input_vec = metashrew_core::utils::consume_to_end(&mut host_input)
                 .expect("failed to parse bytearray from input after height");
             #fn_name(height, &input_vec).expect("failed to run indexer");
             metashrew_core::flush();
@@ -254,17 +254,17 @@ pub fn view(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pub fn #original_fn_name() -> i32 {
             use metashrew_core;
             // CRITICAL: Set cache allocation mode to View (memory split between height-partitioned and API caches)
-            metashrew_core::set_cache_mode(metashrew_support::CacheAllocationMode::View);
+            metashrew_core::set_cache_mode(metashrew_core::CacheAllocationMode::View);
             
 
             let mut host_input = std::io::Cursor::new(metashrew_core::input());
-            let height = metashrew_support::utils::consume_sized_int::<u32>(&mut host_input)
+            let height = metashrew_core::utils::consume_sized_int::<u32>(&mut host_input)
                 .expect("failed to read height from host input");
 
             // Set view height for height-partitioned caching
             metashrew_core::set_view_for_height(height);
 
-            let result = #internal_fn_name(&metashrew_support::utils::consume_to_end(&mut host_input)
+            let result = #internal_fn_name(&metashrew_core::utils::consume_to_end(&mut host_input)
                 .expect("failed to read input from host environment")).unwrap();
 
             // Clear view height and immediate cache

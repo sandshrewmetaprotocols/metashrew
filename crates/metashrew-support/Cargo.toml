@@ -16,7 +16,6 @@ bitcoin = "0.32.6"
 hex = "0.4.3"
 log = "0.4"
 metashrew-cache = { path = "../metashrew-cache", features = ["sync"] }
-metashrew-println = { workspace = true }
 prost = "0.12.6"
 rlp = "0.5.2"
 protobuf = "3.7.1"

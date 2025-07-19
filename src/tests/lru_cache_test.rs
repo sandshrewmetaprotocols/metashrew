@@ -5,7 +5,7 @@
 //! environment relies on for its three-tier caching.
 
 use anyhow::Result;
-use metashrew_support::lru_cache::{
+use metashrew_core::lru_cache::{
     api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, get_cache_stats,
     get_lru_cache, get_total_memory_usage, initialize_lru_cache, is_lru_cache_initialized,
     set_lru_cache,
@@ -186,7 +186,7 @@ async fn test_lru_cache_eviction() -> Result<()> {
 
     // Allow some time for the cache to process the insertions and perform eviction.
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    metashrew_support::lru_cache::run_pending_tasks();
+    metashrew_core::lru_cache::run_pending_tasks();
     let stats = get_cache_stats();
 
     // Verify that some items have been evicted.

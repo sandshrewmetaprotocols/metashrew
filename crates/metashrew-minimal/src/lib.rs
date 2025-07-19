@@ -1,6 +1,5 @@
 use bitcoin;
-use metashrew_core::{println, get, index_pointer::IndexPointer};
-use metashrew_support::index_pointer::KeyValuePointer;
+use metashrew_core::{println, get, index_pointer::{IndexPointer, KeyValuePointer}};
 use std::fmt::Write;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -15,7 +14,7 @@ pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>>
     block_pointer.set(Arc::new(block.to_vec()));
 
     // Parse the block
-    let parsed_block = metashrew_support::utils::consensus_decode::<bitcoin::Block>(
+    let parsed_block = metashrew_core::utils::consensus_decode::<bitcoin::Block>(
         &mut Cursor::new(block.to_vec()),
     )?;
 
@@ -23,7 +22,6 @@ pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>>
     let mut tracker = IndexPointer::from_keyword("/blocktracker");
     let mut new_tracker = tracker.get().as_ref().clone();
     new_tracker.extend((&[parsed_block.header.block_hash()[0]]).to_vec());
-    println!("newtracker: {}", hex::encode(&new_tracker.clone()));
     tracker.set(Arc::new(new_tracker));
 
     // Benchmark: Create 1000 storage entries for benchmarking view function performance
@@ -38,7 +36,7 @@ pub fn main(height: u32, block: &[u8]) -> Result<(), Box<dyn std::error::Error>>
 #[metashrew_core::view]
 pub fn getblock(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut height_bytes = Cursor::new(input.to_vec());
-    let height = metashrew_support::utils::consume_sized_int::<u32>(&mut height_bytes)?;
+    let height = metashrew_core::utils::consume_sized_int::<u32>(&mut height_bytes)?;
     let key = format!("/blocks/{}", height).into_bytes();
     let block_bytes_arc = get(Arc::new(key));
     let block_bytes: &Vec<u8> = &*block_bytes_arc;

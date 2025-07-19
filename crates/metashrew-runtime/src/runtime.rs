@@ -497,8 +497,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ) -> Result<Self> {
         // CRITICAL: Set cache mode to indexer for deterministic memory layout
         // Runtime is used for indexer operations which need consistent memory layout
-        metashrew_support::lru_cache::set_cache_allocation_mode(
-            metashrew_support::lru_cache::CacheAllocationMode::Indexer
+        metashrew_core::lru_cache::set_cache_allocation_mode(
+            metashrew_core::lru_cache::CacheAllocationMode::Indexer
         );
         
         // CRITICAL: Ensure LRU cache memory is preallocated FIRST (only in indexer mode)

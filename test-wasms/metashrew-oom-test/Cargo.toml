@@ -8,5 +8,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 metashrew-core = { path = "../../crates/metashrew-core" }
-metashrew-support = { path = "../../crates/metashrew-support" }
 bitcoin = "0.29.2"

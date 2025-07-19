@@ -4,7 +4,7 @@
 //! memory and adjusts its allocation accordingly, preventing OOM crashes on
 //! resource-constrained servers.
 
-use metashrew_support::lru_cache::{
+use metashrew_core::lru_cache::{
     detect_available_memory, get_actual_lru_cache_memory_limit, get_min_lru_cache_memory_limit,
     is_cache_below_recommended_minimum, initialize_lru_cache, set_cache_allocation_mode,
     CacheAllocationMode, set_lru_cache, get_lru_cache, get_cache_stats

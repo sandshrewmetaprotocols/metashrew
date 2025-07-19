@@ -14,6 +14,7 @@ pub mod view_pool;
 
 #[cfg(test)]
 pub mod tests;
+pub mod test_utils;
 
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;

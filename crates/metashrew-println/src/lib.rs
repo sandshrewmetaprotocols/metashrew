@@ -30,13 +30,6 @@ pub mod wasm {
         return buffer;
     }
 
-    pub fn export_bytes<T: AsRef<[u8]>>(v: T) -> i32 {
-        let mut buffer = to_arraybuffer_layout(v);
-        let ptr = buffer.as_mut_ptr();
-        std::mem::forget(buffer);
-        return ptr as i32;
-    }
-
     #[allow(unused_unsafe)]
     #[cfg(target_arch = "wasm32")]
     pub fn log(v: Arc<Vec<u8>>) -> () {
@@ -44,7 +37,7 @@ pub mod wasm {
             fn __log(ptr: i32);
         }
         unsafe {
-            __log(export_bytes(v.as_ref()));
+            __log(to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())));
         }
     }
 
@@ -65,8 +58,9 @@ mod test_utils {
     #[no_mangle]
     pub extern "C" fn __log(ptr: i32) {
         unsafe {
-            let len = *(ptr as *const u32) as usize;
-            let slice = std::slice::from_raw_parts((ptr + 4) as *const u8, len);
+            let len_ptr = (ptr as *const u8).offset(-4) as *const u32;
+            let len = *len_ptr as usize;
+            let slice = std::slice::from_raw_parts(ptr as *const u8, len);
             if let Ok(s) = std::str::from_utf8(slice) {
                 log(s);
             }

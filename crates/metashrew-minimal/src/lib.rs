@@ -67,6 +67,7 @@ pub fn benchmark_view(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error
     Ok(result)
 }
 
+
 #[metashrew_core::view]
 pub fn benchmark_view_with_set(input: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     // Read all 1000 storage values and concatenate them into a single bytearray

@@ -389,23 +389,17 @@ pub fn u32_to_vec(v: u32) -> Result<Vec<u8>> {
 }
 
 pub fn try_read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Result<Vec<u8>> {
-    if data_start < 4 || (data_start as usize) > data.len() {
+    let data_offset = data_start as usize;
+    if data_offset + 4 > data.len() {
         return Err(anyhow!("memory error: invalid data_start"));
     }
-
-    // data_start points to the data portion, length is at data_start - 4
-    // This matches metashrew-support export_bytes which returns pointer + 4
-    let len_offset = (data_start as usize) - 4;
-    let len = u32::from_le_bytes(data[len_offset..len_offset + 4].try_into().unwrap());
-
-    let data_offset = data_start as usize;
-    let end_offset = data_offset + (len as usize);
-
+    let len = u32::from_le_bytes(data[data_offset..data_offset + 4].try_into().unwrap());
+    let bytes_offset = data_offset + 4;
+    let end_offset = bytes_offset + (len as usize);
     if end_offset > data.len() {
         return Err(anyhow!("memory error: data extends beyond memory bounds"));
     }
-
-    return Ok(Vec::<u8>::from(&data[data_offset..end_offset]));
+    return Ok(Vec::<u8>::from(&data[bytes_offset..end_offset]));
 }
 
 pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {

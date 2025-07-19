@@ -31,7 +31,7 @@ pub mod wasm {
     }
 
     #[allow(unused_unsafe)]
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(all(not(feature = "test-utils"), target_arch = "wasm32"))]
     pub fn log(v: Arc<Vec<u8>>) -> () {
         extern "C" {
             fn __log(ptr: i32);
@@ -40,31 +40,22 @@ pub mod wasm {
             __log(to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())));
         }
     }
+    #[allow(unused_unsafe)]
+    #[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
+    pub fn log(v: Arc<Vec<u8>>) -> () {
+      use wasm_bindgen::prelude::*;
+      #[wasm_bindgen(js_namespace = ["process", "stdout"])]
+      extern "C" {
+        fn write(s: &str);
+      }
+      unsafe {
+        write(format!("{}", String::from_utf8(v.as_ref().to_vec()).unwrap()).as_str());
+      }
+    }
 
     #[allow(unused_unsafe)]
     #[cfg(not(target_arch = "wasm32"))]
     pub fn log(_v: Arc<Vec<u8>>) -> () {
-    }
-}
-
-#[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
-mod test_utils {
-    use wasm_bindgen::prelude::*;
-    #[wasm_bindgen]
-    extern "C" {
-        #[wasm_bindgen(js_namespace = console)]
-        fn log(s: &str);
-    }
-    #[no_mangle]
-    pub extern "C" fn __log(ptr: i32) {
-        unsafe {
-            let len_ptr = (ptr as *const u8).offset(-4) as *const u32;
-            let len = *len_ptr as usize;
-            let slice = std::slice::from_raw_parts(ptr as *const u8, len);
-            if let Ok(s) = std::str::from_utf8(slice) {
-                log(s);
-            }
-        }
     }
 }
 

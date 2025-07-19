@@ -37,7 +37,8 @@ pub mod wasm {
             fn __log(ptr: i32);
         }
         unsafe {
-            __log(to_passback_ptr(&mut to_arraybuffer_layout(v.as_ref())));
+            let mut buffer = to_arraybuffer_layout(v.as_ref());
+            __log(to_passback_ptr(&mut buffer));
         }
     }
     #[allow(unused_unsafe)]

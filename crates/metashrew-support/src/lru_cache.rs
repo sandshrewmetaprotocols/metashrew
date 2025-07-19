@@ -719,8 +719,8 @@ pub fn initialize_lru_cache() {
             {
                 let mut cache = LRU_CACHE.write().unwrap();
                 if cache.is_none() {
-                    println!("DEBUG: Creating metashrew-cache with safe_memory_limit={} bytes ({} MB)",
-                             safe_memory_limit, safe_memory_limit / (1024 * 1024));
+                    //println!("DEBUG: Creating metashrew-cache with safe_memory_limit={} bytes ({} MB)",
+                    //         safe_memory_limit, safe_memory_limit / (1024 * 1024));
                     
                     let new_cache = Cache::builder()
                         .weigher(cache_weigher)

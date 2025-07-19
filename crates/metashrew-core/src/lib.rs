@@ -630,8 +630,10 @@ pub fn export_bytes(bytes: Vec<u8>) -> i32 {
     buffer.extend_from_slice(&len.to_le_bytes());
     buffer.extend_from_slice(&bytes);
 
-    // Return a pointer to the buffer
-    to_ptr(&mut buffer)
+    let ptr = to_ptr(&mut buffer);
+    std::mem::forget(buffer);
+    // Return a pointer to the data portion of the buffer
+    ptr + 4
 }
 
 /// Reset the flush queue

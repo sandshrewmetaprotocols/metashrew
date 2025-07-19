@@ -1151,6 +1151,80 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
 
+    /// Perform a database rollback to a specific target height.
+    ///
+    /// This function is intended to be called by a sync layer when a chain
+    /// reorganization is detected. It performs the following actions:
+    /// 1. Deletes orphaned SMT roots from the database.
+    /// 2. Rolls back the append-only state using the SMT helper.
+    /// 3. Updates the tip height in the database.
+    /// 4. Updates the tip height in the runtime context.
+    /// 5. Refreshes the WASM memory to ensure a clean state for subsequent block processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_height` - The height to roll back to. The resulting state will be
+    ///   as it was after `target_height` was processed.
+    pub fn rollback(&mut self, target_height: u32) -> Result<()> {
+        {
+            let mut guard = self.context.lock().map_err(lock_err)?;
+            let db_tip_height = match guard.db.get_immutable(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
+                Ok(Some(bytes)) if bytes.len() >= 4 => {
+                    u32::from_le_bytes(bytes[..4].try_into().unwrap())
+                }
+                _ => 0,
+            };
+
+            if target_height >= db_tip_height {
+                log::warn!(
+                    "Rollback target {} is not less than current tip {}. No action taken.",
+                    target_height,
+                    db_tip_height
+                );
+                return Ok(());
+            }
+
+            log::info!(
+                "Rolling back from {} to {}",
+                db_tip_height,
+                target_height
+            );
+
+            let mut smt_helper = SMTHelper::new(guard.db.clone());
+            let mut batch = guard.db.create_batch();
+
+            // Delete orphaned SMT roots for blocks that are being rolled back
+            for h in (target_height + 1)..=db_tip_height {
+                let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, h).into_bytes();
+                batch.delete(&root_key);
+            }
+
+            // Rollback the append-only state to the target height
+            smt_helper.rollback_to_height_batched(&mut batch, target_height)?;
+
+            // Update the tip height in the database
+            batch.put(
+                &TIP_HEIGHT_KEY.as_bytes().to_vec(),
+                &target_height.to_le_bytes(),
+            );
+
+            guard
+                .db
+                .write(batch)
+                .map_err(|e| anyhow!("Failed to write rollback batch: {}", e))?;
+
+            // Also update the tip height in the runtime context
+            guard.height = target_height;
+        }
+
+        log::info!("Rollback to height {} complete", target_height);
+
+        // After a rollback, the WASM memory is stale and must be refreshed.
+        self.refresh_memory()?;
+
+        Ok(())
+    }
+
     /// Get the value of a key at a specific block height using the append-only data structure.
     /// This function performs a binary search on the list of historical values for the key.
     pub fn get_value_at_height(

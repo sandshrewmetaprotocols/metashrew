@@ -49,7 +49,15 @@ pub struct TestUtils;
 impl TestUtils {
     /// Creates a simple test block with a specified height and previous block hash.
     pub fn create_test_block(height: u32, prev_hash: BlockHash) -> Block {
-        let txdata: Vec<Transaction> = vec![];
+        Self::create_test_block_with_tx(height, prev_hash, vec![])
+    }
+
+    /// Creates a simple test block with a specified height, previous block hash, and transactions.
+    pub fn create_test_block_with_tx(
+        height: u32,
+        prev_hash: BlockHash,
+        txdata: Vec<Transaction>,
+    ) -> Block {
         let merkle_root =
             bitcoin::merkle_tree::calculate_root(txdata.iter().map(|tx| tx.compute_txid()))
                 .map(|hash| {
@@ -67,6 +75,32 @@ impl TestUtils {
             nonce: 0,
         };
         Block { header, txdata }
+    }
+
+    /// Creates a simple unique transaction.
+    pub fn create_test_transaction(value: u64) -> Transaction {
+        use bitcoin::{
+            absolute,
+            script::{self},
+            OutPoint, ScriptBuf, Sequence, TxIn, TxOut, Witness,
+        };
+        let script_sig = script::Builder::new()
+            .push_int(value as i64)
+            .into_script();
+        Transaction {
+            version: bitcoin::transaction::Version(2),
+            lock_time: absolute::LockTime::from_consensus(0),
+            input: vec![TxIn {
+                previous_output: OutPoint::null(),
+                script_sig,
+                sequence: Sequence::MAX,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: bitcoin::Amount::from_sat(value),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
     }
 
     /// Serializes a block into a byte vector.

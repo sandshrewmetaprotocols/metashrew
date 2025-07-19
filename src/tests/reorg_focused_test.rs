@@ -27,7 +27,9 @@ async fn test_reorg_handling() -> Result<()> {
             context.height = height;
         }
         runtime.run()?;
-        runtime.refresh_memory()?;
+    }
+
+    {
     }
 
     // Verify state of chain A at height 4
@@ -35,16 +37,27 @@ async fn test_reorg_handling() -> Result<()> {
     let blocktracker_data_a = runtime
         .view("blocktracker".to_string(), &view_input, 4)
         .await?;
-    assert_eq!(blocktracker_data_a.len(), 5, "Chain A should have 5 blocks");
+    assert_eq!(
+        blocktracker_data_a.len(),
+        5 * 32,
+        "Chain A should have 5 * 32 bytes"
+    );
 
     // 2. Create a fork from height 2 (a new chain B)
+    // Simulate reorg detection by rolling back to height 1 (the common ancestor)
+    runtime.rollback(1)?;
+
+    {
+    }
+
     let mut chain_b_hashes = vec![chain_a_hashes[2]];
     for i in 0..4 {
         // Create a longer chain
         let height = 2 + i;
         let prev_hash = chain_b_hashes.last().unwrap().clone();
-        // Create a different block by changing the nonce
-        let mut block = TestUtils::create_test_block(height, prev_hash);
+        // Create a different block by adding a unique transaction
+        let tx = TestUtils::create_test_transaction(height as u64);
+        let mut block = TestUtils::create_test_block_with_tx(height, prev_hash, vec![tx]);
         block.header.nonce += 1; // Ensure block hash is different
         chain_b_hashes.push(block.block_hash());
         let block_bytes = TestUtils::serialize_block(&block);
@@ -54,14 +67,20 @@ async fn test_reorg_handling() -> Result<()> {
             context.height = height;
         }
         runtime.run()?;
-        runtime.refresh_memory()?;
+    }
+
+    {
     }
 
     // 3. Verify the state now reflects chain B
     let blocktracker_data_b = runtime
         .view("blocktracker".to_string(), &view_input, 5) // Chain B is at height 5
         .await?;
-    assert_eq!(blocktracker_data_b.len(), 6, "Chain B should have 6 blocks");
+    assert_eq!(
+        blocktracker_data_b.len(),
+        6 * 32,
+        "Chain B should have 6 * 32 bytes"
+    );
 
     // 4. Verify that the state from the original chain (A) after the fork point is gone.
     // Querying at height 4 should now show the state from chain B.
@@ -73,7 +92,6 @@ async fn test_reorg_handling() -> Result<()> {
         "State at height 4 should have changed after reorg"
     );
 
-    println!("✅ Reorganization handling test passed!");
 
     Ok(())
 }

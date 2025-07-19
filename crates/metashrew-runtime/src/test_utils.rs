@@ -126,4 +126,10 @@ impl KeyValueStoreLike for MemStoreAdapter {
         let keys = db.keys().cloned().collect::<Vec<Vec<u8>>>();
         Ok(Box::new(keys.into_iter()))
     }
+
+    fn clear(&mut self) -> Result<()> {
+        self.db.lock().unwrap().clear();
+        self.height = 0;
+        Ok(())
+    }
 }

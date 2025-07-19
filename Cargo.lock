@@ -3216,6 +3216,7 @@ version = "9.1.0"
 dependencies = [
  "anyhow",
  "bitcoin 0.32.6",
+ "bitcoin_hashes 0.14.0",
  "hex",
  "metashrew-core",
  "metashrew-support",

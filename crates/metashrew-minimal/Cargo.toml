@@ -12,6 +12,7 @@ metashrew-support = { path = "../metashrew-support" }
 anyhow = "1.0.86"
 hex = "0.4.3"
 bitcoin = "0.32.6"
+bitcoin_hashes = "0.14.0"
 
 [features]
 std = []

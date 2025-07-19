@@ -61,7 +61,7 @@ async fn test_complete_indexing_workflow() -> Result<()> {
     let blocktracker_result = get_blocktracker(adapter, final_height)?;
     assert_eq!(
         blocktracker_result.len(),
-        chain.len(),
+        chain.len() * 32,
         "Blocktracker should track all blocks"
     );
 

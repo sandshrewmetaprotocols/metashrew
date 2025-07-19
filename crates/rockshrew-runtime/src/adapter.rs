@@ -286,6 +286,21 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     fn get_height(&self) -> u32 {
         self.height
     }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        let mut batch = WriteBatch::default();
+        let mut iter = self.db.raw_iterator();
+        iter.seek_to_first();
+        while iter.valid() {
+            if let Some(key) = iter.key() {
+                batch.delete(key);
+            }
+            iter.next();
+        }
+        self.db.write(batch)?;
+        self.height = 0;
+        Ok(())
+    }
 }
 
 /// Query height from RocksDB

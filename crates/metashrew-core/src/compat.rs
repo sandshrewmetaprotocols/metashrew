@@ -4,7 +4,7 @@ use bitcoin::p2p::ServiceFlags;
 use prost::Message;
 
 #[cfg(target_arch = "wasm32")]
-use crate::wasm::{to_arraybuffer_layout, to_passback_ptr};
+use crate::wasm::{to_arraybuffer_layout};
 
 #[derive(Message)]
 pub struct EncodableVersionMessage {

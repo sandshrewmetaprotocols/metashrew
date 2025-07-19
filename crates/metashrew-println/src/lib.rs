@@ -47,6 +47,27 @@ pub mod wasm {
     }
 }
 
+#[cfg(all(feature = "test-utils", target_arch = "wasm32"))]
+mod test_utils {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(js_namespace = console)]
+        fn log(s: &str);
+    }
+    #[no_mangle]
+    pub extern "C" fn __log(ptr: i32) {
+        unsafe {
+            let len_ptr = (ptr as *const u8).offset(-4) as *const u32;
+            let len = *len_ptr as usize;
+            let slice = std::slice::from_raw_parts(ptr as *const u8, len);
+            if let Ok(s) = std::str::from_utf8(slice) {
+                log(s);
+            }
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod imp {
     pub use std::fmt::{Error, Write};

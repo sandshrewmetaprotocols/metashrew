@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/*",
+  "crates/metashrew-println",
   "test-wasms/*"
 ]
 
@@ -16,7 +17,7 @@ metashrew-runtime = { path = "crates/metashrew-runtime", version = "9.1.0" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime", version = "9.1.0" }
 metashrew-sync = { path = "crates/metashrew-sync", version = "9.1.0" }
 memshrew-runtime = { path = "crates/memshrew", version = "9.1.0" }
-metashrew-println = { path = "crates/metashrew-println", version = "9.1.0" }
+metashrew-println = { path = "crates/metashrew-println", version = "9.1.0", features = ["test-utils"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 # Root package for running tests

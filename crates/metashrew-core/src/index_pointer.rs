@@ -1,3 +1,4 @@
+use metashrew_support::index_pointer::KeyValuePointer;
 use crate::{get, set};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

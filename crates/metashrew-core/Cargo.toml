@@ -25,6 +25,7 @@ hex = "0.4.3"
 getrandom = { workspace = true }
 metashrew-macros = { path = "../metashrew-macros" }
 metashrew-cache = { path = "../metashrew-cache", features = ["sync"] }
+metashrew-support = { path = "../metashrew-support" }
 
 [build-dependencies]
 protobuf-codegen = "3.4.0"

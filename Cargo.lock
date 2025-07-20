@@ -3192,6 +3192,7 @@ dependencies = [
  "hex",
  "metashrew-cache",
  "metashrew-macros",
+ "metashrew-support",
  "ordinals",
  "prost",
  "protobuf 3.7.2",

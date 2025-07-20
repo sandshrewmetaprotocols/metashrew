@@ -212,4 +212,3 @@ use core::prelude;
 ///     // ... implement other required methods
 /// }
 /// ```
-pub use metashrew_support::index_pointer::KeyValuePointer;

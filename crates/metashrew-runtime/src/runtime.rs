@@ -66,7 +66,7 @@
 
 use anyhow::{anyhow, Context, Result};
 use itertools::Itertools;
-use protobuf::Message;
+use prost::Message;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
@@ -1409,7 +1409,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     // For preview, we'll store directly in the database
-                    let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
+                    let decoded = match KeyValueFlush::decode(&*encoded_vec) {
                         Ok(d) => d,
                         Err(_) => {
                             caller.data_mut().had_failure = true;
@@ -1600,7 +1600,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                     let _batch = T::Batch::default();
 
-                    let decoded = match KeyValueFlush::parse_from_bytes(&encoded_vec) {
+                    let decoded = match KeyValueFlush::decode(&*encoded_vec) {
                         Ok(d) => d,
                         Err(_e) => {
                             caller.data_mut().had_failure = true;

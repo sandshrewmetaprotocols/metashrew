@@ -12,6 +12,8 @@ metashrew-runtime = { path = "crates/metashrew-runtime" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 metashrew-sync = { path = "crates/metashrew-sync" }
 memshrew-runtime = { path = "crates/memshrew" }
+prost = "0.12.6"
+prost-build = "0.12.6"
 
 # Root package for running tests
 [package]

@@ -74,7 +74,7 @@
 //! ```
 
 extern crate alloc;
-use protobuf::Message;
+use prost::Message;
 use std::collections::HashMap;
 #[allow(unused_imports)]
 use std::fmt::Write;
@@ -88,6 +88,7 @@ pub mod imports;
 pub mod index_pointer;
 pub mod macros;
 pub mod stdio;
+pub mod proto;
 
 #[cfg(feature = "panic-hook")]
 use crate::compat::panic_hook;
@@ -95,8 +96,8 @@ use crate::imports::{__flush, __get, __get_len, __host_len, __load_input};
 pub use crate::stdio::stdout;
 #[allow(unused_imports)]
 use metashrew_support::{
-    compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
-    proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
+	compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
+	proto::metashrew::{IndexerMetadata, KeyValueFlush, ViewFunction},
 };
 
 /// Global cache for storing key-value pairs read from the database
@@ -262,10 +263,10 @@ pub fn flush() {
             to_encode.push((*(CACHE.as_ref().unwrap().get(item).unwrap().clone())).clone());
         }
         TO_FLUSH = Some(Vec::<Arc<Vec<u8>>>::new());
-        let mut buffer = KeyValueFlush::new();
+        let mut buffer = KeyValueFlush::default();
         buffer.list = to_encode;
-        let serialized = buffer.write_to_bytes().unwrap();
-        __flush(to_ptr(&mut to_arraybuffer_layout(&serialized.to_vec())) + 4);
+        let serialized = buffer.encode_to_vec();
+        __flush(to_ptr(&mut to_arraybuffer_layout(&serialized)) + 4);
     }
 }
 

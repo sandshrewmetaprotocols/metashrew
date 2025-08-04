@@ -334,26 +334,38 @@ where
                         break;
                     }
 
-                    // Detect and handle reorgs FIRST
-                    match handle_reorg(
-                        current_height,
-                        node.clone(),
-                        storage.clone(),
-                        runtime.clone(),
-                        &config,
-                    )
-                    .await
-                    {
-                        Ok(new_height) => {
-                            if new_height != current_height {
-                                info!("Reorg handled. Resuming from height {}", new_height);
-                            }
-                            current_height = new_height;
-                        }
+                    // Get remote tip
+                    let remote_tip = match node.get_tip_height().await {
+                        Ok(tip) => tip,
                         Err(e) => {
-                            error!("Error handling reorg: {}", e);
+                            error!("Failed to get tip height: {}", e);
                             sleep(Duration::from_secs(5)).await;
                             continue;
+                        }
+                    };
+
+                    // Check for reorgs only when close to the tip
+                    if remote_tip.saturating_sub(current_height) <= config.reorg_check_threshold {
+                        match handle_reorg(
+                            current_height,
+                            node.clone(),
+                            storage.clone(),
+                            runtime.clone(),
+                            &config,
+                        )
+                        .await
+                        {
+                            Ok(new_height) => {
+                                if new_height != current_height {
+                                    info!("Reorg handled. Resuming from height {}", new_height);
+                                }
+                                current_height = new_height;
+                            }
+                            Err(e) => {
+                                error!("Error handling reorg: {}", e);
+                                sleep(Duration::from_secs(5)).await;
+                                continue;
+                            }
                         }
                     }
 
@@ -364,16 +376,6 @@ where
                             break;
                         }
                     }
-
-                    // Get remote tip
-                    let remote_tip = match node.get_tip_height().await {
-                        Ok(tip) => tip,
-                        Err(e) => {
-                            error!("Failed to get tip height: {}", e);
-                            sleep(Duration::from_secs(5)).await;
-                            continue;
-                        }
-                    };
 
                     // Check if we need to wait for new blocks
                     if current_height > remote_tip {

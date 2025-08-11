@@ -118,6 +118,13 @@ impl KeyValueStoreLike for ForkAdapter {
             ForkAdapter::Legacy(adapter) => adapter.get_height(),
         }
     }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        match self {
+            ForkAdapter::Modern(adapter) => adapter.clear(),
+            ForkAdapter::Legacy(adapter) => adapter.clear(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -237,5 +244,13 @@ impl KeyValueStoreLike for LegacyRocksDBRuntimeAdapter {
 
     fn get_height(&self) -> u32 {
         self.height
+    }
+
+    fn clear(&mut self) -> Result<(), Self::Error> {
+        let mut batch = RocksDBBatch::default();
+        for key in self.keys()? {
+            batch.delete(key);
+        }
+        self.write(batch)
     }
 }

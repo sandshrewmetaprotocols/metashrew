@@ -120,11 +120,6 @@ pub use crate::{
     },
 };
 #[allow(unused_imports)]
-use metashrew_support::{
-	compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
-	proto::metashrew::{IndexerMetadata, KeyValueFlush as SupportKeyValueFlush, ViewFunction},
-};
-pub mod proto;
 use crate::proto::metashrew::{KeyValueFlush};
 
 /// Global cache for storing key-value pairs read from the database

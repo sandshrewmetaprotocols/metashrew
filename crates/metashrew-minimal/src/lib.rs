@@ -1,6 +1,7 @@
 use bitcoin;
 use bitcoin_hashes::Hash;
-use metashrew_core::{get, index_pointer::{IndexPointer, KeyValuePointer}};
+use metashrew_core::{get, index_pointer::IndexPointer};
+use metashrew_support::index_pointer::KeyValuePointer;
 use std::io::Cursor;
 use std::sync::Arc;
 

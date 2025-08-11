@@ -275,7 +275,18 @@ where
 
         // Main sync loop
         while self.is_running.load(Ordering::SeqCst) {
-            if height > 0 {
+            // Get remote tip first
+            let remote_tip = match self.node.get_tip_height().await {
+                Ok(tip) => tip,
+                Err(e) => {
+                    error!("Failed to get tip height: {}", e);
+                    sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            };
+
+            // Check for reorgs only when close to the tip
+            if height > 0 && remote_tip.saturating_sub(height) <= self.config.reorg_check_threshold {
                 match crate::sync::handle_reorg(
                     height,
                     self.node.clone(),
@@ -299,6 +310,7 @@ where
                     }
                 }
             }
+
             // Check exit condition
             if let Some(exit_at) = self.config.exit_at {
                 if height >= exit_at {
@@ -306,16 +318,6 @@ where
                     break;
                 }
             }
-
-            // Get remote tip
-            let remote_tip = match self.node.get_tip_height().await {
-                Ok(tip) => tip,
-                Err(e) => {
-                    error!("Failed to get tip height: {}", e);
-                    sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
 
             // Check if we need to wait for new blocks
             if height > remote_tip {

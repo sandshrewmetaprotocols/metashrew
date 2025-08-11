@@ -869,7 +869,6 @@ async fn handle_jsonrpc(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
     let args = Args::parse();
 
     // Create mempool tracker

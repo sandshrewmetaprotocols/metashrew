@@ -74,7 +74,7 @@
 //! ```
 
 extern crate alloc;
-use protobuf::Message;
+use prost::Message;
 use std::collections::HashMap;
 #[allow(unused_imports)]
 use std::fmt::Write;
@@ -92,6 +92,7 @@ pub mod stdio;
 pub mod wasm;
 pub mod utils;
 pub mod lru_cache;
+pub mod proto;
 
 // Re-export the procedural macros from metashrew-macros
 pub use metashrew_macros::{main, view};
@@ -117,6 +118,11 @@ pub use crate::{
         PrefixAnalysisConfig,
         run_pending_tasks,
     },
+};
+#[allow(unused_imports)]
+use metashrew_support::{
+	compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},
+	proto::metashrew::{IndexerMetadata, KeyValueFlush as SupportKeyValueFlush, ViewFunction},
 };
 pub mod proto;
 use crate::proto::metashrew::{KeyValueFlush};
@@ -390,23 +396,14 @@ pub fn flush() {
 
         // Reset flush queue
         TO_FLUSH = Some(Vec::<Arc<Vec<u8>>>::new());
-
         // Always call the host __flush function to ensure context state is set to 1
         // This is critical for proper indexer completion signaling
-        let mut buffer = KeyValueFlush::new();
+        let mut buffer = KeyValueFlush::default();
         buffer.list = to_encode;
 
         // Handle serialization errors gracefully
-        match buffer.write_to_bytes() {
-            Ok(serialized) => {
-                // Always call host function, even with empty data
-                let serialized_vec = serialized.to_vec();
-                __flush(to_ptr(&mut to_arraybuffer_layout(&serialized_vec)) + 4);
-            }
-            Err(_) => {
-                panic!("failed to serialize KeyValueFlush");
-            }
-        }
+        let serialized = buffer.encode_to_vec();
+        __flush(to_ptr(&mut to_arraybuffer_layout(&serialized)) + 4);
 
         // Always clear the immediate cache after flushing, regardless of success
         // This maintains consistency and prevents accumulation of stale data

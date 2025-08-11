@@ -56,7 +56,7 @@ mod tests;
 
 use actix_cors::Cors;
 use actix_web::{web, App, HttpResponse, HttpServer, Responder, Result as ActixResult};
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use clap::Parser;
 use log::{error, info, warn};
 use std::path::PathBuf;
@@ -66,14 +66,19 @@ use std::time::Instant;
 use tokio::signal;
 use tracing::{debug, instrument};
 
-use crate::adapters::{BitcoinRpcAdapter, MetashrewRuntimeAdapter};
+use crate::adapters::BitcoinRpcAdapter;
+use crate::adapters::MetashrewRuntimeAdapter;
 use crate::ssh_tunnel::parse_daemon_rpc_url;
 use metashrew_runtime::{set_label, MetashrewRuntime, ViewPoolConfig};
 use metashrew_sync::{
     BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync, SnapshotProvider,
     SnapshotSyncEngine, StorageAdapter, SyncConfig, SyncMode,
 };
-use rockshrew_runtime::{RocksDBRuntimeAdapter, RocksDBStorageAdapter};
+use rockshrew_runtime::{
+    adapter::{query_height_legacy, RocksDBRuntimeAdapter},
+    fork_adapter::{ForkAdapter, LegacyRocksDBRuntimeAdapter},
+    query_height, RocksDBStorageAdapter,
+};
 
 /// Command-line arguments for `rockshrew-mono`.
 #[derive(Parser, Debug, Clone)]
@@ -85,6 +90,10 @@ pub struct Args {
     pub indexer: PathBuf,
     #[arg(long)]
     pub db_path: PathBuf,
+    #[arg(long)]
+    pub fork: Option<PathBuf>,
+    #[arg(long)]
+    pub legacy_fork: bool,
     #[arg(long)]
     pub start_block: Option<u32>,
     #[arg(long)]
@@ -327,8 +336,23 @@ where
         set_label(label.clone());
     }
 
+    let start_block = if let Some(fork_path) = &args.fork {
+        let fork_db_path = fork_path.to_string_lossy().to_string();
+        let opts = RocksDBRuntimeAdapter::get_optimized_options();
+        let fork_db = rocksdb::DB::open_for_read_only(&opts, fork_db_path, false)?;
+        let tip_height = if args.legacy_fork {
+            query_height_legacy(Arc::new(fork_db), 0).await?
+        } else {
+            query_height(Arc::new(fork_db), 0).await?
+        };
+        info!("Forking from height: {}", tip_height);
+        args.start_block.unwrap_or(tip_height)
+    } else {
+        args.start_block.unwrap_or(0)
+    };
+
     let sync_config = SyncConfig {
-        start_block: args.start_block.unwrap_or(0),
+        start_block,
         exit_at: args.exit_at,
         pipeline_size: args.pipeline_size,
         max_reorg_depth: args.max_reorg_depth,
@@ -526,9 +550,18 @@ where
 use hex::FromHex;
 
 /// Production-specific run function.
-pub async fn run_prod(args: Args) -> Result<()> {
-    let (rpc_url, bypass_ssl, tunnel_config) = parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
+async fn run_generic<R: RuntimeAdapter + 'static>(
+    args: Args,
+    runtime_adapter: R,
+    storage_adapter: RocksDBStorageAdapter,
+) -> Result<()> {
+    let (rpc_url, bypass_ssl, tunnel_config) =
+        parse_daemon_rpc_url(&args.daemon_rpc_url).await?;
+    let node_adapter = BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
+    run(args, node_adapter, storage_adapter, runtime_adapter, None).await
+}
 
+pub async fn run_prod(args: Args) -> Result<()> {
     info!("Initializing RocksDB with performance-optimized configuration");
     info!("Database path: {}", args.db_path.display());
     info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
@@ -540,7 +573,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
         .map(|s| {
             let parts: Vec<&str> = s.split(':').collect();
             if parts.len() != 2 {
-                return Err(anyhow!("Invalid prefixroot format: {}", s));
+                return Err(anyhow::anyhow!("Invalid prefixroot format: {}", s));
             }
             let name = parts[0].to_string();
             let prefix_hex = parts[1].strip_prefix("0x").unwrap_or(parts[1]);
@@ -548,69 +581,76 @@ pub async fn run_prod(args: Args) -> Result<()> {
             Ok((name, prefix))
         })
         .collect::<Result<Vec<(String, Vec<u8>)>>>()?;
-
-    // Use the optimized configuration from rockshrew-runtime based on performance analysis
-    let mut runtime = MetashrewRuntime::load(
-        args.indexer.clone(),
-        RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?,
-        prefix_configs,
-    )?;
-
-    // Set the disable wasmtime log flag if requested
-    if args.disable_wasmtime_log {
-        runtime.set_disable_wasmtime_log(true);
-    }
-
-    let db = {
-        let context = runtime
-            .context
-            .lock()
-            .map_err(|_| anyhow!("Failed to lock context"))?;
-        context.db.db.clone()
-    };
-
-    let node_adapter =
-        BitcoinRpcAdapter::new(rpc_url, args.auth.clone(), bypass_ssl, tunnel_config);
-    let storage_adapter = RocksDBStorageAdapter::new(db.clone());
-    let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
-
-    // Set the disable LRU cache flag if requested
-    if args.disable_lru_cache {
-        runtime_adapter.set_disable_lru_cache(true);
-    }
-
-    // Configure view execution based on view pool setting
-    // Disable view pool if LRU cache is disabled
-    if args.enable_view_pool && !args.disable_lru_cache {
-        let pool_size = args.view_pool_size.unwrap_or_else(num_cpus::get);
-        let max_concurrent = args.view_pool_max_concurrent.unwrap_or(pool_size * 2);
-
-        let view_pool_config = ViewPoolConfig {
-            pool_size,
-            max_concurrent_requests: Some(max_concurrent),
-            enable_logging: args.view_pool_logging,
-        };
-
-        info!(
-            "Initializing view pool with {} runtimes, max {} concurrent requests",
-            pool_size, max_concurrent
-        );
-
-        if let Err(e) = runtime_adapter.initialize_view_pool(view_pool_config).await {
-            error!("Failed to initialize view pool: {}", e);
-            return Err(e);
-        }
-
-        info!("View pool initialized successfully - using stateful view runtimes for parallel execution");
-    } else {
-        // Disable stateful views to ensure we use non-stateful async wasmtime
-        runtime_adapter.disable_stateful_views().await;
-        if args.disable_lru_cache {
-            info!("LRU cache disabled - view pool disabled, will refresh memory for each WASM invocation");
+    if let Some(fork_path) = args.fork.clone() {
+        info!("Fork mode enabled, forking from: {}", fork_path.display());
+        let db_path = args.db_path.to_string_lossy().to_string();
+        let fork_path_str = fork_path.to_string_lossy().to_string();
+        let opts = RocksDBRuntimeAdapter::get_optimized_options();
+        let adapter = if args.legacy_fork {
+            info!("Using legacy fork adapter.");
+            let primary_db = rocksdb::DB::open(&opts, db_path)?;
+            let fork_db = rocksdb::DB::open_for_read_only(&opts, fork_path_str, false)?;
+            let legacy_adapter = LegacyRocksDBRuntimeAdapter {
+                db: Arc::new(primary_db),
+                fork_db: Some(Arc::new(fork_db)),
+                height: 0,
+                kv_tracker: Arc::new(std::sync::Mutex::new(None)),
+            };
+            ForkAdapter::Legacy(legacy_adapter)
         } else {
-            info!("View pool disabled - using non-stateful async wasmtime for view execution");
+            let modern_adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
+            ForkAdapter::Modern(modern_adapter)
+        };
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter, prefix_configs)?;
+        let storage_adapter = match runtime.context.lock().unwrap().db {
+            ForkAdapter::Modern(ref modern_adapter) => {
+                RocksDBStorageAdapter::new(modern_adapter.db.clone())
+            }
+            ForkAdapter::Legacy(ref legacy_adapter) => {
+                RocksDBStorageAdapter::new(legacy_adapter.db.clone())
+            }
+        };
+        let runtime_adapter =
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+        run_generic(args, runtime_adapter, storage_adapter).await
+    } else {
+        let adapter =
+            RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
+        let mut runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), prefix_configs)?;
+        if args.disable_wasmtime_log {
+            runtime.set_disable_wasmtime_log(true);
         }
+        let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
+        let runtime_adapter =
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+        if args.disable_lru_cache {
+            runtime_adapter.set_disable_lru_cache(true);
+        }
+        if args.enable_view_pool && !args.disable_lru_cache {
+            let pool_size = args.view_pool_size.unwrap_or_else(num_cpus::get);
+            let max_concurrent = args.view_pool_max_concurrent.unwrap_or(pool_size * 2);
+            let view_pool_config = ViewPoolConfig {
+                pool_size,
+                max_concurrent_requests: Some(max_concurrent),
+                enable_logging: args.view_pool_logging,
+            };
+            info!(
+                "Initializing view pool with {} runtimes, max {} concurrent requests",
+                pool_size, max_concurrent
+            );
+            if let Err(e) = runtime_adapter.initialize_view_pool(view_pool_config).await {
+                error!("Failed to initialize view pool: {}", e);
+                return Err(e);
+            }
+            info!("View pool initialized successfully - using stateful view runtimes for parallel execution");
+        } else {
+            runtime_adapter.disable_stateful_views().await;
+            if args.disable_lru_cache {
+                info!("LRU cache disabled - view pool disabled, will refresh memory for each WASM invocation");
+            } else {
+                info!("View pool disabled - using non-stateful async wasmtime for view execution");
+            }
+        }
+        run_generic(args, runtime_adapter, storage_adapter).await
     }
-
-    run(args, node_adapter, storage_adapter, runtime_adapter, None).await
 }

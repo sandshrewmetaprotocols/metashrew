@@ -78,7 +78,7 @@ use bitcoin::blockdata::constants::MAX_SCRIPT_ELEMENT_SIZE;
 use bitcoin::blockdata::script::witness_program::WitnessProgram;
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
 use bitcoin::blockdata::script::{self, Script, ScriptBuf, ScriptHash};
-use bitcoin::key::{TapTweak, TweakedPublicKey, UntweakedPublicKey};
+use bitcoin::key::{TapTweak, TweakedPublicKey, UntweakedPublicKey, XOnlyPublicKey};
 use bitcoin::taproot::TapNodeHash;
 use bitcoin::{PubkeyHash, PublicKey};
 
@@ -426,7 +426,7 @@ impl Payload {
         let (output_key, _parity) = internal_key.tap_tweak(secp, merkle_root);
         let prog = WitnessProgram::new(
             WitnessVersion::V1,
-            &output_key.to_x_only_public_key().serialize(),
+            &XOnlyPublicKey::from(output_key).serialize(),
         )
         .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)
@@ -450,7 +450,7 @@ impl Payload {
     pub fn p2tr_tweaked(output_key: TweakedPublicKey) -> Payload {
         let prog = WitnessProgram::new(
             WitnessVersion::V1,
-            &output_key.to_x_only_public_key().serialize(),
+            &XOnlyPublicKey::from(output_key).serialize(),
         )
         .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)

@@ -17,6 +17,8 @@ rockshrew-runtime = { path = "crates/rockshrew-runtime", version = "9.1.0" }
 metashrew-sync = { path = "crates/metashrew-sync", version = "9.1.0" }
 memshrew-runtime = { path = "crates/memshrew", version = "9.1.0" }
 getrandom = { version = "0.2", features = ["js"] }
+prost = "0.12.6"
+prost-build = "0.12.6"
 
 # Root package for running tests
 [package]

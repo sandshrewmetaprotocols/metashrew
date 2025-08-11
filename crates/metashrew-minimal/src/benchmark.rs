@@ -4,7 +4,7 @@
 //! entries and provides a view function to read them all.
 
 use crate::*;
-use metashrew_core::index_pointer::KeyValuePointer;
+use metashrew_core::KeyValuePointer;
 
 /// Benchmark main function that creates 1000 storage entries
 /// This is a helper function, not the actual WASM entry point

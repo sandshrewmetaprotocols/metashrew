@@ -2,7 +2,7 @@
 use wasm_bindgen::prelude::*;
 
 #[allow(unused_imports)]
-use crate::utils::ptr_to_vec;
+use metashrew_support::utils::ptr_to_vec;
 pub static mut _INPUT: Option<Vec<u8>> = None;
 
 #[allow(static_mut_refs)]

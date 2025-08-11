@@ -74,7 +74,7 @@
 //! ```
 
 extern crate alloc;
-use protobuf::Message;
+use prost::Message;
 use std::collections::HashMap;
 #[allow(unused_imports)]
 use std::fmt::Write;
@@ -87,39 +87,33 @@ pub mod byte_view;
 pub mod compat;
 pub mod imports;
 pub mod index_pointer;
-pub mod macros;
-pub mod stdio;
-pub mod wasm;
-pub mod utils;
 pub mod lru_cache;
+pub mod macros;
+pub mod memory;
+pub mod proto;
+pub mod stdio;
+pub mod utils;
+pub mod wasm;
 
-// Re-export the procedural macros from metashrew-macros
-pub use metashrew_macros::{main, view};
-pub use stdio::stdout;
-pub use wasm::{to_arraybuffer_layout, to_passback_ptr, to_ptr};
-
-
-#[cfg(test)]
-pub mod tests;
 
 #[cfg(feature = "panic-hook")]
 use crate::compat::panic_hook;
 use crate::imports::{__flush, __get, __get_len, __host_len, __load_input};
-pub use crate::{
-    lru_cache::{
-        api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
-        force_evict_to_target, force_evict_to_target_percentage, get_actual_lru_cache_memory_limit,
-        get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
-        get_min_lru_cache_memory_limit, get_total_memory_usage, get_view_height,
-        initialize_lru_cache, is_cache_below_recommended_minimum, is_lru_cache_initialized,
-        key_parser, set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache,
-        set_view_height, CacheAllocationMode, CacheStats, KeyPrefixStats, LruDebugStats,
-        PrefixAnalysisConfig,
-        run_pending_tasks,
-    },
+pub use crate::lru_cache::{
+    api_cache_get, api_cache_remove, api_cache_set, clear_lru_cache, clear_view_height,
+    force_evict_to_target, force_evict_to_target_percentage, get_actual_lru_cache_memory_limit,
+    get_cache_allocation_mode, get_cache_stats, get_height_partitioned_cache, get_lru_cache,
+    get_min_lru_cache_memory_limit, get_total_memory_usage, get_view_height,
+    initialize_lru_cache, is_cache_below_recommended_minimum, is_lru_cache_initialized,
+    key_parser, set_cache_allocation_mode, set_height_partitioned_cache, set_lru_cache,
+    set_view_height, CacheAllocationMode, CacheStats, KeyPrefixStats, LruDebugStats,
+    PrefixAnalysisConfig,
+    run_pending_tasks,
 };
-pub mod proto;
+pub use metashrew_macros::{main, view};
+pub use metashrew_support::index_pointer::KeyValuePointer;
 use crate::proto::metashrew::{KeyValueFlush};
+use crate::memory::{ to_passback_ptr, to_arraybuffer_layout, to_ptr };
 
 /// Global cache for storing key-value pairs read from the database
 ///
@@ -390,33 +384,10 @@ pub fn flush() {
 
         // Reset flush queue
         TO_FLUSH = Some(Vec::<Arc<Vec<u8>>>::new());
-
-        // Always call the host __flush function to ensure context state is set to 1
-        // This is critical for proper indexer completion signaling
-        let mut buffer = KeyValueFlush::new();
+        let mut buffer = KeyValueFlush::default();
         buffer.list = to_encode;
-
-        // Handle serialization errors gracefully
-        match buffer.write_to_bytes() {
-            Ok(serialized) => {
-                // Always call host function, even with empty data
-                let serialized_vec = serialized.to_vec();
-                __flush(to_ptr(&mut to_arraybuffer_layout(&serialized_vec)) + 4);
-            }
-            Err(_) => {
-                panic!("failed to serialize KeyValueFlush");
-            }
-        }
-
-        // Always clear the immediate cache after flushing, regardless of success
-        // This maintains consistency and prevents accumulation of stale data
-        CACHE = Some(HashMap::<Arc<Vec<u8>>, Arc<Vec<u8>>>::new());
-
-        // Force eviction if memory usage exceeds 1GB limit
-        // This ensures we don't accumulate too much memory over time
-        if is_lru_cache_initialized() {
-            force_evict_to_target();
-        }
+        let serialized = buffer.encode_to_vec();
+        __flush(to_ptr(&mut to_arraybuffer_layout(&serialized)) + 4);
     }
 }
 

@@ -379,11 +379,11 @@ pub trait KeyValueStoreLike {
         self.clone()
     }
 
-    /// Clear all data from the store
-    ///
-    /// This is a destructive operation that should only be used in testing
-    /// or when a complete reset is required.
+    fn set_kv_tracker(&mut self, _tracker: Option<KVTrackerFn>) {
+        // Default implementation does nothing
+    }
     fn clear(&mut self) -> Result<(), Self::Error>;
+
 }
 
 /// Type definition for key-value tracker function

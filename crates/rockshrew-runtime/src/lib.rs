@@ -1,8 +1,9 @@
 //! RocksDB-specific implementation of MetashrewRuntime
 
 pub mod adapter;
-pub mod optimized_config;
+pub mod fork_adapter;
 pub mod storage_adapter;
+pub mod optimized_config;
 pub mod retry;
 
 // Re-export the adapter and related types

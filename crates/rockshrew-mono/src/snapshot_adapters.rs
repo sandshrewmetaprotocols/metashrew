@@ -13,7 +13,8 @@ use metashrew_sync::{
     SnapshotProvider, SnapshotServer, SnapshotServerStatus, StorageAdapter, SyncError, SyncResult,
 };
 
-use crate::adapters::MetashrewRuntimeAdapter;
+use crate::adapters::{MetashrewRuntimeAdapter};
+use rockshrew_runtime::fork_adapter::ForkAdapter;
 use crate::snapshot::{RepoIndex, SnapshotConfig, SnapshotManager};
 use rockshrew_runtime::RocksDBStorageAdapter;
 
@@ -21,7 +22,7 @@ use rockshrew_runtime::RocksDBStorageAdapter;
 pub struct RockshrewSnapshotProvider {
     manager: Arc<RwLock<SnapshotManager>>,
     storage: Arc<RwLock<RocksDBStorageAdapter>>,
-    runtime_adapter: Option<Arc<RwLock<MetashrewRuntimeAdapter>>>,
+    runtime_adapter: Option<Arc<RwLock<MetashrewRuntimeAdapter<ForkAdapter>>>>,
 }
 
 impl RockshrewSnapshotProvider {
@@ -37,7 +38,7 @@ impl RockshrewSnapshotProvider {
 
     /// Set the runtime adapter to get tracked changes from
     #[allow(dead_code)]
-    pub fn set_runtime_adapter(&mut self, runtime_adapter: Arc<RwLock<MetashrewRuntimeAdapter>>) {
+    pub fn set_runtime_adapter(&mut self, runtime_adapter: Arc<RwLock<MetashrewRuntimeAdapter<ForkAdapter>>>) {
         self.runtime_adapter = Some(runtime_adapter);
     }
 

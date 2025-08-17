@@ -66,21 +66,8 @@ impl RocksDBRuntimeAdapter {
         })
     }
 
-    /// Open RocksDB with optimized configuration for metashrew workloads
-    ///
-    /// This uses performance-optimized settings based on profiling analysis that identified
-    /// bloom filter and memory allocation bottlenecks as the primary performance issues.
-    pub fn get_optimized_options() -> Options {
-        let mut opts = Options::default();
-        opts.create_if_missing(true);
-        opts.set_write_buffer_size(256 * 1024 * 1024);
-        opts.set_max_write_buffer_number(4);
-        opts.increase_parallelism(num_cpus::get() as i32);
-        opts
-    }
-
     pub fn open_optimized(path: String) -> Result<RocksDBRuntimeAdapter> {
-        let opts = Self::get_optimized_options();
+        let opts = crate::optimized_config::create_optimized_options();
         Self::open(path, opts)
     }
 

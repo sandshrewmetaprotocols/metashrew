@@ -120,6 +120,10 @@ pub struct Args {
     pub max_reorg_depth: u32,
     #[arg(long, default_value_t = 6)]
     pub reorg_check_threshold: u32,
+    #[arg(long, help = "RocksDB profile to use: 'optimized' or 'safe'.", default_value = "optimized")]
+    pub rocksdb_profile: String,
+    #[arg(long, help = "Attempt to repair a corrupted RocksDB database on startup.")]
+    pub repair: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -250,7 +254,7 @@ where
 
     let start_block = if let Some(fork_path) = &args.fork {
         let fork_db_path = fork_path.to_string_lossy().to_string();
-        let opts = RocksDBRuntimeAdapter::get_optimized_options();
+        let opts = rockshrew_runtime::create_optimized_options();
         let fork_db = rocksdb::DB::open_for_read_only(&opts, fork_db_path, false)?;
         let tip_height = if args.legacy_fork {
             query_height_legacy(Arc::new(fork_db), 0).await?
@@ -424,19 +428,28 @@ async fn run_generic<R: RuntimeAdapter + 'static>(
 }
 
 pub async fn run_prod(args: Args) -> Result<()> {
-    info!("Initializing RocksDB with performance-optimized configuration");
-    info!("Database path: {}", args.db_path.display());
-    info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
+    let db_opts = match args.rocksdb_profile.as_str() {
+        "safe" => {
+            info!("Initializing RocksDB with safe configuration");
+            info!("Database path: {}", args.db_path.display());
+            rockshrew_runtime::create_safe_options()
+        }
+        "optimized" | _ => {
+            info!("Initializing RocksDB with performance-optimized configuration");
+            info!("Database path: {}", args.db_path.display());
+            info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
+            rockshrew_runtime::create_optimized_options()
+        }
+    };
 
     if let Some(fork_path) = args.fork.clone() {
         info!("Fork mode enabled, forking from: {}", fork_path.display());
         let db_path = args.db_path.to_string_lossy().to_string();
         let fork_path_str = fork_path.to_string_lossy().to_string();
-        let opts = RocksDBRuntimeAdapter::get_optimized_options();
         let adapter = if args.legacy_fork {
             info!("Using legacy fork adapter.");
-            let primary_db = rocksdb::DB::open(&opts, db_path)?;
-            let fork_db = rocksdb::DB::open_for_read_only(&opts, fork_path_str, false)?;
+            let primary_db = rocksdb::DB::open(&db_opts, db_path)?;
+            let fork_db = rocksdb::DB::open_for_read_only(&db_opts, fork_path_str, false)?;
             let legacy_adapter = LegacyRocksDBRuntimeAdapter {
                 db: Arc::new(primary_db),
                 fork_db: Some(Arc::new(fork_db)),
@@ -445,7 +458,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
             };
             ForkAdapter::Legacy(legacy_adapter)
         } else {
-            let modern_adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
+            let modern_adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, db_opts)?;
             ForkAdapter::Modern(modern_adapter)
         };
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter)?;
@@ -461,8 +474,26 @@ pub async fn run_prod(args: Args) -> Result<()> {
             MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
         run_generic(args, runtime_adapter, storage_adapter).await
     } else {
-        let adapter =
-            RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
+        let db_path = args.db_path.to_string_lossy().to_string();
+        let adapter_result = RocksDBRuntimeAdapter::open(db_path.clone(), db_opts.clone());
+
+        let adapter = match adapter_result {
+            Ok(adapter) => adapter,
+            Err(e) => {
+                if args.repair && e.to_string().contains("Corruption") {
+                    warn!("RocksDB corruption detected. Attempting to repair...");
+                    if let Err(repair_err) = rocksdb::DB::repair(&db_opts, &db_path) {
+                        error!("RocksDB repair failed: {}", repair_err);
+                        return Err(repair_err.into());
+                    }
+                    info!("RocksDB repair successful. Retrying to open database...");
+                    RocksDBRuntimeAdapter::open(db_path, db_opts)?
+                } else {
+                    return Err(e.into());
+                }
+            }
+        };
+
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =

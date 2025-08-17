@@ -11,7 +11,7 @@ pub use storage_adapter::RocksDBStorageAdapter;
 
 // Re-export optimized configuration functions
 pub use optimized_config::{
-    create_optimized_options, create_secondary_options, log_performance_stats,
+    create_optimized_options, create_safe_options, create_secondary_options, log_performance_stats,
 };
 
 // Re-export core runtime with RocksDB adapter

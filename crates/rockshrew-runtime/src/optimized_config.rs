@@ -170,6 +170,31 @@ pub fn create_secondary_options() -> Options {
     opts
 }
 
+/// Create a safe configuration that prioritizes data integrity over performance.
+/// This is recommended for environments where data corruption is a concern.
+pub fn create_safe_options() -> Options {
+    let mut opts = create_optimized_options();
+
+    // === SAFETY CONFIGURATION (OVERWRITES OPTIMIZED DEFAULTS) ===
+
+    // CRITICAL: Enable fsync to ensure data is written to disk.
+    // This is the most important setting for preventing corruption.
+    opts.set_use_fsync(true);
+
+    // Reduce the amount of data buffered before a sync is forced.
+    // This reduces the window of data loss in a crash.
+    opts.set_bytes_per_sync(1024 * 1024); // 1MB
+    opts.set_wal_bytes_per_sync(1024 * 1024); // 1MB
+
+    // Reduce the WAL size to limit data loss in case of WAL corruption.
+    opts.set_max_total_wal_size(1 * 1024 * 1024 * 1024); // 1GB
+
+    // Disable adaptive yield which can be aggressive.
+    opts.set_enable_write_thread_adaptive_yield(false);
+
+    opts
+}
+
 /// Get available system memory in bytes
 fn get_available_memory() -> Result<usize, std::io::Error> {
     #[cfg(target_os = "linux")]

@@ -1,3 +1,22 @@
+// Chadson's Journal (2025-09-10T14:38:11.850Z)
+//
+// Objective: Fix compilation error in `metashrew-support` crate.
+//
+// The compilation failed with the error:
+// `no method named 'to_x_only_public_key' found for struct 'TweakedPublicKey' in the current scope`
+//
+// Research into the `rust-bitcoin` crate's source code (`reference/rust-bitcoin/bitcoin/src/crypto/key.rs`)
+// revealed that `TweakedPublicKey` is a tuple struct wrapping `XOnlyPublicKey` and implements
+// `From<TweakedPublicKey> for XOnlyPublicKey`.
+//
+// The fix is to replace the explicit method call `.to_x_only_public_key()` with the more idiomatic
+// and stable `.into()`, which leverages the `From` trait implementation. This change is less
+// susceptible to breaking with future updates to the `bitcoin` crate.
+//
+// The following changes were made:
+// - Replaced `output_key.to_x_only_public_key().serialize()` with `output_key.into().serialize()`
+//   in `p2tr` and `p2tr_tweaked` functions.
+
 //! # Comprehensive Bitcoin Address Handling and Encoding
 //!
 //! This module provides complete support for all Bitcoin address types and encoding formats.
@@ -78,7 +97,7 @@ use bitcoin::blockdata::constants::MAX_SCRIPT_ELEMENT_SIZE;
 use bitcoin::blockdata::script::witness_program::WitnessProgram;
 use bitcoin::blockdata::script::witness_version::WitnessVersion;
 use bitcoin::blockdata::script::{self, Script, ScriptBuf, ScriptHash};
-use bitcoin::key::{TapTweak, TweakedPublicKey, UntweakedPublicKey};
+use bitcoin::key::{TapTweak, TweakedPublicKey, UntweakedPublicKey, XOnlyPublicKey};
 use bitcoin::taproot::TapNodeHash;
 use bitcoin::{PubkeyHash, PublicKey};
 
@@ -426,7 +445,7 @@ impl Payload {
         let (output_key, _parity) = internal_key.tap_tweak(secp, merkle_root);
         let prog = WitnessProgram::new(
             WitnessVersion::V1,
-            &output_key.to_x_only_public_key().serialize(),
+            &XOnlyPublicKey::from(output_key).serialize(),
         )
         .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)
@@ -450,7 +469,7 @@ impl Payload {
     pub fn p2tr_tweaked(output_key: TweakedPublicKey) -> Payload {
         let prog = WitnessProgram::new(
             WitnessVersion::V1,
-            &output_key.to_x_only_public_key().serialize(),
+            &XOnlyPublicKey::from(output_key).serialize(),
         )
         .expect("taproot output key has len 32 <= 40");
         Payload::WitnessProgram(prog)

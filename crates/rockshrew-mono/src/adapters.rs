@@ -1,10 +1,3 @@
-//! Concrete adapter implementations for the `rockshrew-mono` binary.
-//!
-//! This module provides the specific implementations of the generic adapter traits
-//! from `metashrew-sync` that are required to run the production indexer. This
-//! includes the `BitcoinRpcAdapter` for connecting to Bitcoin Core and the
-//! `MetashrewRuntimeAdapter`, which is aware of the snapshotting process.
-
 use anyhow::Result;
 use async_trait::async_trait;
 use hex;
@@ -13,13 +6,14 @@ use metashrew_sync::{
     AtomicBlockResult, BitcoinNodeAdapter, BlockInfo, ChainTip, PreviewCall, RuntimeAdapter,
     RuntimeStats, SyncError, SyncResult, ViewCall, ViewResult,
 };
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
-use crate::ssh_tunnel::{make_request_with_tunnel, SshTunnel, SshTunnelConfig, TunneledResponse};
+use crate::ssh_tunnel::{make_request_with_tunnel, SshTunnel, SshTunnelConfig};
 
 // JSON-RPC request/response structs for BitcoinRpcAdapter
 #[derive(Serialize, Deserialize)]
@@ -72,8 +66,7 @@ impl BitcoinRpcAdapter {
         }
     }
 
-    async fn post(&self, body: String) -> Result<TunneledResponse> {
-        // Implementation with retry logic...
+    async fn request_with_retry<T: DeserializeOwned>(&self, method: &str, params: Vec<Value>) -> Result<T> {
         let max_retries = 5;
         let mut retry_delay = Duration::from_millis(500);
         let max_delay = Duration::from_secs(16);
@@ -85,6 +78,17 @@ impl BitcoinRpcAdapter {
         };
 
         for attempt in 0..max_retries {
+            let request_body = serde_json::to_string(&JsonRpcRequest {
+                id: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_err(|e| anyhow::anyhow!("Time error: {}", e))?
+                    .as_secs() as u32,
+                jsonrpc: "2.0".to_string(),
+                method: method.to_string(),
+                params: params.clone(),
+            })
+            .map_err(|e| anyhow::anyhow!("JSON serialization error: {}", e))?;
+
             let existing_tunnel: Option<SshTunnel> = if let Some(guard) = &active_tunnel_guard {
                 (**guard).clone()
             } else {
@@ -93,7 +97,7 @@ impl BitcoinRpcAdapter {
 
             match make_request_with_tunnel(
                 &self.rpc_url,
-                body.clone(),
+                request_body.clone(),
                 self.auth.clone(),
                 self.tunnel_config.clone(),
                 self.bypass_ssl,
@@ -109,67 +113,52 @@ impl BitcoinRpcAdapter {
                             }
                         }
                     }
-                    return Ok(tunneled_response);
+                    
+                    match tunneled_response.json::<T>().await {
+                        Ok(response) => return Ok(response),
+                        Err(e) => {
+                            log::warn!("JSON parsing failed (attempt {}): {}. Retrying in {:?}...", attempt + 1, e, retry_delay);
+                        }
+                    }
                 }
                 Err(e) => {
                     log::warn!("Request failed (attempt {}): {}. Retrying in {:?}...", attempt + 1, e, retry_delay);
                     if let Some(guard) = &mut active_tunnel_guard {
                         **guard = None;
                     }
-                    let jitter = {
-                        use rand::Rng;
-                        rand::thread_rng().gen_range(0..=100) as u64
-                    };
-                    retry_delay =
-                        std::cmp::min(max_delay, retry_delay * 2 + Duration::from_millis(jitter));
-                    tokio::time::sleep(retry_delay).await;
                 }
             }
+
+            let jitter = {
+                use rand::Rng;
+                rand::thread_rng().gen_range(0..=100) as u64
+            };
+            retry_delay = std::cmp::min(max_delay, retry_delay * 2 + Duration::from_millis(jitter));
+            tokio::time::sleep(retry_delay).await;
         }
-        Err(anyhow::anyhow!("Max retries exceeded"))
+
+        Err(anyhow::anyhow!("Max retries exceeded for method {}", method))
     }
 }
-
 #[async_trait]
 impl BitcoinNodeAdapter for BitcoinRpcAdapter {
     async fn get_tip_height(&self) -> SyncResult<u32> {
-        let request_body = serde_json::to_string(&JsonRpcRequest {
-            id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| SyncError::BitcoinNode(format!("Time error: {}", e)))?
-                .as_secs() as u32,
-            jsonrpc: "2.0".to_string(),
-            method: "getblockcount".to_string(),
-            params: vec![],
-        })
-        .map_err(|e| SyncError::BitcoinNode(format!("JSON serialization error: {}", e)))?;
-        let tunneled_response = self.post(request_body).await?;
-        let result: BlockCountResponse = tunneled_response
-            .json()
+        let response: BlockCountResponse = self
+            .request_with_retry("getblockcount", vec![])
             .await
-            .map_err(|e| SyncError::BitcoinNode(format!("JSON parsing error: {}", e)))?;
-        result
+            .map_err(|e| SyncError::BitcoinNode(e.to_string()))?;
+        response
             .result
             .ok_or_else(|| SyncError::BitcoinNode("missing result".to_string()))
     }
 
     async fn get_block_hash(&self, height: u32) -> SyncResult<Vec<u8>> {
-        let request_body = serde_json::to_string(&JsonRpcRequest {
-            id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| SyncError::BitcoinNode(format!("Time error: {}", e)))?
-                .as_secs() as u32,
-            jsonrpc: "2.0".to_string(),
-            method: "getblockhash".to_string(),
-            params: vec![Value::Number(Number::from(height))],
-        })
-        .map_err(|e| SyncError::BitcoinNode(format!("JSON serialization error: {}", e)))?;
-        let tunneled_response = self.post(request_body).await?;
-        let result: BlockHashResponse = tunneled_response
-            .json()
+        let params = vec![Value::Number(Number::from(height))];
+        let response: BlockHashResponse = self
+            .request_with_retry("getblockhash", params)
             .await
-            .map_err(|e| SyncError::BitcoinNode(format!("JSON parsing error: {}", e)))?;
-        let blockhash = result
+            .map_err(|e| SyncError::BitcoinNode(e.to_string()))?;
+        let blockhash = response
             .result
             .ok_or_else(|| SyncError::BitcoinNode("missing result".to_string()))?;
         hex::decode(blockhash)
@@ -178,25 +167,15 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 
     async fn get_block_data(&self, height: u32) -> SyncResult<Vec<u8>> {
         let blockhash = self.get_block_hash(height).await?;
-        let request_body = serde_json::to_string(&JsonRpcRequest {
-            id: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_err(|e| SyncError::BitcoinNode(format!("Time error: {}", e)))?
-                .as_secs() as u32,
-            jsonrpc: "2.0".to_string(),
-            method: "getblock".to_string(),
-            params: vec![
-                Value::String(hex::encode(&blockhash)),
-                Value::Number(Number::from(0)),
-            ],
-        })
-        .map_err(|e| SyncError::BitcoinNode(format!("JSON serialization error: {}", e)))?;
-        let tunneled_response = self.post(request_body).await?;
-        let result: BlockHashResponse = tunneled_response
-            .json()
+        let params = vec![
+            Value::String(hex::encode(&blockhash)),
+            Value::Number(Number::from(0)),
+        ];
+        let response: BlockHashResponse = self
+            .request_with_retry("getblock", params)
             .await
-            .map_err(|e| SyncError::BitcoinNode(format!("JSON parsing error: {}", e)))?;
-        let block_hex = result
+            .map_err(|e| SyncError::BitcoinNode(e.to_string()))?;
+        let block_hex = response
             .result
             .ok_or_else(|| SyncError::BitcoinNode("missing result".to_string()))?;
         hex::decode(block_hex)

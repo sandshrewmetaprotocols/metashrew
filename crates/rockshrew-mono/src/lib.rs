@@ -155,7 +155,11 @@ where
         "metashrew_view" => {
             let function_name = params[0].as_str().unwrap_or_default().to_string();
             let input_hex = params[1].as_str().unwrap_or_default().to_string();
-            let height = params[2].as_str().unwrap_or("latest").to_string();
+            let height = match params.get(2) {
+                Some(v) if v.is_string() => v.as_str().unwrap().to_string(),
+                Some(v) if v.is_number() => v.to_string(),
+                _ => "latest".to_string(),
+            };
             state
                 .sync_engine
                 .read()
@@ -167,7 +171,11 @@ where
             let block_hex = params[0].as_str().unwrap_or_default().to_string();
             let function_name = params[1].as_str().unwrap_or_default().to_string();
             let input_hex = params[2].as_str().unwrap_or_default().to_string();
-            let height = params[3].as_str().unwrap_or("latest").to_string();
+            let height = match params.get(3) {
+                Some(v) if v.is_string() => v.as_str().unwrap().to_string(),
+                Some(v) if v.is_number() => v.to_string(),
+                _ => "latest".to_string(),
+            };
             state
                 .sync_engine
                 .read()

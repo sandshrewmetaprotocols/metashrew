@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 /// An in-memory Bitcoin node adapter for testing
+#[derive(Clone)]
 pub struct InMemoryBitcoinNode {
     blocks: Arc<RwLock<HashMap<u32, Block>>>,
     tip: Arc<RwLock<ChainTip>>,

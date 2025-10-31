@@ -15,10 +15,7 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 
 use crate::snapshot::*;
-use crate::{
-    BitcoinNodeAdapter, JsonRpcProvider, PreviewCall, RuntimeAdapter, StorageAdapter, SyncConfig,
-    SyncEngine, SyncError, SyncResult, SyncStatus, ViewCall,
-};
+use crate::{BitcoinNodeAdapter, RuntimeAdapter, StorageAdapter, SyncConfig, SyncEngine, SyncError, SyncResult, SyncStatus};
 
 /// Snapshot-enabled synchronization engine
 pub struct SnapshotMetashrewSync<N, S, R>
@@ -59,11 +56,17 @@ where
     R: RuntimeAdapter + 'static,
 {
     /// Create a new snapshot-enabled sync engine
-    pub fn new(node: N, storage: S, runtime: R, config: SyncConfig, sync_mode: SyncMode) -> Self {
+    pub fn new(
+        node: N,
+        storage: Arc<RwLock<S>>,
+        runtime: Arc<RwLock<R>>,
+        config: SyncConfig,
+        sync_mode: SyncMode,
+    ) -> Self {
         Self {
             node: Arc::new(node),
-            storage: Arc::new(RwLock::new(storage)),
-            runtime: Arc::new(RwLock::new(runtime)),
+            storage,
+            runtime,
             config,
             sync_mode: Arc::new(RwLock::new(sync_mode)),
 
@@ -610,131 +613,4 @@ where
 
 }
 
-fn parse_height_string(height_str: &str) -> SyncResult<u32> {
-    let height_part = height_str.split(':').next().unwrap_or(height_str);
-    height_part
-        .parse::<u32>()
-        .map_err(|e| SyncError::Serialization(format!("Invalid height: {}", e)))
-}
 
-#[async_trait]
-impl<N, S, R> JsonRpcProvider for SnapshotMetashrewSync<N, S, R>
-where
-    N: BitcoinNodeAdapter + 'static,
-    S: StorageAdapter + 'static,
-    R: RuntimeAdapter + 'static,
-{
-    async fn metashrew_view(
-        &self,
-        function_name: String,
-        input_hex: String,
-        height: String,
-    ) -> SyncResult<String> {
-        let input_data = hex::decode(input_hex.trim_start_matches("0x"))
-            .map_err(|e| SyncError::Serialization(format!("Invalid hex input: {}", e)))?;
-
-        let height = if height == "latest" {
-            self.current_height.load(Ordering::SeqCst).saturating_sub(1)
-        } else {
-            parse_height_string(&height)?
-        };
-
-        let call = ViewCall {
-            function_name,
-            input_data,
-            height,
-        };
-
-        let runtime = self.runtime.read().await;
-        let result = runtime.execute_view(call).await?;
-
-        Ok(format!("0x{}", hex::encode(result.data)))
-    }
-
-    async fn metashrew_preview(
-        &self,
-        block_hex: String,
-        function_name: String,
-        input_hex: String,
-        height: String,
-    ) -> SyncResult<String> {
-        let block_data = hex::decode(block_hex.trim_start_matches("0x"))
-            .map_err(|e| SyncError::Serialization(format!("Invalid hex block data: {}", e)))?;
-
-        let input_data = hex::decode(input_hex.trim_start_matches("0x"))
-            .map_err(|e| SyncError::Serialization(format!("Invalid hex input: {}", e)))?;
-
-        let height = if height == "latest" {
-            self.current_height.load(Ordering::SeqCst).saturating_sub(1)
-        } else {
-            parse_height_string(&height)?
-        };
-
-        let call = PreviewCall {
-            block_data,
-            function_name,
-            input_data,
-            height,
-        };
-
-        let runtime = self.runtime.read().await;
-        let result = runtime.execute_preview(call).await?;
-
-        Ok(format!("0x{}", hex::encode(result.data)))
-    }
-
-    async fn metashrew_height(&self) -> SyncResult<u32> {
-        // Use storage adapter to get the actual indexed height from database
-        // This ensures consistency with the database state rather than sync engine's internal tracking
-        let storage = self.storage.read().await;
-        storage.get_indexed_height().await
-    }
-
-    async fn metashrew_getblockhash(&self, height: u32) -> SyncResult<String> {
-        let storage = self.storage.read().await;
-        match storage.get_block_hash(height).await? {
-            Some(hash) => Ok(format!("0x{}", hex::encode(hash))),
-            None => Err(SyncError::Storage(format!(
-                "Block hash not found for height {}",
-                height
-            ))),
-        }
-    }
-
-    async fn metashrew_stateroot(&self, height: String) -> SyncResult<String> {
-        let height = if height == "latest" {
-            self.current_height.load(Ordering::SeqCst).saturating_sub(1)
-        } else {
-            parse_height_string(&height)?
-        };
-
-        let storage = self.storage.read().await;
-        match storage.get_state_root(height).await? {
-            Some(root) => Ok(format!("0x{}", hex::encode(root))),
-            None => Err(SyncError::Storage(format!(
-                "State root not found for height {}",
-                height
-            ))),
-        }
-    }
-
-    async fn metashrew_snapshot(&self) -> SyncResult<serde_json::Value> {
-        let storage = self.storage.read().await;
-        let stats = storage.get_stats().await?;
-        let snapshot_stats = self.get_snapshot_stats().await?;
-
-        Ok(serde_json::json!({
-            "enabled": true,
-            "current_height": self.current_height.load(Ordering::SeqCst),
-            "indexed_height": stats.indexed_height,
-            "total_entries": stats.total_entries,
-            "storage_size_bytes": stats.storage_size_bytes,
-            "sync_mode": snapshot_stats.sync_mode,
-            "snapshots_created": snapshot_stats.snapshots_created,
-            "snapshots_applied": snapshot_stats.snapshots_applied,
-            "last_snapshot_height": snapshot_stats.last_snapshot_height,
-            "blocks_synced_normally": snapshot_stats.blocks_synced_normally,
-            "blocks_synced_from_snapshots": snapshot_stats.blocks_synced_from_snapshots
-        }))
-    }
-}

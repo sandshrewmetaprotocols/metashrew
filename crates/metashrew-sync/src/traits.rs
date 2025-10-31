@@ -301,22 +301,7 @@ pub struct RuntimeStats {
 /// Trait for JSON-RPC API providers
 #[async_trait]
 pub trait JsonRpcProvider: Send + Sync {
-    /// Execute a view function call
-    async fn metashrew_view(
-        &self,
-        function_name: String,
-        input_hex: String,
-        height: String,
-    ) -> SyncResult<String>;
 
-    /// Execute a preview function call
-    async fn metashrew_preview(
-        &self,
-        block_hex: String,
-        function_name: String,
-        input_hex: String,
-        height: String,
-    ) -> SyncResult<String>;
 
     /// Get the current indexed height
     async fn metashrew_height(&self) -> SyncResult<u32>;

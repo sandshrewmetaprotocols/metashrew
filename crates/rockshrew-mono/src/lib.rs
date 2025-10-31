@@ -64,6 +64,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::signal;
+use tokio::runtime::Builder;
 use tracing::{debug, instrument};
 
 use crate::adapters::BitcoinRpcAdapter;
@@ -228,15 +229,15 @@ where
 }
 
 /// Sets up a signal handler for graceful shutdown.
-async fn setup_signal_handler() -> Arc<AtomicBool> {
-    let shutdown_requested = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown_requested.clone();
+async fn setup_signal_handler() -> tokio::sync::broadcast::Sender<()> {
+    let (tx, _) = tokio::sync::broadcast::channel(1);
+    let shutdown_tx = tx.clone();
     tokio::spawn(async move {
         signal::ctrl_c().await.expect("Failed to install CTRL+C signal handler");
-        shutdown_clone.store(true, Ordering::SeqCst);
+        let _ = shutdown_tx.send(());
         info!("Shutdown signal received, initiating graceful shutdown...");
     });
-    shutdown_requested
+    tx
 }
 
 /// Main run function, generic over the adapter traits.
@@ -304,58 +305,11 @@ where
         sync_engine: sync_engine_arc.clone(),
     });
 
-    let indexer_handle = tokio::spawn({
-        let sync_engine_clone = sync_engine_arc.clone();
-        async move {
-            info!("Starting block indexing process...");
-            let mut block_count = 0u64;
-            let mut total_processing_time = std::time::Duration::ZERO;
-            let start_time = Instant::now();
-            
-            loop {
-                let block_start = Instant::now();
-                let mut engine = sync_engine_clone.write().await;
-                
-                match engine.process_next_block().await {
-                    Ok(Some(height)) => {
-                        let block_duration = block_start.elapsed();
-                        block_count += 1;
-                        total_processing_time += block_duration;
-                        
-                        // Log performance metrics
-                        if block_duration > std::time::Duration::from_millis(500) {
-                            warn!("Slow block processing at height {}: {:?}", height, block_duration);
-                        }
-                        
-                        // Log periodic performance summary
-                        if block_count % 100 == 0 {
-                            let avg_time = total_processing_time / block_count as u32;
-                            let elapsed = start_time.elapsed();
-                            let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
-                            info!(
-                                "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
-                                block_count, avg_time, blocks_per_sec
-                            );
-                        }
-                        
-                        debug!("Processed block {} in {:?}", height, block_duration);
-                        // Successfully processed a block, continue immediately
-                        continue;
-                    }
-                    Ok(None) => {
-                        // No more blocks to process, wait for new blocks
-                        debug!("No new blocks available, waiting...");
-                        drop(engine); // Release the lock before sleeping
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                    Err(e) => {
-                        error!("Fatal indexer error: {}. Shutting down.", e);
-                        break; // Exit the loop on any error for graceful shutdown
-                    }
-                }
-            }
-        }
-    });
+    let shutdown_tx = setup_signal_handler().await;
+    let mut shutdown_rx_main = shutdown_tx.subscribe();
+    let shutdown_rx_indexer = shutdown_tx.subscribe();
+
+    let indexer_handle = run_indexer_pipeline(sync_engine_arc.clone(), shutdown_rx_indexer)?;
 
     let server_handle = tokio::spawn({
         let args_clone = Arc::new(args.clone());
@@ -389,31 +343,96 @@ where
     info!("JSON-RPC server running at http://{}:{}", args.host, args.port);
     info!("Indexer is ready and processing blocks.");
 
-    let shutdown_signal = setup_signal_handler().await;
     tokio::select! {
-        result = indexer_handle => {
-            if let Err(e) = result {
-                error!("Indexer task failed: {}", e);
-            }
-        }
         result = server_handle => {
             if let Err(e) = result {
                 error!("Server task failed: {}", e);
             }
         }
-        _ = async {
-            loop {
-                if shutdown_signal.load(Ordering::SeqCst) {
-                    break;
-                }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            }
-        } => {
-            info!("Graceful shutdown complete.");
+        _ = shutdown_rx_main.recv() => {
+            info!("Graceful shutdown initiated, waiting for tasks to complete...");
         }
     }
 
+    // Wait for the indexer thread to finish
+    if let Err(e) = indexer_handle.join() {
+        error!("Indexer thread panicked: {:?}", e);
+    }
+
+    info!("Graceful shutdown complete.");
+
     Ok(())
+}
+
+fn run_indexer_pipeline<N, S, R>(
+    sync_engine_arc: Arc<tokio::sync::RwLock<SnapshotMetashrewSync<N, S, R>>>,
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>, 
+) -> Result<std::thread::JoinHandle<()>>
+where
+    N: BitcoinNodeAdapter + 'static,
+    S: StorageAdapter + 'static,
+    R: RuntimeAdapter + 'static,
+{
+    let indexer_thread = std::thread::spawn(move || {
+        let runtime = Builder::new_multi_thread()
+            .worker_threads(4) // Adjust the number of threads as needed
+            .thread_name("indexer-pool")
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async move {
+            info!("Starting block indexing process on dedicated thread pool...");
+            let mut block_count = 0u64;
+            let mut total_processing_time = std::time::Duration::ZERO;
+            let start_time = Instant::now();
+
+            loop {
+                if let Ok(_) = shutdown_rx.try_recv() {
+                    info!("Indexer pipeline shutting down.");
+                    break;
+                }
+
+                let block_start = Instant::now();
+                let mut engine = sync_engine_arc.write().await;
+
+                match engine.process_next_block().await {
+                    Ok(Some(height)) => {
+                        let block_duration = block_start.elapsed();
+                        block_count += 1;
+                        total_processing_time += block_duration;
+
+                        if block_duration > std::time::Duration::from_millis(500) {
+                            warn!("Slow block processing at height {}: {:?}", height, block_duration);
+                        }
+
+                        if block_count % 100 == 0 {
+                            let avg_time = total_processing_time / block_count as u32;
+                            let elapsed = start_time.elapsed();
+                            let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
+                            info!(
+                                "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
+                                block_count, avg_time, blocks_per_sec
+                            );
+                        }
+
+                        debug!("Processed block {} in {:?}", height, block_duration);
+                        continue;
+                    }
+                    Ok(None) => {
+                        debug!("No new blocks available, waiting...");
+                        drop(engine);
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                    Err(e) => {
+                        error!("Fatal indexer error: {}. Shutting down.", e);
+                        break;
+                    }
+                }
+            }
+        });
+    });
+    Ok(indexer_thread)
 }
 
 // RocksDB configuration has been moved to rockshrew-runtime/src/optimized_config.rs

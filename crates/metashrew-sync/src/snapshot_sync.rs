@@ -208,12 +208,12 @@ where
 
     /// Process a single block with snapshot considerations
     async fn process_block_with_snapshots(
-        &mut self,
+        &self,
         height: u32,
         block_data: Vec<u8>,
     ) -> SyncResult<()> {
         // Normal block processing
-        let mut runtime = self.runtime.write().await;
+        let runtime = self.runtime.read().await;
         runtime.process_block(height, &block_data).await?;
         drop(runtime);
 
@@ -265,7 +265,7 @@ where
     }
 
     /// Run the main sync loop with snapshot support
-    async fn run_snapshot_sync_loop(&mut self) -> SyncResult<()> {
+    async fn run_snapshot_sync_loop(&self) -> SyncResult<()> {
         let mut height = self.initialize().await?;
 
         // Check if we should start with snapshot sync
@@ -408,7 +408,7 @@ where
     }
 
     async fn process_block_with_snapshots(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
     ) -> SyncResult<()> {
@@ -416,7 +416,7 @@ where
             .await
     }
 
-    async fn check_and_apply_snapshots(&mut self) -> SyncResult<bool> {
+    async fn check_and_apply_snapshots(&self) -> SyncResult<bool> {
         if self.should_attempt_snapshot_sync().await? {
             self.attempt_snapshot_sync().await
         } else {
@@ -424,7 +424,7 @@ where
         }
     }
 
-    async fn create_snapshot_if_needed(&mut self, height: u32) -> SyncResult<bool> {
+    async fn create_snapshot_if_needed(&self, height: u32) -> SyncResult<bool> {
         if let Some(provider) = self.snapshot_provider.write().await.as_mut() {
             if provider.should_create_snapshot(height) {
                 info!("Creating snapshot at height {}", height);
@@ -482,7 +482,7 @@ where
         })
     }
 
-    async fn process_next_block(&mut self) -> SyncResult<Option<u32>> {
+    async fn process_next_block(&self) -> SyncResult<Option<u32>> {
         let mut height = self.current_height.load(Ordering::SeqCst);
 
         if height == 0 {

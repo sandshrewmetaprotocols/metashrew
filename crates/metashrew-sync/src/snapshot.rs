@@ -347,22 +347,22 @@ pub trait SnapshotSyncEngine: Send + Sync {
 
     /// Process a block with snapshot considerations
     async fn process_block_with_snapshots(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
     ) -> SyncResult<()>;
 
     /// Check and apply snapshots if in repo mode
-    async fn check_and_apply_snapshots(&mut self) -> SyncResult<bool>;
+    async fn check_and_apply_snapshots(&self) -> SyncResult<bool>;
 
     /// Create snapshot if in snapshot mode
-    async fn create_snapshot_if_needed(&mut self, height: u32) -> SyncResult<bool>;
+    async fn create_snapshot_if_needed(&self, height: u32) -> SyncResult<bool>;
 
     /// Get sync statistics including snapshot info
     async fn get_snapshot_stats(&self) -> SyncResult<SnapshotSyncStats>;
 
     /// Process the next block in the sync process
-    async fn process_next_block(&mut self) -> SyncResult<Option<u32>>;
+    async fn process_next_block(&self) -> SyncResult<Option<u32>>;
 }
 
 /// Statistics for snapshot-enabled sync

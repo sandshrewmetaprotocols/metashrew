@@ -437,7 +437,7 @@ where
 
 fn run_indexer_pipeline<N, S, R>(
     sync_engine_arc: Arc<tokio::sync::RwLock<SnapshotMetashrewSync<N, S, R>>>,
-    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>, 
+    mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) -> Result<std::thread::JoinHandle<()>>
 where
     N: BitcoinNodeAdapter + 'static,
@@ -465,7 +465,7 @@ where
                 }
 
                 let block_start = Instant::now();
-                let mut engine = sync_engine_arc.write().await;
+                let engine = sync_engine_arc.read().await;
 
                 match engine.process_next_block().await {
                     Ok(Some(height)) => {
@@ -505,7 +505,6 @@ where
     });
     Ok(indexer_thread)
 }
-
 // RocksDB configuration has been moved to rockshrew-runtime/src/optimized_config.rs
 // for better organization and reusability across the codebase.
 

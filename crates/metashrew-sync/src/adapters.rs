@@ -125,7 +125,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> Clone for MetashrewRu
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     for MetashrewRuntimeAdapter<T>
 {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         let mut runtime = self.runtime.lock().await;
         {
             let mut context = runtime
@@ -143,7 +143,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
@@ -166,14 +166,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.lock().await;
-        let result = runtime
-            .view(call.function_name, &call.input_data, call.height)
-            .await
-            .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
+        let result = self.runtime.lock().await.view(call.function_name, &call.input_data, call.height).await?;
         Ok(ViewResult { data: result })
     }
-
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
         let runtime = self.runtime.lock().await;
         let result = runtime
@@ -189,14 +184,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        let runtime = self.runtime.lock().await;
-        runtime
-            .get_state_root(height)
-            .await
-            .map_err(|e| SyncError::Runtime(format!("Failed to get state root for height {}: {}", height, e)))
+        self.runtime.lock().await.get_state_root(height)
     }
-
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         log::info!("Manual memory refresh requested - note that memory is now refreshed automatically after each block");
         Ok(())
     }

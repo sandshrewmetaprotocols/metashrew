@@ -225,13 +225,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapt
 
 #[async_trait]
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for MetashrewRuntimeAdapter<T> {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         if let Some(manager_arc) = self.get_snapshot_manager().await {
             {
                 let mut manager = manager_arc.write().await;
                 manager.set_current_height(height);
             }
-            let mut runtime = self.runtime.write().await;
+            let runtime = self.runtime.read().await;
             {
                 let mut context = runtime
                     .context
@@ -264,7 +264,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
                 context.db.set_kv_tracker(None);
             }
         } else {
-            let mut runtime = self.runtime.write().await;
+            let runtime = self.runtime.read().await;
             {
                 let mut context = runtime
                     .context
@@ -282,12 +282,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
-        let mut runtime = self.runtime.write().await;
+        let runtime = self.runtime.read().await;
         runtime
             .process_block_atomic(height, block_data, block_hash)
             .await
@@ -340,7 +340,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
         Ok(ViewResult { data: result })
     }
 
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         Ok(())
     }
 
@@ -349,7 +349,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
-        let runtime = self.runtime.write().await;
+        let runtime = self.runtime.read().await;
         let context = runtime
             .context
             .lock()

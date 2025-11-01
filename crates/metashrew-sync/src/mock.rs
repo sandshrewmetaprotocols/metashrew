@@ -270,7 +270,7 @@ impl MockRuntime {
 
 #[async_trait]
 impl RuntimeAdapter for MockRuntime {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }
@@ -288,7 +288,7 @@ impl RuntimeAdapter for MockRuntime {
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
@@ -359,7 +359,7 @@ impl RuntimeAdapter for MockRuntime {
         Ok(state_root)
     }
 
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }

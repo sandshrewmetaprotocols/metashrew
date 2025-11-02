@@ -7,7 +7,7 @@
 
 use crate::test_utils::{TestConfig, TestUtils};
 use memshrew_runtime::MemStoreAdapter;
-use metashrew_sync::{MetashrewRuntimeAdapter, SyncConfig, SyncEngine, ViewCall, BitcoinNodeAdapter, RuntimeAdapter, StorageAdapter};
+use crate::{BitcoinNodeAdapter, Metashrew, MetashrewAgent, RuntimeAdapter};
 use anyhow::Result;
 use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
@@ -22,7 +22,7 @@ async fn test_historical_view() -> Result<()> {
     let adapter = MetashrewRuntimeAdapter::new(runtime);
 
     let genesis_block = TestUtils::create_test_block(0, BlockHash::all_zeros());
-    let mut node = InMemoryBitcoinNode::new(genesis_block.clone());
+    let node = InMemoryBitcoinNode::new(genesis_block_hash);
     node.add_block(genesis_block, 0);
 
     let block1 = TestUtils::create_test_block(1, BlockHash::from_slice(&node.get_block_hash(0).await?)?);

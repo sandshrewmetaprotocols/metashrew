@@ -72,13 +72,28 @@ use crate::ssh_tunnel::parse_daemon_rpc_url;
 use metashrew_runtime::{set_label, MetashrewRuntime};
 use metashrew_sync::{
     BitcoinNodeAdapter, JsonRpcProvider, RuntimeAdapter, SnapshotMetashrewSync,
-    SnapshotProvider, StorageAdapter, SyncConfig, SyncMode, SnapshotSyncEngine,
+    SnapshotProvider, StorageAdapter, SyncConfig, SyncMode,
 };
 use rockshrew_runtime::{
     adapter::{query_height_legacy, RocksDBRuntimeAdapter},
     fork_adapter::{ForkAdapter, LegacyRocksDBRuntimeAdapter},
     query_height, RocksDBStorageAdapter,
 };
+use tokio::sync::mpsc;
+use num_cpus;
+
+#[derive(Debug)]
+struct BlockData {
+    height: u32,
+    block_data: Vec<u8>,
+    block_hash: Vec<u8>,
+}
+
+#[derive(Debug)]
+enum BlockResult {
+    Success(u32),
+    Error(u32, anyhow::Error),
+}
 
 /// Command-line arguments for `rockshrew-mono`.
 #[derive(Parser, Debug, Clone)]
@@ -304,54 +319,120 @@ where
         sync_engine: sync_engine_arc.clone(),
     });
 
-    let indexer_handle = tokio::spawn({
+    let pipeline_size = args.pipeline_size.unwrap_or_else(|| {
+        let available_cpus = num_cpus::get();
+        let auto_size = std::cmp::min(std::cmp::max(5, available_cpus / 2), 16);
+        info!("Auto-configuring pipeline size to {} based on {} available CPU cores", auto_size, available_cpus);
+        auto_size
+    });
+
+    let (block_sender, mut block_receiver) = mpsc::channel::<BlockData>(pipeline_size);
+    let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(pipeline_size);
+
+    let fetcher_handle = tokio::spawn({
         let sync_engine_clone = sync_engine_arc.clone();
+        let block_sender_clone = block_sender.clone();
+        let exit_at = args.exit_at;
+
         async move {
-            info!("Starting block indexing process...");
-            let mut block_count = 0u64;
-            let mut total_processing_time = std::time::Duration::ZERO;
-            let start_time = Instant::now();
-            
+            info!("Block fetcher task started.");
             loop {
-                let block_start = Instant::now();
-                let mut engine = sync_engine_clone.write().await;
-                
-                match engine.process_next_block().await {
-                    Ok(Some(height)) => {
-                        let block_duration = block_start.elapsed();
-                        block_count += 1;
-                        total_processing_time += block_duration;
-                        
-                        // Log performance metrics
-                        if block_duration > std::time::Duration::from_millis(500) {
-                            warn!("Slow block processing at height {}: {:?}", height, block_duration);
-                        }
-                        
-                        // Log periodic performance summary
-                        if block_count % 100 == 0 {
-                            let avg_time = total_processing_time / block_count as u32;
-                            let elapsed = start_time.elapsed();
-                            let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
-                            info!(
-                                "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
-                                block_count, avg_time, blocks_per_sec
-                            );
-                        }
-                        
-                        debug!("Processed block {} in {:?}", height, block_duration);
-                        // Successfully processed a block, continue immediately
+                let engine = sync_engine_clone.read().await;
+                if let Some(exit_at) = exit_at {
+                    let current_indexed_height = match engine.get_height().await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        error!("Failed to get current indexed height: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         continue;
                     }
+                };
+                if current_indexed_height >= exit_at {
+                        info!("Fetcher reached exit-at block {}, shutting down", exit_at);
+                        break;
+                    }
+                }
+
+                match engine.get_next_block_data().await {
+                    Ok(Some((height, block_data, block_hash))) => {
+                        debug!("Fetched block {} ({})", height, block_data.len());
+                        if block_sender_clone.send(BlockData { height, block_data, block_hash }).await.is_err() {
+                            break;
+                        }
+                    }
                     Ok(None) => {
-                        // No more blocks to process, wait for new blocks
                         debug!("No new blocks available, waiting...");
-                        drop(engine); // Release the lock before sleeping
+                        drop(engine);
                         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                     Err(e) => {
-                        error!("Fatal indexer error: {}. Shutting down.", e);
-                        break; // Exit the loop on any error for graceful shutdown
+                        error!("Failed to fetch block: {}", e);
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
+                }
+            }
+            debug!("Block fetcher task completed.");
+        }
+    });
+
+    let processor_handle = tokio::spawn({
+        let sync_engine_clone = sync_engine_arc.clone();
+        let result_sender_clone = result_sender.clone();
+
+        async move {
+            info!("Block processor task started.");
+            while let Some(block_data) = block_receiver.recv().await {
+                debug!("Processing block {} ({})", block_data.height, block_data.block_data.len());
+                let engine = sync_engine_clone.write().await;
+                let result = match engine.process_block(block_data.height, block_data.block_data, block_data.block_hash).await {
+                    Ok(_) => BlockResult::Success(block_data.height),
+                    Err(e) => BlockResult::Error(block_data.height, e.into()),
+                };
+                if result_sender_clone.send(result).await.is_err() {
+                    break;
+                }
+            }
+            debug!("Block processor task completed.");
+        }
+    });
+
+    let indexer_handle = tokio::spawn(async move {
+        info!("Starting block indexing process...");
+        let mut block_count = 0u64;
+        let mut total_processing_time = std::time::Duration::ZERO;
+        let start_time = Instant::now();
+
+        while let Some(result) = result_receiver.recv().await {
+            match result {
+                BlockResult::Success(height) => {
+                    let block_duration = start_time.elapsed(); // This is not block duration, but time since start
+                    block_count += 1;
+                    total_processing_time += block_duration;
+
+                    if block_duration > std::time::Duration::from_millis(500) {
+                        warn!("Slow block processing at height {}: {:?}", height, block_duration);
+                    }
+
+                    if block_count % 100 == 0 {
+                        let avg_time = total_processing_time / block_count as u32;
+                        let elapsed = start_time.elapsed();
+                        let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
+                        info!(
+                            "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
+                            block_count, avg_time, blocks_per_sec
+                        );
+                    }
+                    debug!("Successfully processed block {}", height);
+                }
+                BlockResult::Error(height, error) => {
+                    error!("Failed to process block {}: {}", height, error);
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            }
+            if let Some(exit_at) = args.exit_at {
+                if block_count as u32 >= exit_at {
+                    info!("Reached exit-at block {}, shutting down gracefully", exit_at);
+                    break;
                 }
             }
         }
@@ -391,6 +472,16 @@ where
 
     let shutdown_signal = setup_signal_handler().await;
     tokio::select! {
+        result = fetcher_handle => {
+            if let Err(e) = result {
+                error!("Fetcher task failed: {}", e);
+            }
+        }
+        result = processor_handle => {
+            if let Err(e) = result {
+                error!("Processor task failed: {}", e);
+            }
+        }
         result = indexer_handle => {
             if let Err(e) = result {
                 error!("Indexer task failed: {}", e);

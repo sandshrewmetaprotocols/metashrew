@@ -160,6 +160,71 @@ where
         self.start().await
     }
 
+    pub async fn get_next_block_data(&self) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
+        let mut current_height = self.current_height.load(Ordering::SeqCst);
+        
+        // Get remote tip
+        let remote_tip = self.node.get_tip_height().await?;
+
+        // Check for reorgs only when close to the tip
+        if remote_tip.saturating_sub(current_height) <= self.config.reorg_check_threshold {
+            match handle_reorg(
+                current_height,
+                self.node.clone(),
+                self.storage.clone(),
+                self.runtime.clone(),
+                &self.config,
+            )
+            .await
+            {
+                Ok(new_height) => {
+                    if new_height != current_height {
+                        info!("Reorg handled. Resuming from height {}", new_height);
+                    }
+                    current_height = new_height;
+                    self.current_height.store(current_height, Ordering::SeqCst);
+                }
+                Err(e) => {
+                    error!("Error handling reorg: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Check exit condition
+        if let Some(exit_at) = self.config.exit_at {
+            if current_height >= exit_at {
+                info!("Fetcher reached exit height {}", exit_at);
+                return Ok(None);
+            }
+        }
+
+        // Check if we need to wait for new blocks
+        if current_height > remote_tip {
+            debug!(
+                "Waiting for new blocks: current={}, tip={}",
+                current_height, remote_tip
+            );
+            return Ok(None);
+        }
+
+        // Fetch block
+        match self.node.get_block_info(current_height).await {
+            Ok(block_info) => {
+                info!(
+                    "Fetched block {} ({} bytes)",
+                    current_height,
+                    block_info.data.len()
+                );
+                Ok(Some((current_height, block_info.data, block_info.hash)))
+            }
+            Err(e) => {
+                error!("Failed to fetch block {}: {}", current_height, e);
+                Err(e.into())
+            }
+        }
+    }
+
     /// Initialize the sync engine by determining the starting height
     async fn initialize(&self) -> SyncResult<u32> {
         let storage = self.storage.read().await;
@@ -209,7 +274,7 @@ where
     }
 
     /// Process a single block atomically
-    async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
+    pub async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
         info!(
             "Processing block {} ({} bytes) atomically",
             height,

@@ -84,6 +84,154 @@ where
         }
     }
 
+    pub async fn get_height(&self) -> SyncResult<u32> {
+        let storage = self.storage.read().await;
+        storage.get_indexed_height().await
+    }
+
+    pub async fn get_next_block_data(&self) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
+        let mut current_height = self.current_height.load(Ordering::SeqCst);
+        
+        // Get remote tip
+        let remote_tip = self.node.get_tip_height().await?;
+
+        // Check for reorgs only when close to the tip
+        if remote_tip.saturating_sub(current_height) <= self.config.reorg_check_threshold {
+             match crate::sync::handle_reorg(
+                current_height,
+                self.node.clone(),
+                self.storage.clone(),
+                self.runtime.clone(),
+                &self.config,
+            )
+            .await
+            {
+                Ok(new_height) => {
+                    if new_height != current_height {
+                        info!("Reorg handled. Resuming from height {}", new_height);
+                    }
+                    current_height = new_height;
+                    self.current_height.store(current_height, Ordering::SeqCst);
+                }
+                Err(e) => {
+                    error!("Error handling reorg: {}", e);
+                    return Err(e); // Propagate error for retry
+                }
+            }
+        }
+
+        // Check exit condition
+        if let Some(exit_at) = self.config.exit_at {
+            if current_height >= exit_at {
+                info!("Fetcher reached exit height {}", exit_at);
+                return Ok(None);
+            }
+        }
+
+        // Check if we need to wait for new blocks
+        if current_height > remote_tip {
+            debug!(
+                "Waiting for new blocks: current={}, tip={}",
+                current_height, remote_tip
+            );
+            return Ok(None);
+        }
+
+        // Fetch block
+        match self.node.get_block_info(current_height).await {
+            Ok(block_info) => {
+                info!(
+                    "Fetched block {} ({} bytes)",
+                    current_height,
+                    block_info.data.len()
+                );
+                Ok(Some((current_height, block_info.data, block_info.hash)))
+            }
+            Err(e) => {
+                error!("Failed to fetch block {}: {}", current_height, e);
+                Err(e.into())
+            }
+        }
+    }
+
+    pub async fn process_block(
+        &self,
+        height: u32,
+        block_data: Vec<u8>,
+        block_hash: Vec<u8>,
+    ) -> SyncResult<()> {
+        // Try atomic processing first
+        let atomic_result = {
+            let mut runtime = self.runtime.write().await;
+            runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+        };
+
+        match atomic_result {
+            Ok(result) => {
+                // Atomic processing succeeded
+                info!(
+                    "Atomic block processing succeeded for height {} in pipeline",
+                    height
+                );
+
+                // Update storage with all metadata atomically
+                {
+                    let mut storage = self.storage.write().await;
+                    storage.set_indexed_height(height).await?;
+                    storage.store_block_hash(height, &result.block_hash).await?;
+                    storage.store_state_root(height, &result.state_root).await?;
+                }
+
+                // Update current height atomic
+                self.current_height.store(height + 1, Ordering::SeqCst);
+                self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
+
+                Ok(())
+            }
+            Err(_) => {
+                // Fallback to non-atomic processing
+                warn!(
+                    "Atomic processing failed for height {} in pipeline, falling back",
+                    height
+                );
+
+                // Process with runtime (non-atomic fallback)
+                {
+                    let mut runtime = self.runtime.write().await;
+                    runtime
+                        .process_block(height, &block_data)
+                        .await
+                        .map_err(|e| SyncError::BlockProcessing {
+                            height,
+                            message: e.to_string(),
+                        })?;
+                }
+
+                // Get state root after processing
+                let state_root = {
+                    let runtime = self.runtime.read().await;
+                    runtime.get_state_root(height).await?
+                };
+
+                // Update storage with height, block hash, and state root
+                {
+                    let mut storage = self.storage.write().await;
+                    storage.set_indexed_height(height).await?;
+                    storage.store_block_hash(height, &block_hash).await?;
+                    storage.store_state_root(height, &state_root).await?;
+                }
+
+                // Update current height atomic
+                self.current_height.store(height + 1, Ordering::SeqCst);
+                self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
+
+                Ok(())
+            }
+        }
+    }
+
     /// Set the snapshot provider
     pub async fn set_snapshot_provider(&self, provider: Box<dyn SnapshotProvider>) {
         let mut sp = self.snapshot_provider.write().await;

@@ -84,6 +84,33 @@ where
         }
     }
 
+    pub async fn init(&self) {
+        let storage = self.storage.read().await;
+        let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
+        let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
+            self.config.start_block
+        } else if indexed_height > 0 {
+            indexed_height + 1
+        } else {
+            self.config.start_block
+        };
+
+        if indexed_height == 0 && self.config.start_block > 0 {
+            let prev_height = self.config.start_block.saturating_sub(1);
+            if let Ok(None) = storage.get_state_root(prev_height).await {
+                let empty_state_root = vec![0u8; 32];
+                let mut storage = self.storage.write().await;
+                storage.store_state_root(prev_height, &empty_state_root).await.unwrap();
+            }
+        }
+
+        self.current_height.store(start_height, Ordering::SeqCst);
+    }
+
+    pub fn current_height(&self) -> u32 {
+        self.current_height.load(Ordering::SeqCst)
+    }
+
     pub async fn get_height(&self) -> SyncResult<u32> {
         let storage = self.storage.read().await;
         storage.get_indexed_height().await
@@ -251,36 +278,7 @@ where
     }
 
     /// Initialize the sync engine
-    async fn initialize(&self) -> SyncResult<u32> {
-        let storage = self.storage.read().await;
-        let indexed_height = storage.get_indexed_height().await?;
 
-        let start_height = if indexed_height == 0 {
-            self.config.start_block
-        } else {
-            indexed_height + 1
-        };
-
-        self.current_height.store(start_height, Ordering::SeqCst);
-
-        // Initialize snapshot components based on mode
-        let mode = self.sync_mode.read().await;
-        match &*mode {
-            SyncMode::SnapshotServer(_) => {
-                if let Some(server) = self.snapshot_server.write().await.as_mut() {
-                    server.start().await?;
-                    info!("Started snapshot server");
-                }
-            }
-            _ => {}
-        }
-
-        info!(
-            "Initialized snapshot sync engine at height {} with mode: {:?}",
-            start_height, *mode
-        );
-        Ok(start_height)
-    }
 
     /// Check if we should try to use snapshots for fast sync
     async fn should_attempt_snapshot_sync(&self) -> SyncResult<bool> {
@@ -411,7 +409,7 @@ where
 
     /// Run the main sync loop with snapshot support
     async fn run_snapshot_sync_loop(&mut self) -> SyncResult<()> {
-        let mut height = self.initialize().await?;
+        let mut height = self.current_height.load(Ordering::SeqCst);
 
         // Check if we should start with snapshot sync
         if self.should_attempt_snapshot_sync().await? {
@@ -631,7 +629,8 @@ where
         let mut height = self.current_height.load(Ordering::SeqCst);
 
         if height == 0 {
-            height = self.initialize().await?;
+            self.init().await;
+            height = self.current_height.load(Ordering::SeqCst);
         }
 
         if height > 0 {

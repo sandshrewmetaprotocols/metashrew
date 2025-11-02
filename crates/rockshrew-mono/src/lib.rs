@@ -310,6 +310,8 @@ where
         sync_mode,
     );
 
+    sync_engine.init().await;
+
     if let Some(provider) = snapshot_provider {
         sync_engine.set_snapshot_provider(provider).await;
     }

@@ -140,6 +140,29 @@ where
         }
     }
 
+    pub async fn init(&self) {
+        let storage = self.storage.read().await;
+        let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
+        let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
+            self.config.start_block
+        } else if indexed_height > 0 {
+            indexed_height + 1
+        } else {
+            self.config.start_block
+        };
+
+        if indexed_height == 0 && self.config.start_block > 0 {
+            let prev_height = self.config.start_block.saturating_sub(1);
+            if let Ok(None) = storage.get_state_root(prev_height).await {
+                let empty_state_root = vec![0u8; 32];
+                let mut storage = self.storage.write().await;
+                storage.store_state_root(prev_height, &empty_state_root).await.unwrap();
+            }
+        }
+
+        self.current_height.store(start_height, Ordering::SeqCst);
+    }
+
     /// Get a reference to the storage adapter
     pub fn storage(&self) -> &Arc<RwLock<S>> {
         &self.storage
@@ -226,52 +249,7 @@ where
     }
 
     /// Initialize the sync engine by determining the starting height
-    async fn initialize(&self) -> SyncResult<u32> {
-        let storage = self.storage.read().await;
-        let indexed_height = storage.get_indexed_height().await?;
-        
-        let start_height = if indexed_height == 0 {
-            self.config.start_block
-        } else {
-            indexed_height + 1
-        };
 
-        // Handle start block state root initialization
-        if indexed_height == 0 && self.config.start_block > 0 {
-            // When starting at a non-zero block height, we need to initialize
-            // a state root for the previous height to avoid calculation failures
-            let prev_height = self.config.start_block.saturating_sub(1);
-
-            // Check if we already have a state root for the previous height
-            if let Ok(None) = storage.get_state_root(prev_height).await {
-                drop(storage);
-
-                // Initialize an empty state root for the previous height
-                // This prevents "No state root found for height X" errors
-                let empty_state_root = vec![0u8; 32]; // Empty/genesis state root
-
-                let mut storage_write = self.storage.write().await;
-                storage_write
-                    .store_state_root(prev_height, &empty_state_root)
-                    .await
-                    .map_err(|e| {
-                        SyncError::Storage(format!(
-                            "Failed to initialize state root for height {}: {}",
-                            prev_height, e
-                        ))
-                    })?;
-
-                info!(
-                    "Initialized empty state root for height {} (start block initialization)",
-                    prev_height
-                );
-            }
-        }
-
-        self.current_height.store(start_height, Ordering::SeqCst);
-        info!("Initialized sync engine at height {}", start_height);
-        Ok(start_height)
-    }
 
     /// Process a single block atomically
     pub async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
@@ -368,7 +346,7 @@ where
 
     /// Run the sync pipeline with parallel fetching and processing
     async fn run_pipeline(&self) -> SyncResult<()> {
-        let mut height = self.initialize().await?;
+        let mut height = self.current_height.load(Ordering::SeqCst);
 
         // Determine pipeline size
         let pipeline_size = self.config.pipeline_size.unwrap_or_else(|| {

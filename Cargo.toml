@@ -11,6 +11,7 @@ log = "0.4.22"
 metashrew-runtime = { path = "crates/metashrew-runtime" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 metashrew-sync = { path = "crates/metashrew-sync" }
+memshrew = { path = "crates/memshrew" }
 memshrew-runtime = { path = "crates/memshrew" }
 prost = "0.12.6"
 prost-build = "0.12.6"
@@ -32,8 +33,8 @@ env_logger = "0.11"
 
 # Metashrew dependencies
 metashrew-runtime = { path = "crates/metashrew-runtime" }
-metashrew-support = { path = "crates/metashrew-support" }
-memshrew-runtime = { path = "crates/memshrew" }
+  metashrew-support = { path = "crates/metashrew-support" }
+  memshrew-runtime = { path = "crates/memshrew" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 metashrew-sync = { path = "crates/metashrew-sync", features = ["test-utils"] }
 rockshrew-mono = { path = "crates/rockshrew-mono" }

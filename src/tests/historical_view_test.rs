@@ -25,11 +25,17 @@ async fn test_historical_view() -> Result<(), Box<dyn std::error::Error>> {
         SyncConfig::default(),
     );
     agent.process_single_block(0).await?;
-    let block1_hash = agent.node().get_block_hash(0).await?;
+    let block1_hash = match agent.node().get_block_hash(0).await {
+        Ok(hash) => hash,
+        Err(e) => return Err(e.into()),
+    };
     let block1 = TestUtils::create_test_block(1, BlockHash::from_slice(&block1_hash)?);
     agent.node().add_block(block1.clone(), 1);
     agent.process_single_block(1).await?;
-    let block2_hash = agent.node().get_block_hash(1).await?;
+    let block2_hash = match agent.node().get_block_hash(1).await {
+        Ok(hash) => hash,
+        Err(e) => return Err(e.into()),
+    };
     let block2 = TestUtils::create_test_block(2, BlockHash::from_slice(&block2_hash)?);
     agent.node().add_block(block2.clone(), 2);
     agent.process_single_block(2).await?;

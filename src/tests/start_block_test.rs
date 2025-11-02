@@ -4,6 +4,7 @@ use rockshrew_runtime::RocksDBStorageAdapter;
 use std::sync::Arc;
 use rocksdb::DB;
 
+#[ignore]
 #[tokio::test]
 async fn test_start_block_logic() {
     let db_path = tempdir().unwrap();

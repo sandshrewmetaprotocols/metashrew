@@ -1,8 +1,12 @@
 //! In-memory adapters for comprehensive e2e testing
+use anyhow::Error as AnyhowError;
 use async_trait::async_trait;
 use bitcoin::{Block, hashes::Hash};
+use metashrew_runtime::{MetashrewRuntime};
+use memshrew_runtime::MemStoreAdapter as MemStore;
 use metashrew_sync::{
     BitcoinNodeAdapter, BlockInfo, ChainTip, SyncError, SyncResult,
+    RuntimeAdapter, ViewCall, ViewResult, PreviewCall, AtomicBlockResult, RuntimeStats,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -34,6 +38,10 @@ impl InMemoryBitcoinNode {
         tip.height = height;
         tip.hash = block.block_hash().to_byte_array().to_vec();
         blocks.insert(height, block);
+    }
+
+    pub fn get_block(&self, height: u32) -> Option<Block> {
+        self.blocks.read().unwrap().get(&height).cloned()
     }
 }
 
@@ -82,5 +90,65 @@ impl BitcoinNodeAdapter for InMemoryBitcoinNode {
 
     async fn is_connected(&self) -> bool {
         true
+    }
+}
+
+pub struct InMemoryRuntime {
+    runtime: MetashrewRuntime<MemStore>,
+}
+
+impl InMemoryRuntime {
+    pub fn new(wasm_bytes: &[u8]) -> Self {
+        let store = MemStore::new();
+        let runtime = MetashrewRuntime::new(wasm_bytes, store).unwrap();
+        Self { runtime }
+    }
+
+    pub fn new_runtime_adapter(self) -> Box<dyn RuntimeAdapter> {
+        Box::new(self)
+    }
+}
+
+#[async_trait]
+impl RuntimeAdapter for InMemoryRuntime {
+    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+        self.runtime.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
+    }
+
+    async fn process_block_atomic(&mut self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
+        self.runtime.process_block_atomic(height, block_data, block_hash).await.map(|res| AtomicBlockResult {
+            state_root: res.state_root,
+            batch_data: res.batch_data,
+            height: res.height,
+            block_hash: res.block_hash,
+        }).map_err(|e: AnyhowError| SyncError::Runtime(e.to_string()))
+    }
+
+    async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
+        self.runtime.view(call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
+    }
+
+    async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
+        self.runtime.preview_async(&call.block_data, call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
+    }
+
+    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
+        self.runtime.get_state_root(height).await.map_err(|e| SyncError::Runtime(e.to_string()))
+    }
+
+    async fn refresh_memory(&mut self) -> SyncResult<()> {
+        Ok(())
+    }
+
+    async fn is_ready(&self) -> bool {
+        true
+    }
+
+    async fn get_stats(&self) -> SyncResult<RuntimeStats> {
+        Ok(RuntimeStats {
+            memory_usage_bytes: 0,
+            blocks_processed: 0,
+            last_refresh_height: None,
+        })
     }
 }

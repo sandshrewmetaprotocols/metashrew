@@ -92,10 +92,11 @@
 
 use async_trait::async_trait;
 use log::{debug, error, info, warn};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::sleep;
 
 use crate::{
@@ -118,6 +119,7 @@ where
     pub current_height: Arc<AtomicU32>,
     last_block_time: Arc<RwLock<Option<SystemTime>>>,
     blocks_processed: Arc<AtomicU32>,
+    processing_heights: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl<N, S, R> MetashrewSync<N, S, R>
@@ -137,6 +139,7 @@ where
             current_height: Arc::new(AtomicU32::new(0)),
             last_block_time: Arc::new(RwLock::new(None)),
             blocks_processed: Arc::new(AtomicU32::new(0)),
+            processing_heights: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -281,7 +284,6 @@ where
                 }
 
                 // Update metrics
-                self.current_height.store(height + 1, Ordering::SeqCst);
                 self.blocks_processed.fetch_add(1, Ordering::SeqCst);
                 {
                     let mut last_time = self.last_block_time.write().await;
@@ -328,7 +330,6 @@ where
                 }
 
                 // Update metrics
-                self.current_height.store(height + 1, Ordering::SeqCst);
                 self.blocks_processed.fetch_add(1, Ordering::SeqCst);
                 {
                     let mut last_time = self.last_block_time.write().await;
@@ -346,8 +347,6 @@ where
 
     /// Run the sync pipeline with parallel fetching and processing
     async fn run_pipeline(&self) -> SyncResult<()> {
-        let mut height = self.current_height.load(Ordering::SeqCst);
-
         // Determine pipeline size
         let pipeline_size = self.config.pipeline_size.unwrap_or_else(|| {
             let cpu_count = num_cpus::get();
@@ -362,23 +361,19 @@ where
 
         // Spawn block fetcher task
         let fetcher_handle = {
-            let node = self.node.clone();
-            let storage = self.storage.clone();
-            let runtime = self.runtime.clone();
-            let config = self.config.clone();
-            let is_running = self.is_running.clone();
+            let self_clone = self.clone_for_processing();
             let block_sender = block_sender.clone();
 
             tokio::spawn(async move {
-                let mut current_height = height;
-
                 loop {
-                    if !is_running.load(Ordering::SeqCst) {
+                    if !self_clone.is_running.load(Ordering::SeqCst) {
                         break;
                     }
 
+                    let mut current_height = self_clone.current_height.load(Ordering::SeqCst);
+
                     // Get remote tip
-                    let remote_tip = match node.get_tip_height().await {
+                    let remote_tip = match self_clone.node.get_tip_height().await {
                         Ok(tip) => tip,
                         Err(e) => {
                             error!("Failed to get tip height: {}", e);
@@ -388,19 +383,20 @@ where
                     };
 
                     // Check for reorgs only when close to the tip
-                    if remote_tip.saturating_sub(current_height) <= config.reorg_check_threshold {
+                    if remote_tip.saturating_sub(current_height) <= self_clone.config.reorg_check_threshold {
                         match handle_reorg(
                             current_height,
-                            node.clone(),
-                            storage.clone(),
-                            runtime.clone(),
-                            &config,
+                            self_clone.node.clone(),
+                            self_clone.storage.clone(),
+                            self_clone.runtime.clone(),
+                            &self_clone.config,
                         )
                         .await
                         {
                             Ok(new_height) => {
                                 if new_height != current_height {
                                     info!("Reorg handled. Resuming from height {}", new_height);
+                                    self_clone.current_height.store(new_height, Ordering::SeqCst);
                                 }
                                 current_height = new_height;
                             }
@@ -413,7 +409,7 @@ where
                     }
 
                     // Check exit condition
-                    if let Some(exit_at) = config.exit_at {
+                    if let Some(exit_at) = self_clone.config.exit_at {
                         if current_height >= exit_at {
                             info!("Fetcher reached exit height {}", exit_at);
                             break;
@@ -430,14 +426,27 @@ where
                         continue;
                     }
 
+                    // Check if already processing
+                    {
+                        let processing_heights = self_clone.processing_heights.lock().await;
+                        if processing_heights.contains(&current_height) {
+                            sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    }
+
                     // Fetch block
-                    match node.get_block_info(current_height).await {
+                    match self_clone.node.get_block_info(current_height).await {
                         Ok(block_info) => {
                             info!(
                                 "Fetched block {} ({} bytes)",
                                 current_height,
                                 block_info.data.len()
                             );
+                            {
+                                let mut processing_heights = self_clone.processing_heights.lock().await;
+                                processing_heights.insert(current_height);
+                            }
                             if block_sender
                                 .send((current_height, block_info.data, block_info.hash))
                                 .await
@@ -445,7 +454,6 @@ where
                             {
                                 break;
                             }
-                            current_height += 1;
                         }
                         Err(e) => {
                             error!("Failed to fetch block {}: {}", current_height, e);
@@ -487,18 +495,34 @@ where
 
         // Main result handling loop
         while let Some(result) = result_receiver.recv().await {
-            match result {
+            let height = match result {
                 BlockResult::Success(processed_height) => {
                     info!("Block {} successfully processed", processed_height);
-                    height = processed_height + 1;
+                    self.current_height.store(processed_height + 1, Ordering::SeqCst);
+                    {
+                        let mut processing_heights = self.processing_heights.lock().await;
+                        processing_heights.remove(&processed_height);
+                    }
+                    processed_height + 1
                 }
                 BlockResult::Error(failed_height, error) => {
                     error!("Failed to process block {}: {}", failed_height, error);
+                    {
+                        let mut processing_heights = self.processing_heights.lock().await;
+                        processing_heights.remove(&failed_height);
+                    }
+                    if error.contains("indexer exited unexpectedly") {
+                        error!("Critical error: Indexer exited unexpectedly. Aborting.");
+                        self.is_running.store(false, Ordering::SeqCst);
+                        return Err(SyncError::BlockProcessing {
+                            height: failed_height,
+                            message: error,
+                        });
+                    }
                     sleep(Duration::from_secs(5)).await;
-                    // CRITICAL FIX: Don't advance height on error - retry the same block
-                    // The fetcher will retry fetching the same block
+                    failed_height
                 }
-            }
+            };
 
             // Check exit condition
             if let Some(exit_at) = self.config.exit_at {
@@ -524,30 +548,41 @@ where
     }
 
     /// Create a clone for processing (simplified for this example)
-    fn clone_for_processing(&self) -> ProcessingClone<S, R> {
+    fn clone_for_processing(&self) -> ProcessingClone<N, S, R> {
         ProcessingClone {
+            node: self.node.clone(),
             storage: self.storage.clone(),
             runtime: self.runtime.clone(),
+            config: self.config.clone(),
+            is_running: self.is_running.clone(),
             current_height: self.current_height.clone(),
+            processing_heights: self.processing_heights.clone(),
         }
     }
 }
 
 /// Simplified clone for processing tasks
-struct ProcessingClone<S, R>
+#[derive(Clone)]
+struct ProcessingClone<N, S, R>
 where
+    N: BitcoinNodeAdapter,
     S: StorageAdapter,
     R: RuntimeAdapter,
 {
+    node: Arc<N>,
     storage: Arc<RwLock<S>>,
     runtime: Arc<RwLock<R>>,
+    config: SyncConfig,
+    is_running: Arc<AtomicBool>,
     current_height: Arc<AtomicU32>,
+    processing_heights: Arc<Mutex<HashSet<u32>>>,
 }
 
-impl<S, R> ProcessingClone<S, R>
+impl<N, S, R> ProcessingClone<N, S, R>
 where
-    S: StorageAdapter,
-    R: RuntimeAdapter,
+    N: BitcoinNodeAdapter + 'static,
+    S: StorageAdapter + 'static,
+    R: RuntimeAdapter + 'static,
 {
     async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
         // Try atomic processing first
@@ -573,9 +608,6 @@ where
                     storage.store_block_hash(height, &result.block_hash).await?;
                     storage.store_state_root(height, &result.state_root).await?;
                 }
-
-                // Update current height atomic
-                self.current_height.store(height + 1, Ordering::SeqCst);
 
                 Ok(())
             }
@@ -611,9 +643,6 @@ where
                     storage.store_block_hash(height, &block_hash).await?;
                     storage.store_state_root(height, &state_root).await?;
                 }
-
-                // Update current height atomic
-                self.current_height.store(height + 1, Ordering::SeqCst);
 
                 Ok(())
             }

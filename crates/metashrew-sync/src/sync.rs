@@ -587,7 +587,7 @@ where
     async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
         // Try atomic processing first
         let atomic_result = {
-            let mut runtime = self.runtime.write().await;
+            let runtime = self.runtime.read().await;
             runtime
                 .process_block_atomic(height, &block_data, &block_hash)
                 .await
@@ -620,7 +620,7 @@ where
 
                 // Process with runtime (non-atomic fallback)
                 {
-                    let mut runtime = self.runtime.write().await;
+                    let runtime = self.runtime.read().await;
                     runtime
                         .process_block(height, &block_data)
                         .await

@@ -270,54 +270,23 @@ impl MockRuntime {
 
 #[async_trait]
 impl RuntimeAdapter for MockRuntime {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
-        if !*self.ready.read().unwrap() {
-            return Err(SyncError::Runtime("Runtime not ready".to_string()));
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    async fn process_block(&self, _height: u32, _block_data: &[u8]) -> SyncResult<()> {
         let mut processed = self.blocks_processed.lock().await;
         *processed += 1;
-        let mut memory = self.memory_usage.lock().await;
-        *memory += block_data.len();
-        log::debug!(
-            "Mock runtime processed block {} ({} bytes)",
-            height,
-            block_data.len()
-        );
         Ok(())
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
-        block_data: &[u8],
+        _block_data: &[u8],
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
-        if !*self.ready.read().unwrap() {
-            return Err(SyncError::Runtime("Runtime not ready".to_string()));
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         let mut processed = self.blocks_processed.lock().await;
         *processed += 1;
-        let mut memory = self.memory_usage.lock().await;
-        *memory += block_data.len();
-        let mut state_root = vec![0u8; 32];
-        let height_bytes = height.to_le_bytes();
-        for i in 0..8 {
-            state_root[i] = height_bytes[i % 4];
-            state_root[i + 8] = height_bytes[i % 4];
-            state_root[i + 16] = height_bytes[i % 4];
-            state_root[i + 24] = height_bytes[i % 4];
-        }
-        let batch_data = Vec::new();
-        log::debug!(
-            "Mock runtime processed block {} atomically ({} bytes)",
-            height,
-            block_data.len()
-        );
         Ok(AtomicBlockResult {
-            state_root,
-            batch_data,
+            state_root: vec![0; 32],
+            batch_data: vec![],
             height,
             block_hash: block_hash.to_vec(),
         })

@@ -225,87 +225,28 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapt
 
 #[async_trait]
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for MetashrewRuntimeAdapter<T> {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
-        if let Some(manager_arc) = self.get_snapshot_manager().await {
-            {
-                let mut manager = manager_arc.write().await;
-                manager.set_current_height(height);
-            }
-            let mut runtime = self.runtime.write().await;
-            {
-                let mut context = runtime
-                    .context
-                    .lock()
-                    .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
-                let manager_arc_clone = manager_arc.clone();
-                let tracker_fn: metashrew_runtime::KVTrackerFn =
-                    Box::new(move |key: Vec<u8>, value: Vec<u8>| {
-                        tokio::task::block_in_place(|| {
-                            tokio::runtime::Handle::current().block_on(async {
-                                if let Ok(mut manager) = manager_arc_clone.try_write() {
-                                    manager.track_key_change(key, value);
-                                }
-                            })
-                        });
-                    });
-                context.db.set_kv_tracker(Some(tracker_fn));
-                context.block = block_data.to_vec();
-                context.height = height;
-                context.db.set_height(height);
-            }
-            runtime
-                .run()
-                .map_err(|e| SyncError::Runtime(format!("Runtime execution failed: {}", e)))?;
-            {
-                let mut context = runtime
-                    .context
-                    .lock()
-                    .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
-                context.db.set_kv_tracker(None);
-            }
-        } else {
-            let mut runtime = self.runtime.write().await;
-            {
-                let mut context = runtime
-                    .context
-                    .lock()
-                    .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
-                context.block = block_data.to_vec();
-                context.height = height;
-                context.db.set_height(height);
-            }
-            runtime
-                .run()
-                .map_err(|e| SyncError::Runtime(format!("Runtime execution failed: {}", e)))?;
-        }
-        Ok(())
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+        let runtime = self.runtime.read().await;
+        runtime.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
-
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
-        let mut runtime = self.runtime.write().await;
-        runtime
-            .process_block_atomic(height, block_data, block_hash)
-            .await
-            .map(|res| AtomicBlockResult {
-                state_root: res.state_root,
-                batch_data: res.batch_data,
-                height: res.height,
-                block_hash: res.block_hash,
-            })
-            .map_err(|e| SyncError::Runtime(format!("Atomic block processing failed: {}", e)))
+        let runtime = self.runtime.read().await;
+        runtime.process_block_atomic(height, block_data, block_hash).await.map(|r| AtomicBlockResult {
+            state_root: r.state_root,
+            batch_data: r.batch_data,
+            height: r.height,
+            block_hash: r.block_hash,
+        }).map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
         let runtime = self.runtime.read().await;
-        let context = runtime
-            .context
-            .lock()
-            .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+        let context = runtime.context.lock().await;
         let adapter = context.db.clone();
         let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
         match smt_helper.get_smt_root_at_height(height) {
@@ -350,10 +291,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
 
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
         let runtime = self.runtime.write().await;
-        let context = runtime
-            .context
-            .lock()
-            .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+        let context = runtime.context.lock().await;
         let blocks_processed = context.height;
         Ok(RuntimeStats {
             memory_usage_bytes: 0,

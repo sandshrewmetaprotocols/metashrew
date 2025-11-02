@@ -550,7 +550,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
             ForkAdapter::Modern(modern_adapter)
         };
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter)?;
-        let storage_adapter = match runtime.context.lock().unwrap().db {
+        let storage_adapter = match runtime.context.lock().await.db {
             ForkAdapter::Modern(ref modern_adapter) => {
                 RocksDBStorageAdapter::new(modern_adapter.db.clone())
             }

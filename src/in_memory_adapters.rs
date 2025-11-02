@@ -111,11 +111,11 @@ impl InMemoryRuntime {
 
 #[async_trait]
 impl RuntimeAdapter for InMemoryRuntime {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         self.runtime.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
-    async fn process_block_atomic(&mut self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
+    async fn process_block_atomic(&self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
         self.runtime.process_block_atomic(height, block_data, block_hash).await.map(|res| AtomicBlockResult {
             state_root: res.state_root,
             batch_data: res.batch_data,

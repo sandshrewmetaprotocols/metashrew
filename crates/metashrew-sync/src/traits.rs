@@ -239,12 +239,12 @@ pub struct StorageStats {
 #[async_trait]
 pub trait RuntimeAdapter: Send + Sync {
     /// Process a block with the WASM indexer
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()>;
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()>;
 
     /// Process a block atomically, returning all database operations in a batch
     /// This ensures atomicity by collecting all operations before committing
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],

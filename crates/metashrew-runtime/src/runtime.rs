@@ -65,10 +65,12 @@
 //! ```
 
 use anyhow::{anyhow, Context, Result};
+use futures;
 use itertools::Itertools;
 use prost::Message;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::context::MetashrewRuntimeContext;
@@ -271,12 +273,6 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     /// for long-running view operations that need to yield control.
     pub async_engine: wasmtime::Engine,
     
-    /// WASM execution store with state tracking
-    ///
-    /// Contains the execution state including resource limits and
-    /// failure tracking. Reset after each block for deterministic behavior.
-    pub wasmstore: wasmtime::Store<State>,
-    
     /// Compiled WASM module for asynchronous execution
     ///
     /// Used by view functions and other operations that need
@@ -299,7 +295,12 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     ///
     /// Contains the loaded and linked WASM instance with all
     /// host functions bound and ready to execute.
-    pub instance: wasmtime::Instance,
+    instance: Mutex<WasmInstance>,
+}
+
+struct WasmInstance {
+    store: wasmtime::Store<State>,
+    instance: wasmtime::Instance,
 }
 
 pub fn db_make_list_key(v: &Vec<u8>, index: u32) -> Result<Vec<u8>> {
@@ -474,14 +475,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
-            wasmstore,
             async_engine,
             engine,
             async_module,
             module,
             linker,
             context,
-            instance,
+            instance: Mutex::new(WasmInstance { store: wasmstore, instance }),
         })
     }
 
@@ -536,14 +536,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
-            wasmstore,
             async_engine,
             engine,
             async_module,
             module,
             linker,
             context,
-            instance,
+            instance: Mutex::new(WasmInstance { store: wasmstore, instance }),
         })
     }
 
@@ -616,95 +615,97 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         height: u32,
     ) -> Result<Vec<u8>> {
         // Create preview context with isolated DB copy
-        let preview_db = {
-            let guard = self.context.lock().map_err(lock_err)?;
-            guard.db.create_isolated_copy()
-        };
-
-        // Create a new runtime with preview db using the synchronous engine
-        // Process the preview block at height + 1 to simulate adding it after the target height
-        let preview_height = height + 1;
-        let mut runtime =
-            Self::new_with_db(preview_db, preview_height, self.engine.clone(), self.module.clone())?;
-        runtime.context.lock().map_err(lock_err)?.block = block.clone();
-
-        // Execute block via _start to populate preview db
-        let start = runtime
-            .instance
-            .get_typed_func::<(), ()>(&mut runtime.wasmstore, "_start")
-            .context("Failed to get _start function for preview")?;
-
-        match start.call(&mut runtime.wasmstore, ()) {
-            Ok(_) => {
-                let context_guard = runtime.context.lock().map_err(lock_err)?;
-                if context_guard.state != 1 && !runtime.wasmstore.data().had_failure {
-                    return Err(anyhow!("indexer exited unexpectedly during preview"));
-                }
-            }
-            Err(e) => return Err(e).context("Error executing _start in preview"),
-        }
-
-        // Create new runtime just for the view using the updated preview DB
-        // Query at the preview height to see the state after processing the preview block
-        let mut view_runtime = {
-            let context = runtime.context.lock().map_err(lock_err)?;
-            // Create a view runtime with the updated database
-            let mut linker = Linker::<State>::new(&self.engine);
-            let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-            let view_context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
-                MetashrewRuntimeContext<T>,
-            >::new(
-                MetashrewRuntimeContext::new(context.db.clone(), preview_height, vec![]),
-            ));
-
-            wasmstore.limiter(|state| &mut state.limits);
-
-            Self::setup_linker(view_context.clone(), &mut linker)
-                .context("Failed to setup basic linker for preview view")?;
-            Self::setup_linker_view(view_context.clone(), &mut linker)
-                .context("Failed to setup view linker for preview")?;
-            linker.define_unknown_imports_as_traps(&self.module)?;
-
-            let instance = linker
-                .instantiate(&mut wasmstore, &self.module)
-                .context("Failed to instantiate WASM module for preview view")?;
-
-            MetashrewRuntime {
-                wasmstore,
-                engine: self.engine.clone(),
-                async_engine: self.engine.clone(),
-                module: self.module.clone(),
-                async_module: self.module.clone(),
-                linker,
-                context: view_context,
-                instance,
-            }
-        };
-
-        // Set block to input for view
-        view_runtime.context.lock().map_err(lock_err)?.block = input.clone();
-
-        // Execute view function
-        let func = view_runtime
-            .instance
-            .get_typed_func::<(), i32>(&mut view_runtime.wasmstore, symbol.as_str())
-            .context("Failed to get view function")?;
-
-        let result = func
-            .call(&mut view_runtime.wasmstore, ())
-            .context("Failed to execute view function")?;
-
-        let memory = view_runtime
-            .instance
-            .get_memory(&mut view_runtime.wasmstore, "memory")
-            .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
-
-        // Get the final result
-        Ok(read_arraybuffer_as_vec(
-            memory.data(&mut view_runtime.wasmstore),
-            result,
-        ))
-    }
+                        let preview_db = {
+                            let guard = self.context.blocking_lock();
+                            guard.db.create_isolated_copy()
+                        };
+                
+                        // Create a new runtime with preview db using the synchronous engine
+                        // Process the preview block at height + 1 to simulate adding it after the target height
+                        let preview_height = height + 1;
+                        let runtime =
+                            Self::new_with_db(preview_db, preview_height, self.engine.clone(), self.module.clone())?;
+                        runtime.context.blocking_lock().block = block.clone();
+                
+                        // Execute block via _start to populate preview db
+                        {
+                            let mut instance_guard = runtime.instance.blocking_lock();
+                            let WasmInstance { store, instance } = &mut *instance_guard;
+                            let start = instance
+                                .get_typed_func::<(), ()>(&mut *store, "_start")
+                                .context("Failed to get _start function for preview")?;
+                
+                            match start.call(&mut *store, ()) {
+                                Ok(_) => {
+                                    let context_guard = runtime.context.blocking_lock();
+                                    if context_guard.state != 1 && !store.data().had_failure {
+                                        return Err(anyhow!("indexer exited unexpectedly during preview"));
+                                    }
+                                }
+                                Err(e) => return Err(e).context("Error executing _start in preview"),
+                            }
+                        }
+                
+                        // Create new runtime just for the view using the updated preview DB
+                        // Query at the preview height to see the state after processing the preview block
+                        let view_runtime = {
+                            let context = runtime.context.blocking_lock();
+                            // Create a view runtime with the updated database
+                            let mut linker = Linker::<State>::new(&self.engine);
+                            let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+                            let view_context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(
+                                MetashrewRuntimeContext::new(context.db.clone(), preview_height, vec![]),
+                            ));
+                
+                            wasmstore.limiter(|state| &mut state.limits);
+                
+                            Self::setup_linker(view_context.clone(), &mut linker)
+                                .context("Failed to setup basic linker for preview view")?;
+                            Self::setup_linker_view(view_context.clone(), &mut linker)
+                                .context("Failed to setup view linker for preview")?;
+                            linker.define_unknown_imports_as_traps(&self.module)?;
+                
+                            let instance = linker
+                                .instantiate(&mut wasmstore, &self.module)
+                                .context("Failed to instantiate WASM module for preview view")?;
+                
+                            MetashrewRuntime {
+                                engine: self.engine.clone(),
+                                async_engine: self.engine.clone(),
+                                module: self.module.clone(),
+                                async_module: self.module.clone(),
+                                linker,
+                                context: view_context,
+                                instance: Mutex::new(WasmInstance { store: wasmstore, instance }),
+                            }
+                        };
+                
+                        // Set block to input for view
+                        view_runtime.context.blocking_lock().block = input.clone();
+                
+                        // Execute view function
+                        let result = {
+                            let mut instance_guard = view_runtime.instance.blocking_lock();
+                            let WasmInstance { store, instance } = &mut *instance_guard;
+                            let func = instance
+                                .get_typed_func::<(), i32>(&mut *store, symbol.as_str())
+                                .context("Failed to get view function")?;
+                
+                            let result = func
+                                .call(&mut *store, ())
+                                .context("Failed to execute view function")?;
+                
+                            let memory = instance
+                                .get_memory(&mut *store, "memory")
+                                .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
+                
+                            // Get the final result
+                            read_arraybuffer_as_vec(
+                                memory.data(store),
+                                result,
+                            )
+                        };
+                        Ok(result)    }
 
     // Async version of preview for use with the view server
     pub async fn preview_async(
@@ -789,64 +790,70 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Database query fails or times out
     /// - WASM execution encounters an error
     /// - Memory access violations occur
-    pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
-        let db = {
-            let guard = self.context.lock().map_err(lock_err)?;
-            guard.db.clone()
-        };
+        pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
+            let db = {
+                let guard = self.context.lock().await;
+                guard.db.clone()
+            };
+    
+            // Create a new async runtime for the view
+            let view_runtime = Self::new_with_db_async(
+                db,
+                height,
+                self.async_engine.clone(),
+                self.async_module.clone(),
+            )
+            .await?;
+    
+            // Set the input as the block data
+            view_runtime.context.lock().await.block = input.clone();
+    
+            // Set fuel for cooperative yielding
+            let result = {
+                let mut instance_guard = view_runtime.instance.lock().await;
+                let WasmInstance { store, instance } = &mut *instance_guard;
+                store.set_fuel(u64::MAX)?;
+                store
+                    .fuel_async_yield_interval(Some(10000))?;
+    
+                // Execute view function
+                let func = instance
+                    .get_typed_func::<(), i32>(&mut *store, symbol.as_str())
+                    .with_context(|| format!("Failed to get view function '{}'", symbol))?;
+    
+                // Use async call
+                let result = func
+                    .call_async(&mut *store, ())
+                    .await
+                    .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
+    
+                let memory = instance
+                    .get_memory(&mut *store, "memory")
+                    .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
+    
+                Ok(read_arraybuffer_as_vec(
+                    memory.data(store),
+                    result,
+                ))
+            };
+            result
+        }
 
-        // Create a new async runtime for the view
-        let mut view_runtime = Self::new_with_db_async(
-            db,
-            height,
-            self.async_engine.clone(),
-            self.async_module.clone(),
-        )
-        .await?;
-
-        // Set the input as the block data
-        view_runtime.context.lock().map_err(lock_err)?.block = input.clone();
-
-        // Set fuel for cooperative yielding
-        view_runtime.wasmstore.set_fuel(u64::MAX)?;
-        view_runtime
-            .wasmstore
-            .fuel_async_yield_interval(Some(10000))?;
-
-        // Execute view function
-        let func = view_runtime
-            .instance
-            .get_typed_func::<(), i32>(&mut view_runtime.wasmstore, symbol.as_str())
-            .with_context(|| format!("Failed to get view function '{}'", symbol))?;
-
-        // Use async call
-        let result = func
-            .call_async(&mut view_runtime.wasmstore, ())
-            .await
-            .with_context(|| format!("Failed to execute view function '{}'", symbol))?;
-
-        let memory = view_runtime
-            .instance
-            .get_memory(&mut view_runtime.wasmstore, "memory")
-            .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
-
-        Ok(read_arraybuffer_as_vec(
-            memory.data(&mut view_runtime.wasmstore),
-            result,
-        ))
-    }
-
-    pub fn refresh_memory(&mut self) -> Result<()> {
+    pub async fn refresh_memory(&self) -> Result<()> {
+        let mut instance_guard = self.instance.lock().await;
         // Only refresh memory if there was actual execution or failure
         // This reduces overhead for blocks with minimal processing
-        if self.wasmstore.data().had_failure || self.context.lock().map_err(lock_err)?.state == 1 {
+        if instance_guard.store.data().had_failure || self.context.lock().await.state == 1 {
             let mut wasmstore = Store::<State>::new(&self.engine, State::new());
             wasmstore.limiter(|state| &mut state.limits);
-            self.instance = self
+            let new_instance = self
                 .linker
                 .instantiate(&mut wasmstore, &self.module)
                 .context("Failed to instantiate module during memory refresh")?;
-            self.wasmstore = wasmstore;
+            *instance_guard = WasmInstance {
+                store: wasmstore,
+                instance: new_instance,
+            };
         }
         Ok(())
     }
@@ -919,32 +926,35 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Indexer exits without reaching completion state
     /// - Memory refresh fails after execution
     /// - Host function failures occur during execution
-    pub fn run(&mut self) -> Result<(), anyhow::Error> {
-        self.context.lock().map_err(lock_err)?.state = 0;
-        let start = self
-            .instance
-            .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
-            .context("Failed to get _start function")?;
+    pub async fn run(&self) -> Result<(), anyhow::Error> {
+        self.context.lock().await.state = 0;
+        let execution_result = {
+            let mut instance_guard = self.instance.lock().await;
+            let WasmInstance { store, instance } = &mut *instance_guard;
+            let start = instance
+                .get_typed_func::<(), ()>(&mut *store, "_start")
+                .context("Failed to get _start function")?;
 
-        // Note: Chain reorganization detection is now handled at the sync framework level
-        // using proper block hash comparison, not at the runtime level
+            // Note: Chain reorganization detection is now handled at the sync framework level
+            // using proper block hash comparison, not at the runtime level
 
-        let execution_result = match start.call(&mut self.wasmstore, ()) {
-            Ok(_) => {
-                if self.context.lock().map_err(lock_err)?.state != 1
-                    && !self.wasmstore.data().had_failure
-                {
-                    Err(anyhow!("indexer exited unexpectedly"))
-                } else {
-                    Ok(())
+            match start.call(&mut *store, ()) {
+                Ok(_) => {
+                    if self.context.lock().await.state != 1
+                        && !store.data().had_failure
+                    {
+                        Err(anyhow!("indexer exited unexpectedly"))
+                    } else {
+                        Ok(())
+                    }
                 }
+                Err(e) => Err(e).context("Error calling _start function"),
             }
-            Err(e) => Err(e).context("Error calling _start function"),
         };
 
         // ALWAYS refresh memory after block execution for deterministic behavior
         // This ensures no WASM state persists between blocks
-        if let Err(refresh_err) = self.refresh_memory() {
+        if let Err(refresh_err) = self.refresh_memory().await {
             log::error!("Failed to refresh memory after block execution: {}", refresh_err);
             // Return the refresh error as it's critical for deterministic execution
             return Err(refresh_err).context("Memory refresh failed after block execution");
@@ -963,9 +973,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///
     /// This method is kept for backward compatibility but should not be called.
     #[deprecated(note = "Reorg detection moved to sync framework level")]
-    pub fn handle_reorg(&mut self) -> Result<()> {
+    pub async fn handle_reorg(&self) -> Result<()> {
         let (context_height, db_tip_height) = {
-            let mut guard = self.context.lock().map_err(lock_err)?;
+            let mut guard = self.context.lock().await;
             let db_tip = match guard.db.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
                 Ok(Some(bytes)) if bytes.len() >= 4 => {
                     u32::from_le_bytes(bytes[..4].try_into().unwrap())
@@ -997,7 +1007,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 target_height
             );
 
-            let mut db = self.context.lock().map_err(lock_err)?.db.clone();
+            let mut db = self.context.lock().await.db.clone();
             let mut smt_helper = SMTHelper::new(db.clone());
             let mut batch = db.create_batch();
 
@@ -1026,13 +1036,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
     /// Get the value of a key at a specific block height using the append-only data structure.
     /// This function performs a binary search on the list of historical values for the key.
-    pub fn get_value_at_height(
+    pub async fn get_value_at_height(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
         let db = {
-            let guard = context.lock().map_err(lock_err)?;
+            let guard = context.lock().await;
             guard.db.clone()
         };
         let smt_helper = SMTHelper::new(db);
@@ -1071,10 +1081,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 "env",
                 "__host_len",
                 move |mut _caller: Caller<'_, State>| -> i32 {
-                    match context_ref_len.lock() {
-                        Ok(ctx) => ctx.block.len() as i32 + 4,
-                        Err(_) => i32::MAX, // Signal error
-                    }
+                    let ctx = context_ref_len.blocking_lock();
+                    ctx.block.len() as i32 + 4
                 },
             )
             .map_err(|e| anyhow!("Failed to wrap __host_len: {:?}", e))?;
@@ -1098,12 +1106,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         }
                     };
 
-                    let (input, height) = match context_ref_input.lock() {
-                        Ok(ctx) => (ctx.block.clone(), ctx.height),
-                        Err(_) => {
-                            caller.data_mut().had_failure = true;
-                            return;
-                        }
+                    let (input, height) = {
+                        let ctx = context_ref_input.blocking_lock();
+                        (ctx.block.clone(), ctx.height)
                     };
 
                     let input_clone = match try_into_vec(height.to_le_bytes()) {
@@ -1179,16 +1184,6 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         linker
             .func_wrap(
                 "env",
-                "__flush",
-                move |_caller: Caller<'_, State>, _encoded: i32| {
-                    // View mode __flush - no operation needed
-                },
-            )
-            .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
-
-        linker
-            .func_wrap(
-                "env",
                 "__get",
                 move |mut caller: Caller<'_, State>, key: i32, value: i32| {
                     let mem = match caller.get_export("memory") {
@@ -1206,18 +1201,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     let data = mem.data(&caller);
-                    let height = match context_get.clone().lock() {
-                        Ok(ctx) => ctx.height,
-                        Err(_) => {
-                            caller.data_mut().had_failure = true;
-                            return;
-                        }
-                    };
+                    let height = context_get.clone().blocking_lock().height;
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use append-only store for historical queries in view functions
-                            match Self::get_value_at_height(context_get.clone(), &key_vec, height) {
+                            let lookup = tokio::task::block_in_place(|| {
+                                futures::executor::block_on(Self::get_value_at_height(context_get.clone(), &key_vec, height))
+                            });
+
+                            match lookup {
                                 Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1265,15 +1258,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     let data = mem.data(&caller);
-                    let height = match context_get_len.clone().lock() {
-                        Ok(ctx) => ctx.height,
-                        Err(_) => return i32::MAX,
-                    };
+                    let height = context_get_len.clone().blocking_lock().height;
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
                             // Use append-only store for historical queries in view functions
-                            match Self::get_value_at_height(context_get_len.clone(), &key_vec, height) {
+                            let lookup = tokio::task::block_in_place(|| {
+                                futures::executor::block_on(Self::get_value_at_height(context_get_len.clone(), &key_vec, height))
+                            });
+
+                            match lookup {
                                 Ok(value) => value.len() as i32,
                                 Err(_) => 0,
                             }
@@ -1314,14 +1308,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .instantiate(&mut wasmstore, &module)
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
-            wasmstore,
             engine: engine.clone(),
             async_engine: engine,
             module: module.clone(),
             async_module: module.clone(),
             linker,
             context,
-            instance,
+            instance: Mutex::new(WasmInstance { store: wasmstore, instance }),
         })
     }
 
@@ -1353,14 +1346,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .await
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
-            wasmstore,
             engine: engine.clone(),
             async_engine: engine,
             module: module.clone(),
             async_module: module.clone(),
             linker,
             context,
-            instance,
+            instance: Mutex::new(WasmInstance { store: wasmstore, instance }),
         })
     }
 
@@ -1377,13 +1369,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
-                    let height = match context_ref.clone().lock() {
-                        Ok(ctx) => ctx.height,
-                        Err(_) => {
-                            caller.data_mut().had_failure = true;
-                            return;
-                        }
-                    };
+                    let height = context_ref.clone().blocking_lock().height;
 
                     let mem = match caller.get_export("memory") {
                         Some(export) => match export.into_memory() {
@@ -1417,36 +1403,30 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         }
                     };
 
-                    match context_ref.clone().lock() {
-                        Ok(mut ctx) => {
-                            ctx.state = 1;
-                            
-                            // Use append-only store for preview operations with batching
-                            let mut batch = ctx.db.create_batch();
-                            let smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
-                            
-                            // Write all operations to a single batch for atomicity
-                            for (k, v) in decoded.list.iter().tuples() {
-                                let k_owned = <Vec<u8> as Clone>::clone(k);
-                                let v_owned = <Vec<u8> as Clone>::clone(v);
+                    let binding = context_ref.clone();
+                    let mut ctx = binding.blocking_lock();
+                    ctx.state = 1;
+                    
+                    // Use append-only store for preview operations with batching
+                    let mut batch = ctx.db.create_batch();
+                    let smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
+                    
+                    // Write all operations to a single batch for atomicity
+                    for (k, v) in decoded.list.iter().tuples() {
+                        let k_owned = <Vec<u8> as Clone>::clone(k);
+                        let v_owned = <Vec<u8> as Clone>::clone(v);
 
-                                // Add to batch using append-only logic
-                                if let Err(_) = smt_helper.put_to_batch(&mut batch, &k_owned, &v_owned, height) {
-                                    caller.data_mut().had_failure = true;
-                                    return;
-                                }
-                            }
-
-                            // Write the entire batch atomically
-                            if let Err(_) = ctx.db.write(batch) {
-                                caller.data_mut().had_failure = true;
-                                return;
-                            }
-                        }
-                        Err(_) => {
+                        // Add to batch using append-only logic
+                        if let Err(_) = smt_helper.put_to_batch(&mut batch, &k_owned, &v_owned, height) {
                             caller.data_mut().had_failure = true;
                             return;
                         }
+                    }
+
+                    // Write the entire batch atomically
+                    if let Err(_) = ctx.db.write(batch) {
+                        caller.data_mut().had_failure = true;
+                        return;
                     }
                 },
             )
@@ -1472,18 +1452,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     let data = mem.data(&caller);
-                    let height = match context_get.clone().lock() {
-                        Ok(ctx) => ctx.height,
-                        Err(_) => {
-                            caller.data_mut().had_failure = true;
-                            return;
-                        }
-                    };
+                    let height = context_get.clone().blocking_lock().height;
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            // Use append-only store for preview queries
-                            match Self::get_value_at_height(context_get.clone(), &key_vec, height) {
+                            // Use append-only store for historical queries in view functions
+                            let lookup = tokio::runtime::Handle::current().block_on(Self::get_value_at_height(context_get.clone(), &key_vec, height));
+
+                            match lookup {
                                 Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1531,15 +1507,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     let data = mem.data(&caller);
-                    let height = match context_get_len.clone().lock() {
-                        Ok(ctx) => ctx.height,
-                        Err(_) => return i32::MAX,
-                    };
+                    let height = context_get_len.clone().blocking_lock().height;
 
                     match try_read_arraybuffer_as_vec(data, key) {
                         Ok(key_vec) => {
-                            // Use append-only store for preview queries
-                            match Self::get_value_at_height(context_get_len.clone(), &key_vec, height) {
+                            // Use append-only store for historical queries in view functions
+                            let lookup = tokio::runtime::Handle::current().block_on(Self::get_value_at_height(context_get_len.clone(), &key_vec, height));
+
+                            match lookup {
                                 Ok(value) => value.len() as i32,
                                 Err(_) => 0,
                             }
@@ -1566,13 +1541,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
-                    let height = match context_ref.clone().lock() {
-                        Ok(ctx) => ctx.height,
-                        Err(_) => {
-                            caller.data_mut().had_failure = true;
-                            return;
-                        }
-                    };
+                    let height = context_ref.clone().blocking_lock().height;
 
 
                     let mem = match caller.get_export("memory") {
@@ -1609,13 +1578,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     };
 
                     // Get the database from context to use SMT operations
-                    let db = match context_ref.clone().lock() {
-                        Ok(ctx) => ctx.db.clone(),
-                        Err(_) => {
-                            caller.data_mut().had_failure = true;
-                            return;
-                        }
-                    };
+                    let db = context_ref.clone().blocking_lock().db.clone();
 
                     // Use optimized BatchedSMTHelper for better performance
                     let mut batched_smt = crate::smt::BatchedSMTHelper::new(db);
@@ -1634,13 +1597,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     // Track key-value updates for any external listeners (like snapshotting)
                     {
                         let context_ref_clone = context_ref.clone();
-                        let mut ctx_guard = match context_ref_clone.lock() {
-                            Ok(guard) => guard,
-                            Err(_) => {
-                                caller.data_mut().had_failure = true;
-                                return;
-                            }
-                        };
+                        let mut ctx_guard = context_ref_clone.blocking_lock();
                         for (k, v) in &key_values {
                             ctx_guard.db.track_kv_update(k.clone(), v.clone());
                         }
@@ -1665,15 +1622,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     }
 
                     // Set completion state
-                    match context_ref.clone().lock() {
-                        Ok(mut ctx) => {
-                            ctx.state = 1;
-                        }
-                        Err(_) => {
-                            caller.data_mut().had_failure = true;
-                            return;
-                        }
-                    }
+                    let context_clone = context_ref.clone();
+                    let mut ctx = context_clone.blocking_lock();
+                    ctx.state = 1;
                 },
             )
             .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
@@ -1700,26 +1651,20 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
 
+                    let height = context_get.clone().blocking_lock().height;
+                    let context_clone = context_get.clone();
+
                     match key_vec_result {
                         Ok(key_vec) => {
                             // During indexing, get the state as it was at the *previous* block
                             // to correctly build upon the previous state, especially during reorgs.
-                            let height = match context_get.clone().lock() {
-                                Ok(ctx) => ctx.height,
-                                Err(_) => {
-                                    caller.data_mut().had_failure = true;
-                                    return;
-                                }
-                            };
-
-                            // The state for the current block (at `height`) depends on the
-                            // state produced by the parent block (at `height - 1`).
                             // If height is 0, there is no parent, so we read at height 0 (which will be empty).
                             let target_height = if height > 0 { height - 1 } else { 0 };
+                            let lookup = tokio::task::block_in_place(|| {
+                                futures::executor::block_on(Self::get_value_at_height(context_clone, &key_vec, target_height))
+                            });
 
-                            // Use get_value_at_height to get the value from the previous canonical state.
-                            // This function correctly performs a binary search on the append-only data.
-                            match Self::get_value_at_height(context_get.clone(), &key_vec, target_height) {
+                            match lookup {
                                 Ok(lookup) => {
                                     if let Err(_) =
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
@@ -1748,7 +1693,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 caller.data_mut().had_failure = true;
                             }
                         }
-                    };
+                    }
                 },
             )
             .map_err(|e| anyhow!("Failed to wrap __get: {:?}", e))?;
@@ -1769,21 +1714,21 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
 
+                    let context_clone = context_get_len.clone();
+                    let (_db, height) = {
+                        let ctx = context_clone.blocking_lock();
+                        (ctx.db.clone(), ctx.height)
+                    };
+
                     match key_vec_result {
                         Ok(key_vec) => {
                             // During indexing, get the state as it was at the *previous* block.
-                            let (_db, height) = match context_get_len.clone().lock() {
-                                Ok(ctx) => (ctx.db.clone(), ctx.height),
-                                Err(_) => return i32::MAX,
-                            };
-
                             let target_height = if height > 0 { height - 1 } else { 0 };
+                            let lookup = tokio::task::block_in_place(|| {
+                                futures::executor::block_on(Self::get_value_at_height(context_clone, &key_vec, target_height))
+                            });
 
-                            match Self::get_value_at_height(
-                                context_get_len.clone(),
-                                &key_vec,
-                                target_height,
-                            ) {
+                            match lookup {
                                 Ok(value) => value.len() as i32,
                                 Err(_) => 0,
                             }
@@ -1819,11 +1764,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     }
 
     /// Get the current state root (merkle root of entire state)
-    pub fn get_current_state_root(
+    pub async fn get_current_state_root(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
     ) -> Result<[u8; 32]> {
         let db = {
-            let guard = context.lock().map_err(lock_err)?;
+            let guard = context.lock().await;
             guard.db.clone()
         };
 
@@ -1832,12 +1777,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     }
 
     /// Get the state root at a specific height
-    pub fn get_state_root_at_height(
+    pub async fn get_state_root_at_height(
         context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
         height: u32,
     ) -> Result<[u8; 32]> {
         let db = {
-            let guard = context.lock().map_err(lock_err)?;
+            let guard = context.lock().await;
             guard.db.clone()
         };
 
@@ -1868,9 +1813,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
     /// Calculate the state root for the current state
     /// This is used by the atomic block processing to get the state root after execution
-    pub fn calculate_state_root(&self) -> Result<Vec<u8>> {
+    pub async fn calculate_state_root(&self) -> Result<Vec<u8>> {
         let db = {
-            let guard = self.context.lock().map_err(lock_err)?;
+            let guard = self.context.lock().await;
             guard.db.clone()
         };
 
@@ -1881,9 +1826,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
     /// Get the accumulated database operations as a serialized batch
     /// This collects all the operations that would be written to the database
-    pub fn get_accumulated_batch(&self) -> Result<Vec<u8>> {
+    pub async fn get_accumulated_batch(&self) -> Result<Vec<u8>> {
         let db = {
-            let guard = self.context.lock().map_err(lock_err)?;
+            let guard = self.context.lock().await;
             guard.db.clone()
         };
 
@@ -1903,14 +1848,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// Process a block atomically and return all operations in a batch
     /// This is the atomic version that collects all operations without committing them
     pub async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
     ) -> Result<crate::traits::AtomicBlockResult> {
         // Set the block data and height in context
         {
-            let mut guard = self.context.lock().map_err(lock_err)?;
+            let mut guard = self.context.lock().await;
             guard.block = block_data.to_vec();
             guard.height = height;
             guard.state = 0;
@@ -1920,34 +1865,37 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         // using proper block hash comparison, not at the runtime level
 
         // Execute the WASM module
-        let start = self
-            .instance
-            .get_typed_func::<(), ()>(&mut self.wasmstore, "_start")
-            .context("Failed to get _start function")?;
+        let execution_result = {
+            let mut instance_guard = self.instance.lock().await;
+            let WasmInstance { store, instance } = &mut *instance_guard;
+            let start = instance
+                .get_typed_func::<(), ()>(&mut *store, "_start")
+                .context("Failed to get _start function")?;
 
-        let execution_result = match start.call(&mut self.wasmstore, ()) {
-            Ok(_) => {
-                let context_state = {
-                    let guard = self.context.lock().map_err(lock_err)?;
-                    guard.state
-                };
+            match start.call(&mut *store, ()) {
+                Ok(_) => {
+                    let context_state = {
+                        let guard = self.context.lock().await;
+                        guard.state
+                    };
 
-                if context_state != 1 && !self.wasmstore.data().had_failure {
-                    Err(anyhow!(
-                        "indexer exited unexpectedly during atomic processing"
-                    ))
-                } else {
-                    Ok(())
+                    if context_state != 1 && !store.data().had_failure {
+                        Err(anyhow!(
+                            "indexer exited unexpectedly during atomic processing"
+                        ))
+                    } else {
+                        Ok(())
+                    }
                 }
+                Err(e) => Err(e).context("Error calling _start function in atomic processing"),
             }
-            Err(e) => Err(e).context("Error calling _start function in atomic processing"),
         };
 
         // Calculate the state root and batch data before memory refresh
         let (state_root, batch_data) = match execution_result {
             Ok(_) => {
-                let state_root = self.calculate_state_root()?;
-                let batch_data = self.get_accumulated_batch()?;
+                let state_root = self.calculate_state_root().await?;
+                let batch_data = self.get_accumulated_batch().await?;
                 
                 // Log the state root for atomic block processing
                 log::info!(
@@ -1960,7 +1908,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             }
             Err(e) => {
                 // ALWAYS refresh memory even on execution failure for deterministic behavior
-                if let Err(refresh_err) = self.refresh_memory() {
+                if let Err(refresh_err) = self.refresh_memory().await {
                     log::error!("Failed to refresh memory after failed atomic block execution: {}", refresh_err);
                 }
                 return Err(e);
@@ -1969,7 +1917,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
         // ALWAYS refresh memory after block execution for deterministic behavior
         // This ensures no WASM state persists between blocks
-        if let Err(refresh_err) = self.refresh_memory() {
+        if let Err(refresh_err) = self.refresh_memory().await {
             log::error!("Failed to refresh memory after atomic block execution: {}", refresh_err);
             // Return the refresh error as it's critical for deterministic execution
             return Err(refresh_err).context("Memory refresh failed after atomic block execution");
@@ -1987,22 +1935,22 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     }
 
     /// Process a block normally (non-atomic)
-    pub async fn process_block(&mut self, height: u32, block_data: &[u8]) -> Result<()> {
+    pub async fn process_block(&self, height: u32, block_data: &[u8]) -> Result<()> {
         // Set the block data and height in context
         {
-            let mut guard = self.context.lock().map_err(lock_err)?;
+            let mut guard = self.context.lock().await;
             guard.block = block_data.to_vec();
             guard.height = height;
             guard.state = 0;
         }
 
         // Execute the block processing - run() now handles memory refresh automatically
-        self.run()
+        self.run().await
     }
 
     /// Get the state root for a specific height
     pub async fn get_state_root(&self, height: u32) -> Result<Vec<u8>> {
-        let state_root = Self::get_state_root_at_height(self.context.clone(), height)?;
+        let state_root = Self::get_state_root_at_height(self.context.clone(), height).await?;
         Ok(state_root.to_vec())
     }
 }

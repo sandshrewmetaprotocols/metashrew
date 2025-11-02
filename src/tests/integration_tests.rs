@@ -40,17 +40,17 @@ async fn test_complete_indexing_workflow() -> Result<()> {
         let block_bytes = utils::consensus_encode(block)?;
 
         {
-            let mut context = runtime.context.lock().unwrap();
+            let mut context = runtime.context.lock().await;
             context.block = block_bytes;
             context.height = height as u32;
         }
 
-        runtime.run()?;
-        runtime.refresh_memory()?;
+        runtime.run().await?;
+        runtime.refresh_memory().await?;
     }
 
     // Verify final state using direct database access
-    let adapter = &runtime.context.lock().unwrap().db;
+    let adapter = &runtime.context.lock().await.db;
 
     // Check that all blocks are stored using append-only access
     for height in 0..chain.len() {
@@ -86,16 +86,16 @@ async fn test_database_state_consistency() -> Result<()> {
         let block_bytes = utils::consensus_encode(block)?;
 
         {
-            let mut context = runtime.context.lock().unwrap();
+            let mut context = runtime.context.lock().await;
             context.block = block_bytes;
             context.height = height as u32;
         }
 
-        runtime.run()?;
-        runtime.refresh_memory()?;
+        runtime.run().await?;
+        runtime.refresh_memory().await?;
 
         // Take a snapshot of the database state
-        let adapter = &runtime.context.lock().unwrap().db;
+        let adapter = &runtime.context.lock().await.db;
         snapshots.push(adapter.get_all_data());
     }
 

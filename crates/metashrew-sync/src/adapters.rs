@@ -125,25 +125,22 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> Clone for MetashrewRu
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     for MetashrewRuntimeAdapter<T>
 {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         let mut runtime = self.runtime.lock().await;
         {
-            let mut context = runtime
-                .context
-                .lock()
-                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+            let mut context = runtime.context.lock().await;
             context.block = block_data.to_vec();
             context.height = height;
             context.db.set_height(height);
         }
-        runtime.run().map_err(|e| {
+        runtime.run().await.map_err(|e| {
             SyncError::Runtime(format!("Runtime execution failed: {}", e))
         })?;
         Ok(())
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
@@ -209,10 +206,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
         let runtime = self.runtime.lock().await;
         let memory_usage_bytes = 0;
         let blocks_processed = {
-            let context = runtime
-                .context
-                .lock()
-                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+            let context = runtime.context.lock().await;
             context.height
         };
         Ok(RuntimeStats {

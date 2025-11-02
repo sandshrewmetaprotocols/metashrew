@@ -154,15 +154,7 @@ where
             self.config.start_block
         };
 
-        if indexed_height == 0 && self.config.start_block > 0 {
-            let prev_height = self.config.start_block.saturating_sub(1);
-            if let Ok(None) = storage.get_state_root(prev_height).await {
-                let empty_state_root = vec![0u8; 32];
-                let mut storage = self.storage.write().await;
-                storage.store_state_root(prev_height, &empty_state_root).await.unwrap();
-            }
-        }
-
+        
         self.current_height.store(start_height, Ordering::SeqCst);
     }
 
@@ -745,6 +737,15 @@ where
     S: StorageAdapter + 'static,
     R: RuntimeAdapter + 'static,
 {
+    if current_height == config.start_block && current_height > 0 {
+        let storage_guard = storage.read().await;
+        if let Ok(None) = storage_guard.get_state_root(current_height - 1).await {
+            drop(storage_guard);
+            let mut storage_guard = storage.write().await;
+            storage_guard.store_state_root(current_height - 1, &vec![0; 32]).await?;
+            return Ok(current_height);
+        }
+    }
     let mut check_height = current_height.saturating_sub(1);
     let mut reorg_detected = false;
 

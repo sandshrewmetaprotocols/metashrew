@@ -48,7 +48,7 @@ ssh_e2e_tests = []
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3.8"
-memshrew-runtime = { path = "../memshrew" }
+memshrew-runtime = { workspace = true }
 metashrew-core = { path = "../metashrew-core" }
 
 

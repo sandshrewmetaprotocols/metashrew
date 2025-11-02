@@ -11,7 +11,7 @@ log = "0.4.22"
 metashrew-runtime = { path = "crates/metashrew-runtime" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 metashrew-sync = { path = "crates/metashrew-sync" }
-memshrew-runtime = { path = "crates/memshrew" }
+memshrew-runtime = { path = "crates/memshrew-runtime" }
 prost = "0.12.6"
 prost-build = "0.12.6"
 
@@ -33,10 +33,10 @@ env_logger = "0.11"
 # Metashrew dependencies
 metashrew-runtime = { path = "crates/metashrew-runtime" }
 metashrew-support = { path = "crates/metashrew-support" }
-memshrew-runtime = { path = "crates/memshrew" }
 rockshrew-runtime = { path = "crates/rockshrew-runtime" }
 metashrew-sync = { path = "crates/metashrew-sync", features = ["test-utils"] }
 rockshrew-mono = { path = "crates/rockshrew-mono" }
+memshrew-runtime = { workspace = true }
 
 # Database dependencies
 rocksdb = "0.21.0"
@@ -64,4 +64,3 @@ actix-cors = "0.7.0"
 # Build dependencies for compiling WASM
 [build-dependencies]
 # No additional build dependencies needed - using cargo directly
-

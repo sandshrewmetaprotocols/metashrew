@@ -200,6 +200,7 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 }
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime and is snapshot-aware.
+#[derive(Clone)]
 pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
     runtime: Arc<RwLock<MetashrewRuntime<T>>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,

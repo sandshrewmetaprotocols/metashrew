@@ -1287,7 +1287,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
 
-    fn new_with_db(
+    pub fn new_with_db(
         db: T,
         height: u32,
         engine: wasmtime::Engine,
@@ -1325,7 +1325,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         })
     }
 
-    async fn new_with_db_async(
+    pub async fn new_with_db_async(
         db: T,
         height: u32,
         engine: wasmtime::Engine,

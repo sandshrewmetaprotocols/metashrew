@@ -319,8 +319,30 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.read().await;
-        let result = runtime
+        // Acquire a read lock to get the necessary components for creating a new runtime
+        let (db, async_engine, async_module) = {
+            let runtime_guard = self.runtime.read().await;
+            let context_guard = runtime_guard
+                .context
+                .lock()
+                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+            (
+                context_guard.db.clone(),
+                runtime_guard.async_engine.clone(),
+                runtime_guard.async_module.clone(),
+            )
+        };
+
+        // Create a new async runtime for the view without holding the main runtime's lock
+        let view_runtime = metashrew_runtime::MetashrewRuntime::new_with_db_async(
+            db,
+            call.height,
+            async_engine,
+            async_module,
+        )
+        .await?;
+
+        let result = view_runtime
             .view(call.function_name, &call.input_data, call.height)
             .await
             .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
@@ -328,8 +350,29 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.read().await;
-        let result = runtime
+        // Acquire a read lock to get the necessary components for creating a new runtime
+        let (db, engine, module) = {
+            let runtime_guard = self.runtime.read().await;
+            let context_guard = runtime_guard
+                .context
+                .lock()
+                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+            (
+                context_guard.db.clone(),
+                runtime_guard.engine.clone(),
+                runtime_guard.module.clone(),
+            )
+        };
+
+        // Create a new runtime for the preview without holding the main runtime's lock
+        let preview_runtime = metashrew_runtime::MetashrewRuntime::new_with_db(
+            db,
+            call.height,
+            engine,
+            module,
+        )?;
+
+        let result = preview_runtime
             .preview_async(
                 &call.block_data,
                 call.function_name,

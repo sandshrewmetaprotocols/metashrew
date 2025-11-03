@@ -204,13 +204,15 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
     runtime: Arc<RwLock<MetashrewRuntime<T>>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
+    wasm_bytes: Vec<u8>,
 }
 
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapter<T> {
-    pub fn new(runtime: Arc<RwLock<MetashrewRuntime<T>>>) -> Self {
+    pub fn new(runtime: Arc<RwLock<MetashrewRuntime<T>>>, wasm_bytes: Vec<u8>) -> Self {
         Self {
             runtime,
             snapshot_manager: Arc::new(RwLock::new(None)),
+            wasm_bytes,
         }
     }
 
@@ -349,8 +351,19 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
         self.runtime.try_read().is_ok()
     }
 
+    fn create_view_adapter(&self) -> Self {
+        let runtime_guard = self.runtime.blocking_read();
+        let db = runtime_guard.context.lock().unwrap().db.clone();
+        let new_runtime = MetashrewRuntime::new(&self.wasm_bytes, db).unwrap();
+        Self {
+            runtime: Arc::new(RwLock::new(new_runtime)),
+            snapshot_manager: Arc::new(RwLock::new(None)),
+            wasm_bytes: self.wasm_bytes.clone(),
+        }
+    }
+
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
-        let runtime = self.runtime.write().await;
+        let runtime = self.runtime.read().await;
         let context = runtime
             .context
             .lock()

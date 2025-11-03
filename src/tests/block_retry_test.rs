@@ -123,7 +123,7 @@ async fn test_block_retry_fix() -> Result<()> {
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
     
     let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
-    let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
+    let runtime_adapter = MetashrewRuntimeAdapter::new(runtime, config.wasm.to_vec());
     let counting_adapter = CountingRuntimeAdapter::new(runtime_adapter);
     
     let sync_config = SyncConfig {
@@ -204,7 +204,7 @@ async fn test_snapshot_sync_retry_fix() -> Result<()> {
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
     
     let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
-    let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
+    let runtime_adapter = MetashrewRuntimeAdapter::new(runtime, config.wasm.to_vec());
     
     let sync_config = SyncConfig {
         start_block: 0,
@@ -325,8 +325,14 @@ impl<T: RuntimeAdapter + Clone + Send + Sync> RuntimeAdapter for CountingRuntime
             last_refresh_height: None,
         })
     }
-}
 
+    fn create_view_adapter(&self) -> Self {
+        Self {
+            inner: self.inner.create_view_adapter(),
+            call_counts: self.call_counts.clone(),
+        }
+    }
+}
 #[derive(Clone)]
 struct CrashingRuntimeAdapter {
     crash_at_height: u32,
@@ -402,6 +408,13 @@ impl RuntimeAdapter for CrashingRuntimeAdapter {
             blocks_processed: 0,
             last_refresh_height: None,
         })
+    }
+
+    fn create_view_adapter(&self) -> Self {
+        Self {
+            crash_at_height: self.crash_at_height,
+            processed_heights: self.processed_heights.clone(),
+        }
     }
 }
 

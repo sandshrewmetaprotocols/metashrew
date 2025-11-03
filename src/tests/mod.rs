@@ -1,7 +1,9 @@
-pub mod block_retry_test;
-pub mod comprehensive_e2e_test;
-pub mod historical_view_test;
-pub mod integration_tests;
-pub mod preview_e2e_test;
-pub mod reorg_focused_test;
-pub mod start_block_test;
+mod block_retry_test;
+mod comprehensive_e2e_test;
+mod concurrent_view_test;
+mod e2e_start_block_hang_test;
+mod historical_view_test;
+mod integration_tests;
+mod preview_e2e_test;
+mod reorg_focused_test;
+mod start_block_test;

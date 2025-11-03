@@ -268,6 +268,11 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Get runtime statistics
     async fn get_stats(&self) -> SyncResult<RuntimeStats>;
 
+    /// Creates a new, isolated RuntimeAdapter instance for view calls.
+    /// This instance should not share any mutable state with the original adapter,
+    /// allowing concurrent view calls without blocking the main indexing process.
+    fn create_view_adapter(&self) -> Self where Self: Sized + Clone;
+
     /// Track runtime updates for snapshot creation (optional, used in snapshot mode)
     /// This method should be called after successful block processing to capture
     /// key-value changes for snapshot diff generation

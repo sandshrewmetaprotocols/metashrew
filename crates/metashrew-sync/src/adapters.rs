@@ -99,17 +99,19 @@ use crate::{
 /// Real runtime adapter that wraps MetashrewRuntime
 pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
     runtime: Arc<Mutex<MetashrewRuntime<T>>>,
+    wasm_bytes: Vec<u8>,
 }
 
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapter<T> {
-    pub fn new(runtime: MetashrewRuntime<T>) -> Self {
+    pub fn new(runtime: MetashrewRuntime<T>, wasm_bytes: Vec<u8>) -> Self {
         Self {
             runtime: Arc::new(Mutex::new(runtime)),
+            wasm_bytes,
         }
     }
 
-    pub fn from_arc(runtime: Arc<Mutex<MetashrewRuntime<T>>>) -> Self {
-        Self { runtime }
+    pub fn from_arc(runtime: Arc<Mutex<MetashrewRuntime<T>>>, wasm_bytes: Vec<u8>) -> Self {
+        Self { runtime, wasm_bytes }
     }
 }
 
@@ -117,6 +119,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> Clone for MetashrewRu
     fn clone(&self) -> Self {
         Self {
             runtime: self.runtime.clone(),
+            wasm_bytes: self.wasm_bytes.clone(),
         }
     }
 }
@@ -125,6 +128,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> Clone for MetashrewRu
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     for MetashrewRuntimeAdapter<T>
 {
+    fn create_view_adapter(&self) -> Self {
+        let runtime_guard = self.runtime.blocking_lock();
+        let db = runtime_guard.context.lock().unwrap().db.clone();
+        let new_runtime = MetashrewRuntime::new(&self.wasm_bytes, db).unwrap();
+        Self {
+            runtime: Arc::new(Mutex::new(new_runtime)),
+            wasm_bytes: self.wasm_bytes.clone(),
+        }
+    }
+
     async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         let mut runtime = self.runtime.lock().await;
         {

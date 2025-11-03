@@ -385,4 +385,8 @@ impl RuntimeAdapter for MockRuntime {
             last_refresh_height: Some(blocks_processed),
         })
     }
+
+    fn create_view_adapter(&self) -> Self {
+        self.clone()
+    }
 }

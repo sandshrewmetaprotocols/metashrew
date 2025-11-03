@@ -21,7 +21,7 @@ async fn test_historical_view() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent = MetashrewSync::new(
         InMemoryBitcoinNode::new(genesis_block.clone()),
         storage,
-        MetashrewRuntimeAdapter::new(runtime),
+        MetashrewRuntimeAdapter::new(runtime, TestConfig::new().wasm.to_vec()),
         SyncConfig::default(),
     );
     agent.process_single_block(0).await?;

@@ -60,7 +60,7 @@ async fn test_e2e_start_block_hang() {
     });
 
     let runtime = MetashrewRuntime::new(crate::test_utils::WASM, MemStoreAdapter::new()).unwrap();
-    let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(RwLock::new(runtime)));
+    let runtime_adapter = MetashrewRuntimeAdapter::new(Arc::new(RwLock::new(runtime)), crate::test_utils::WASM.to_vec());
 
     let run_future = run(
         args,

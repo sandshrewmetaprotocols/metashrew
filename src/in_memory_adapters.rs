@@ -93,15 +93,16 @@ impl BitcoinNodeAdapter for InMemoryBitcoinNode {
     }
 }
 
+#[derive(Clone)]
 pub struct InMemoryRuntime {
-    runtime: MetashrewRuntime<MemStore>,
+    runtime: Arc<tokio::sync::Mutex<MetashrewRuntime<MemStore>>>,
 }
 
 impl InMemoryRuntime {
     pub fn new(wasm_bytes: &[u8]) -> Self {
         let store = MemStore::new();
         let runtime = MetashrewRuntime::new(wasm_bytes, store).unwrap();
-        Self { runtime }
+        Self { runtime: Arc::new(tokio::sync::Mutex::new(runtime)) }
     }
 
     pub fn new_runtime_adapter(self) -> Box<dyn RuntimeAdapter> {
@@ -112,11 +113,11 @@ impl InMemoryRuntime {
 #[async_trait]
 impl RuntimeAdapter for InMemoryRuntime {
     async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
-        self.runtime.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
+        self.runtime.lock().await.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
     async fn process_block_atomic(&mut self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
-        self.runtime.process_block_atomic(height, block_data, block_hash).await.map(|res| AtomicBlockResult {
+        self.runtime.lock().await.process_block_atomic(height, block_data, block_hash).await.map(|res| AtomicBlockResult {
             state_root: res.state_root,
             batch_data: res.batch_data,
             height: res.height,
@@ -125,30 +126,36 @@ impl RuntimeAdapter for InMemoryRuntime {
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
-        self.runtime.view(call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
+        self.runtime.lock().await.view(call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
-        self.runtime.preview_async(&call.block_data, call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
+        self.runtime.lock().await.preview_async(&call.block_data, call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        self.runtime.get_state_root(height).await.map_err(|e| SyncError::Runtime(e.to_string()))
+        self.runtime.lock().await.get_state_root(height).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
     async fn refresh_memory(&mut self) -> SyncResult<()> {
-        Ok(())
+        self.runtime.lock().await.refresh_memory().map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
     async fn is_ready(&self) -> bool {
+        // The InMemoryRuntime is always ready if it was successfully created
         true
     }
 
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
+        // For in-memory runtime, provide dummy stats or derive from inner runtime if available
         Ok(RuntimeStats {
             memory_usage_bytes: 0,
             blocks_processed: 0,
             last_refresh_height: None,
         })
+    }
+
+    fn create_view_adapter(&self) -> Self {
+        self.clone()
     }
 }

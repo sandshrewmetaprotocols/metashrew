@@ -100,7 +100,7 @@ async fn test_comprehensive_e2e() -> Result<()> {
     let initial_chain = ChainBuilder::new().add_blocks(10);
     let initial_node = MockNode::new(initial_chain.clone());
     let initial_runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
-    let initial_runtime_adapter = MetashrewRuntimeAdapter::new(initial_runtime);
+    let initial_runtime_adapter = MetashrewRuntimeAdapter::new(initial_runtime, config.wasm.to_vec());
     let initial_sync_config = SyncConfig {
         start_block: 0,
         exit_at: Some(11),
@@ -139,7 +139,7 @@ async fn test_comprehensive_e2e() -> Result<()> {
         .add_blocks(5);
     let reorg_node = MockNode::new(reorg_chain.clone());
     let reorg_runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
-    let reorg_runtime_adapter = MetashrewRuntimeAdapter::new(reorg_runtime);
+    let reorg_runtime_adapter = MetashrewRuntimeAdapter::new(reorg_runtime, config.wasm.to_vec());
     let reorg_sync_config = SyncConfig {
         start_block: 0, // This will be ignored as the adapter already has a height
         exit_at: Some(11), // Sync the new chain up to its tip

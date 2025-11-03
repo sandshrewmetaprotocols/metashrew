@@ -804,7 +804,7 @@ impl<N, S, R> JsonRpcProvider for MetashrewSync<N, S, R>
 where
     N: BitcoinNodeAdapter + 'static,
     S: StorageAdapter + 'static,
-    R: RuntimeAdapter + 'static,
+    R: RuntimeAdapter + 'static + Clone,
 {
     async fn metashrew_view(
         &self,
@@ -829,8 +829,9 @@ where
             height,
         };
 
-        let runtime = self.runtime.read().await;
-        let result = runtime.execute_view(call).await?;
+        // Clone the runtime adapter to avoid holding a lock on the main runtime
+        let view_adapter = self.runtime.read().await.create_view_adapter();
+        let result = view_adapter.execute_view(call).await?;
 
         Ok(format!("0x{}", hex::encode(result.data)))
     }

@@ -570,6 +570,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
             let modern_adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
             ForkAdapter::Modern(modern_adapter)
         };
+        let wasm_bytes = std::fs::read(args.indexer.clone())?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter)?;
         let storage_adapter = match runtime.context.lock().unwrap().db {
             ForkAdapter::Modern(ref modern_adapter) => {
@@ -580,15 +581,16 @@ pub async fn run_prod(args: Args) -> Result<()> {
             }
         };
         let runtime_adapter =
-            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)), wasm_bytes.clone());
         run_generic(args, runtime_adapter, storage_adapter).await
     } else {
+        let wasm_bytes = std::fs::read(args.indexer.clone())?;
         let adapter =
             RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =
-            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)), wasm_bytes.clone());
         run_generic(args, runtime_adapter, storage_adapter).await
     }
 }

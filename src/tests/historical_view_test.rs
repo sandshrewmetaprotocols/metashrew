@@ -23,6 +23,7 @@ async fn test_historical_view() -> Result<(), Box<dyn std::error::Error>> {
         storage,
         MetashrewRuntimeAdapter::new(runtime, TestConfig::new().wasm.to_vec()),
         SyncConfig::default(),
+        TestConfig::new().wasm.to_vec(),
     );
     agent.process_single_block(0).await?;
     let block1_hash = match agent.node().get_block_hash(0).await {

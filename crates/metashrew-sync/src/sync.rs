@@ -103,6 +103,8 @@ use crate::{
     BitcoinNodeAdapter, BlockResult, JsonRpcProvider, PreviewCall, RuntimeAdapter, StorageAdapter,
     SyncConfig, SyncEngine, SyncError, SyncResult, SyncStatus, ViewCall,
 };
+use metashrew_runtime::{MetashrewRuntime, KeyValueStoreLike};
+use crate::adapters::MetashrewRuntimeAdapter;
 
 /// Generic Bitcoin indexer synchronization engine
 pub struct MetashrewSync<N, S, R>
@@ -120,6 +122,7 @@ where
     last_block_time: Arc<RwLock<Option<SystemTime>>>,
     blocks_processed: Arc<AtomicU32>,
     processing_heights: Arc<Mutex<HashSet<u32>>>,
+    wasm_bytes: Arc<Vec<u8>>,
 }
 
 impl<N, S, R> MetashrewSync<N, S, R>
@@ -129,7 +132,7 @@ where
     R: RuntimeAdapter + 'static,
 {
     /// Create a new sync engine
-    pub fn new(node: N, storage: S, runtime: R, config: SyncConfig) -> Self {
+    pub fn new(node: N, storage: S, runtime: R, config: SyncConfig, wasm_bytes: Vec<u8>) -> Self {
         Self {
             node: Arc::new(node),
             storage: Arc::new(RwLock::new(storage)),
@@ -140,6 +143,7 @@ where
             last_block_time: Arc::new(RwLock::new(None)),
             blocks_processed: Arc::new(AtomicU32::new(0)),
             processing_heights: Arc::new(Mutex::new(HashSet::new())),
+            wasm_bytes: Arc::new(wasm_bytes),
         }
     }
 
@@ -803,7 +807,7 @@ where
 impl<N, S, R> JsonRpcProvider for MetashrewSync<N, S, R>
 where
     N: BitcoinNodeAdapter + 'static,
-    S: StorageAdapter + 'static,
+    S: StorageAdapter + 'static + Clone + KeyValueStoreLike,
     R: RuntimeAdapter + 'static + Clone,
 {
     async fn metashrew_view(
@@ -829,8 +833,10 @@ where
             height,
         };
 
-        // Clone the runtime adapter to avoid holding a lock on the main runtime
-        let view_adapter = self.runtime.read().await.create_view_adapter();
+        // Create a new runtime adapter for the view call to avoid contention with the main indexer
+        let view_storage = self.storage.read().await.clone();
+        let view_runtime = MetashrewRuntime::new(&self.wasm_bytes, view_storage).map_err(|e| SyncError::Runtime(e.to_string()))?;
+        let view_adapter = MetashrewRuntimeAdapter::new(view_runtime, self.wasm_bytes.to_vec());
         let result = view_adapter.execute_view(call).await?;
 
         Ok(format!("0x{}", hex::encode(result.data)))

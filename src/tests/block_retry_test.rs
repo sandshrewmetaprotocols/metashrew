@@ -134,11 +134,14 @@ async fn test_block_retry_fix() -> Result<()> {
         reorg_check_threshold: 6,
     };
 
+    let wasm_bytes_vec = config.wasm.to_vec();
+
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
         retrying_node,
         shared_adapter.clone(),
         counting_adapter.clone(),
         sync_config,
+        wasm_bytes_vec,
     );
 
     // This should now work correctly - all blocks should be indexed despite failures
@@ -438,11 +441,14 @@ async fn test_abort_on_critical_failure() -> Result<()> {
         reorg_check_threshold: 6,
     };
 
+    let wasm_bytes_vec = TestConfig::new().wasm.to_vec();
+
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
         node,
         storage.clone(),
         runtime_adapter.clone(),
         sync_config,
+        wasm_bytes_vec,
     );
 
     info!("Starting sync with crashing runtime...");

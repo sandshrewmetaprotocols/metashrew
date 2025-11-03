@@ -20,6 +20,7 @@ async fn test_concurrent_view_while_indexing() {
     node.add_block(block1, 1);
 
     let (tx, mut rx) = mpsc::channel(1);
+    let (finish_tx, mut finish_rx) = mpsc::channel(1);
 
     let config = SyncConfig {
         start_block: 0,
@@ -29,20 +30,20 @@ async fn test_concurrent_view_while_indexing() {
         reorg_check_threshold: 6,
     };
 
-    let mut sync = MetashrewSync::new(node, storage, runtime, config);
+    let mut sync = MetashrewSync::new(node, storage, runtime, config, wasm_bytes.to_vec());
     sync.init().await;
 
-    let sync_arc = Arc::new(tokio::sync::Mutex::new(sync));
+    let sync_arc = Arc::new(tokio::sync::RwLock::new(sync));
     let sync_clone = sync_arc.clone();
 
     // 2. Start the indexer in a separate thread, but make it block before acquiring the write lock
     let indexer_handle = tokio::spawn(async move {
-        let mut sync_guard = sync_clone.lock().await;
         // Signal that we are about to process a block
         tx.send(()).await.unwrap();
         // Simulate a delay before the actual processing starts
         tokio::time::sleep(Duration::from_secs(5)).await;
-        sync_guard.process_single_block(1).await.unwrap();
+        sync_clone.write().await.process_single_block(1).await.unwrap();
+        finish_rx.recv().await.unwrap();
     });
 
     // Wait for the indexer to signal that it's about to process a block
@@ -50,7 +51,7 @@ async fn test_concurrent_view_while_indexing() {
 
     // 3. Call metashrew_view concurrently
     let view_result = sync_arc
-        .lock()
+        .read()
         .await
         .metashrew_view(
             "getblock".to_string(),
@@ -63,5 +64,6 @@ async fn test_concurrent_view_while_indexing() {
     assert!(view_result.is_ok());
 
     // 5. Clean up
+    finish_tx.send(()).await.unwrap();
     indexer_handle.await.unwrap();
 }

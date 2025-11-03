@@ -113,6 +113,7 @@ async fn test_comprehensive_e2e() -> Result<()> {
         shared_adapter.clone(),
         initial_runtime_adapter,
         initial_sync_config,
+        config.wasm.to_vec(),
     );
     initial_syncer.start().await?;
 
@@ -152,6 +153,7 @@ async fn test_comprehensive_e2e() -> Result<()> {
         shared_adapter.clone(),
         reorg_runtime_adapter,
         reorg_sync_config,
+        config.wasm.to_vec(),
     );
     reorg_syncer.start().await?;
 

@@ -134,7 +134,10 @@ impl RuntimeAdapter for InMemoryRuntime {
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
-        self.runtime.preview_async(&call.block_data, call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
+        self.runtime.preview_async(&call.block_data, call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| {
+            eprintln!("Preview execution error: {:?}", e);
+            SyncError::Runtime(format!("Preview failed: {:?}", e))
+        })
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {

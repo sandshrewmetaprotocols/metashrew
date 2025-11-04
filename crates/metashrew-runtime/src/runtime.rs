@@ -639,11 +639,19 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             match start.call_async(&mut *store, ()).await {
                                 Ok(_) => {
                                     let context_guard = runtime.context.lock().await;
-                                    if context_guard.state != 1 && !store.data().had_failure {
-                                        return Err(anyhow!("indexer exited unexpectedly during preview"));
+                                    let had_failure = store.data().had_failure;
+                                    let state = context_guard.state;
+                                    if state != 1 && !had_failure {
+                                        return Err(anyhow!("indexer exited unexpectedly during preview: state={}, had_failure={}", state, had_failure));
+                                    }
+                                    if had_failure {
+                                        return Err(anyhow!("indexer had failure during preview execution: state={}", state));
                                     }
                                 }
-                                Err(e) => return Err(e).context("Error executing _start in preview"),
+                                Err(e) => {
+                                    log::error!("Preview _start execution failed: {:?}", e);
+                                    return Err(e).context("Error executing _start in preview");
+                                },
                             }
                         }
                 
@@ -1495,7 +1503,11 @@ pub async fn setup_linker_view(
             MetashrewRuntimeContext::new(db, height, vec![]),
         ));
         {
-            wasmstore.limiter(|state| &mut state.limits)
+            wasmstore.limiter(|state| &mut state.limits);
+            // Set fuel for async execution if engine has fuel enabled
+            // Use a high limit to avoid running out during block processing
+            // We can't check if fuel is enabled, so just try to set it
+            let _ = wasmstore.set_fuel(u64::MAX);
         }
         {
             Self::setup_linker(context.clone(), &mut linker).await

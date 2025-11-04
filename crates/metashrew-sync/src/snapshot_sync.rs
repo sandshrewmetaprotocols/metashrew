@@ -29,7 +29,7 @@ where
 {
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
-    runtime: Arc<RwLock<R>>,
+    runtime: Arc<R>,
     config: SyncConfig,
     sync_mode: Arc<RwLock<SyncMode>>,
 
@@ -63,7 +63,7 @@ where
         Self {
             node: Arc::new(node),
             storage: Arc::new(RwLock::new(storage)),
-            runtime: Arc::new(RwLock::new(runtime)),
+            runtime: Arc::new(runtime),
             config,
             sync_mode: Arc::new(RwLock::new(sync_mode)),
 
@@ -188,12 +188,9 @@ where
         block_hash: Vec<u8>,
     ) -> SyncResult<()> {
         // Try atomic processing first
-        let atomic_result = {
-            let mut runtime = self.runtime.write().await;
-            runtime
-                .process_block_atomic(height, &block_data, &block_hash)
-                .await
-        };
+        let atomic_result = self.runtime
+            .process_block_atomic(height, &block_data, &block_hash)
+            .await;
 
         match atomic_result {
             Ok(result) => {
@@ -225,22 +222,16 @@ where
                 );
 
                 // Process with runtime (non-atomic fallback)
-                {
-                    let mut runtime = self.runtime.write().await;
-                    runtime
-                        .process_block(height, &block_data)
-                        .await
-                        .map_err(|e| SyncError::BlockProcessing {
-                            height,
-                            message: e.to_string(),
-                        })?;
-                }
+                self.runtime
+                    .process_block(height, &block_data)
+                    .await
+                    .map_err(|e| SyncError::BlockProcessing {
+                        height,
+                        message: e.to_string(),
+                    })?;
 
                 // Get state root after processing
-                let state_root = {
-                    let runtime = self.runtime.read().await;
-                    runtime.get_state_root(height).await?
-                };
+                let state_root = self.runtime.get_state_root(height).await?;
 
                 // Update storage with height, block hash, and state root
                 {
@@ -356,15 +347,10 @@ where
         block_data: Vec<u8>,
     ) -> SyncResult<()> {
         // Normal block processing
-        let mut runtime = self.runtime.write().await;
-        runtime.process_block(height, &block_data).await?;
-        drop(runtime);
+        self.runtime.process_block(height, &block_data).await?;
 
         // Get state root and block hash
-        let state_root = {
-            let runtime = self.runtime.read().await;
-            runtime.get_state_root(height).await?
-        };
+        let state_root = self.runtime.get_state_root(height).await?;
 
         let block_hash = self.node.get_block_hash(height).await?;
 
@@ -697,11 +683,9 @@ where
         }
         drop(storage);
 
-        let runtime = self.runtime.read().await;
-        if !runtime.is_ready().await {
+        if !self.runtime.is_ready().await {
             return Err(SyncError::Runtime("Runtime is not ready".to_string()));
         }
-        drop(runtime);
 
         self.run_snapshot_sync_loop().await?;
 
@@ -792,8 +776,7 @@ where
             height,
         };
 
-        let runtime = self.runtime.read().await;
-        let result = runtime.execute_view(call).await?;
+        let result = self.runtime.execute_view(call).await?;
 
         Ok(format!("0x{}", hex::encode(result.data)))
     }
@@ -824,8 +807,7 @@ where
             height,
         };
 
-        let runtime = self.runtime.read().await;
-        let result = runtime.execute_preview(call).await?;
+        let result = self.runtime.execute_preview(call).await?;
 
         Ok(format!("0x{}", hex::encode(result.data)))
     }

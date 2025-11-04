@@ -328,7 +328,7 @@ impl RuntimeAdapter for MockRuntime {
         Ok(state_root)
     }
 
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         if !*self.ready.read().unwrap() {
             return Err(SyncError::Runtime("Runtime not ready".to_string()));
         }

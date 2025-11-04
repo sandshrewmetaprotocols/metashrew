@@ -260,7 +260,7 @@ pub trait RuntimeAdapter: Send + Sync {
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>>;
 
     /// Refresh the runtime memory (cleanup/reset)
-    async fn refresh_memory(&mut self) -> SyncResult<()>;
+    async fn refresh_memory(&self) -> SyncResult<()>;
 
     /// Check if the runtime is ready for processing
     async fn is_ready(&self) -> bool;

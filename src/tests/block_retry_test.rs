@@ -316,7 +316,7 @@ impl<T: RuntimeAdapter + Clone + Send + Sync> RuntimeAdapter for CountingRuntime
         self.inner.execute_preview(call).await
     }
     
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         self.inner.refresh_memory().await
     }
 
@@ -394,7 +394,7 @@ impl RuntimeAdapter for CrashingRuntimeAdapter {
         unimplemented!()
     }
     
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         Ok(())
     }
 

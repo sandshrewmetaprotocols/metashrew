@@ -193,7 +193,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
             .map_err(|e| SyncError::Runtime(format!("Failed to get state root for height {}: {}", height, e)))
     }
 
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         log::info!("Manual memory refresh requested - note that memory is now refreshed automatically after each block");
         Ok(())
     }

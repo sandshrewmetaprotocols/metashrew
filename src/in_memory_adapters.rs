@@ -141,7 +141,7 @@ impl RuntimeAdapter for InMemoryRuntime {
         self.runtime.get_state_root(height).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         Ok(())
     }
 

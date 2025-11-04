@@ -48,13 +48,13 @@ async fn test_historical_view() -> Result<(), Box<dyn std::error::Error>> {
         input_data: 2u32.to_le_bytes().to_vec(), // Input for getblock: height 2
         height: 2,
     };
-    let result_latest = agent.runtime().read().await.execute_view(view_call_latest).await?;
+    let result_latest = agent.runtime().execute_view(view_call_latest).await?;
     let view_call_historical = ViewCall {
         function_name: "getblock".to_string(),
         input_data: 1u32.to_le_bytes().to_vec(), // Input for getblock: height 1
         height: 1,
     };
-    let result_historical = agent.runtime().read().await.execute_view(view_call_historical).await?;
+    let result_historical = agent.runtime().execute_view(view_call_historical).await?;
     assert_ne!(result_latest.data, result_historical.data);
     Ok(())
 }

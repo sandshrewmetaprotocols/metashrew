@@ -14,7 +14,7 @@ const WASM: &[u8] = include_bytes!("../../target/debug/build/metashrew-tests-794
 async fn test_preview_e2e() {
     // 1. Setup
     let wasm_bytes = WASM;
-    let mut runtime = InMemoryRuntime::new(&wasm_bytes);
+    let mut runtime = InMemoryRuntime::new(&wasm_bytes).await;
     let mut adapter = runtime.new_runtime_adapter();
     let genesis_block = crate::test_utils::TestUtils::create_test_block(0, bitcoin::BlockHash::all_zeros());
     let block1 = crate::test_utils::TestUtils::create_test_block(1, genesis_block.block_hash());

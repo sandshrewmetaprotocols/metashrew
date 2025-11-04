@@ -17,7 +17,10 @@ async fn test_historical_view() -> Result<(), Box<dyn std::error::Error>> {
     let genesis_block_hash = BlockHash::from_slice(&[0; 32])?;
     let genesis_block = TestUtils::create_test_block(0, genesis_block_hash);
     let storage = MemStoreAdapter::new();
-    let runtime = TestConfig::new().create_runtime_from_adapter(storage.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = TestConfig::new().create_runtime_from_adapter(storage.clone(), engine).await?;
     let mut agent = MetashrewSync::new(
         InMemoryBitcoinNode::new(genesis_block.clone()),
         storage,

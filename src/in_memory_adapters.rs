@@ -11,6 +11,8 @@ use metashrew_sync::{
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use wasmtime::Engine;
+
 /// An in-memory Bitcoin node adapter for testing
 #[derive(Clone)]
 pub struct InMemoryBitcoinNode {
@@ -98,9 +100,12 @@ pub struct InMemoryRuntime {
 }
 
 impl InMemoryRuntime {
-    pub fn new(wasm_bytes: &[u8]) -> Self {
+    pub async fn new(wasm_bytes: &[u8]) -> Self {
         let store = MemStore::new();
-        let runtime = MetashrewRuntime::new(wasm_bytes, store).unwrap();
+        let mut config = wasmtime::Config::default();
+        config.async_support(true);
+        let engine = Engine::new(&config).unwrap();
+        let runtime = MetashrewRuntime::new(wasm_bytes, store, engine).await.unwrap();
         Self { runtime }
     }
 

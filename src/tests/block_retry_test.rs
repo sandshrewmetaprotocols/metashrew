@@ -122,7 +122,11 @@ async fn test_block_retry_fix() -> Result<()> {
     // Create a node that fails 2 times per block before succeeding
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
     
-    let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    
+    let runtime = config.create_runtime_from_adapter(shared_adapter.clone(), engine).await?;
     let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
     let counting_adapter = CountingRuntimeAdapter::new(runtime_adapter);
     
@@ -202,8 +206,10 @@ async fn test_snapshot_sync_retry_fix() -> Result<()> {
     
     // Create a node that fails 2 times per block before succeeding
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
-    
-    let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime_from_adapter(shared_adapter.clone(), engine).await?;
     let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
     
     let sync_config = SyncConfig {

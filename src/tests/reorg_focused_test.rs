@@ -12,7 +12,10 @@ use bitcoin::{hashes::Hash, BlockHash};
 #[tokio::test]
 async fn test_reorg_handling() -> Result<()> {
     let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime(engine).await?;
 
     // 1. Process an initial chain of 5 blocks
     let mut chain_a_hashes = vec![BlockHash::all_zeros()];

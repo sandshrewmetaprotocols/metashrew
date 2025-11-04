@@ -144,19 +144,26 @@ where
     }
 
     pub async fn init(&self) {
-        let storage = self.storage.read().await;
-        let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
-        let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
-            self.config.start_block
-        } else if indexed_height > 0 {
-            indexed_height + 1
-        } else {
-            self.config.start_block
+        let (indexed_height, start_height) = {
+            let storage = self.storage.read().await;
+            let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
+            let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
+                self.config.start_block
+            } else if indexed_height > 0 {
+                indexed_height + 1
+            } else {
+                self.config.start_block
+            };
+            (indexed_height, start_height)
         };
 
         if indexed_height == 0 && self.config.start_block > 0 {
             let prev_height = self.config.start_block.saturating_sub(1);
-            if let Ok(None) = storage.get_state_root(prev_height).await {
+            let state_root = {
+                let storage = self.storage.read().await;
+                storage.get_state_root(prev_height).await
+            };
+            if let Ok(None) = state_root {
                 let empty_state_root = vec![0u8; 32];
                 let mut storage = self.storage.write().await;
                 storage.store_state_root(prev_height, &empty_state_root).await.unwrap();

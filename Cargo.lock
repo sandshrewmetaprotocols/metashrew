@@ -2802,7 +2802,6 @@ name = "metashrew-runtime"
 version = "9.0.1"
 dependencies = [
  "anyhow",
- "futures",
  "hex",
  "itertools 0.12.1",
  "log",
@@ -2870,6 +2869,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-test",
+ "wasmtime",
  "zstd 0.13.3",
 ]
 
@@ -3821,6 +3821,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wasmtime",
  "zstd 0.13.3",
 ]
 

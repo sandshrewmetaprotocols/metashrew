@@ -30,7 +30,10 @@ fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Ve
 #[tokio::test]
 async fn test_complete_indexing_workflow() -> Result<()> {
     let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime(engine).await?;
 
     // Create a realistic chain of blocks
     let chain = ChainBuilder::new().add_blocks(10).blocks();
@@ -74,7 +77,10 @@ async fn test_complete_indexing_workflow() -> Result<()> {
 #[tokio::test]
 async fn test_database_state_consistency() -> Result<()> {
     let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime(engine).await?;
 
     // Process some blocks
     let chain = ChainBuilder::new().add_blocks(3).blocks();

@@ -549,7 +549,10 @@ pub async fn run_prod(args: Args) -> Result<()> {
             let modern_adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
             ForkAdapter::Modern(modern_adapter)
         };
-        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter)?;
+        let mut config_engine = wasmtime::Config::default();
+        config_engine.async_support(true);
+        let engine = wasmtime::Engine::new(&config_engine)?;
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter, engine).await?;
         let storage_adapter = match runtime.context.lock().await.db {
             ForkAdapter::Modern(ref modern_adapter) => {
                 RocksDBStorageAdapter::new(modern_adapter.db.clone())
@@ -564,7 +567,10 @@ pub async fn run_prod(args: Args) -> Result<()> {
     } else {
         let adapter =
             RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
-        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone())?;
+        let mut config_engine = wasmtime::Config::default();
+        config_engine.async_support(true);
+        let engine = wasmtime::Engine::new(&config_engine)?;
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =
             MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));

@@ -321,15 +321,19 @@ where
         sync_engine: sync_engine_arc.clone(),
     });
 
-    let pipeline_size = args.pipeline_size.unwrap_or_else(|| {
+    // Pipeline size is no longer used - we enforce serial processing with channel size 1
+    let _pipeline_size = args.pipeline_size.unwrap_or_else(|| {
         let available_cpus = num_cpus::get();
         let auto_size = std::cmp::min(std::cmp::max(5, available_cpus / 2), 16);
-        info!("Auto-configuring pipeline size to {} based on {} available CPU cores", auto_size, available_cpus);
+        info!("Note: Pipeline size configuration ({}) is ignored - using serial processing", auto_size);
         auto_size
     });
 
-    let (block_sender, mut block_receiver) = mpsc::channel::<BlockData>(pipeline_size);
-    let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(pipeline_size);
+    // CRITICAL: Use channel size of 1 to enforce strict serial processing
+    // This ensures block N+1 cannot be fetched until block N is fully processed and committed
+    // Prevents out-of-order processing and duplicate block indexing
+    let (block_sender, mut block_receiver) = mpsc::channel::<BlockData>(1);
+    let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(1);
 
     let fetcher_handle = tokio::spawn({
         let sync_engine_clone = sync_engine_arc.clone();
@@ -366,14 +370,19 @@ where
 
                 match engine.get_next_block_data().await {
                     Ok(Some((height, block_data, block_hash))) => {
-                        debug!("Fetched block {} ({})", height, block_data.len());
+                        info!("FETCHER: Fetched block {} ({} bytes), adding to processing queue", height, block_data.len());
                         {
                             let mut processing_heights = engine.processing_heights.lock().await;
-                            processing_heights.insert(height);
+                            if !processing_heights.insert(height) {
+                                error!("FETCHER: Block {} was already in processing_heights! Duplicate fetch detected!", height);
+                            }
                         }
+                        // This send will block if channel is full (size=1), ensuring serial processing
+                        info!("FETCHER: Sending block {} to processor", height);
                         if block_sender_clone.send(BlockData { height, block_data, block_hash }).await.is_err() {
                             break;
                         }
+                        info!("FETCHER: Block {} sent to processor", height);
                     }
                     Ok(None) => {
                         debug!("No new blocks available, waiting...");
@@ -397,15 +406,25 @@ where
         async move {
             info!("Block processor task started.");
             while let Some(block_data) = block_receiver.recv().await {
-                debug!("Processing block {} ({})", block_data.height, block_data.block_data.len());
+                let block_start = Instant::now();
+                info!("PROCESSOR: Starting block {} ({} bytes)", block_data.height, block_data.block_data.len());
+                
                 // Don't hold the write lock during block processing - just get a reference
                 // The runtime handles its own internal synchronization
                 let engine = sync_engine_clone.read().await;
                 let result = match engine.process_block(block_data.height, block_data.block_data, block_data.block_hash).await {
-                    Ok(_) => BlockResult::Success(block_data.height),
-                    Err(e) => BlockResult::Error(block_data.height, e.into()),
+                    Ok(_) => {
+                        info!("PROCESSOR: Completed block {} in {:?}", block_data.height, block_start.elapsed());
+                        BlockResult::Success(block_data.height)
+                    },
+                    Err(e) => {
+                        error!("PROCESSOR: Failed block {} after {:?}: {}", block_data.height, block_start.elapsed(), e);
+                        BlockResult::Error(block_data.height, e.into())
+                    },
                 };
                 drop(engine); // Explicitly release the read lock
+                
+                // Send result - this will block until indexer consumes it (channel size = 1)
                 if result_sender_clone.send(result).await.is_err() {
                     break;
                 }
@@ -425,9 +444,16 @@ where
         while let Some(result) = result_receiver.recv().await {
             match result {
                 BlockResult::Success(height) => {
+                    info!("INDEXER: Received success for block {}, updating state", height);
                     let engine = sync_engine_clone.read().await;
                     let mut processing_heights = engine.processing_heights.lock().await;
-                    processing_heights.remove(&height);
+                    let was_processing = processing_heights.remove(&height);
+                    if !was_processing {
+                        error!("INDEXER: Block {} was not in processing_heights! Possible duplicate processing!", height);
+                    }
+                    drop(processing_heights);
+                    drop(engine);
+                    
                     let block_duration = start_time.elapsed(); // This is not block duration, but time since start
                     block_count += 1;
                     total_processing_time += block_duration;
@@ -445,12 +471,15 @@ where
                             block_count, avg_time, blocks_per_sec
                         );
                     }
-                    debug!("Successfully processed block {}", height);
+                    info!("INDEXER: Block {} fully committed, ready for next block", height);
                 }
                 BlockResult::Error(height, error) => {
+                    error!("INDEXER: Received error for block {}: {}", height, error);
                     let engine = sync_engine_clone.read().await;
                     let mut processing_heights = engine.processing_heights.lock().await;
                     processing_heights.remove(&height);
+                    drop(processing_heights);
+                    drop(engine);
                     error!("Failed to process block {}: {}", height, error);
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }

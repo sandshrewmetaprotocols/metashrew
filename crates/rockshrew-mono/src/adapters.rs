@@ -200,13 +200,19 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 }
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime and is snapshot-aware.
+/// 
+/// No external locking is needed for the runtime because:
+/// - View/preview calls create independent WASM runtime instances
+/// - Block processing is sequential (one block at a time)
+/// - Database is append-only with height-based reads (concurrent reads are safe)
+/// - MetashrewRuntime handles internal synchronization for context/instance access
 pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
-    runtime: Arc<RwLock<MetashrewRuntime<T>>>,
+    runtime: Arc<MetashrewRuntime<T>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
 }
 
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapter<T> {
-    pub fn new(runtime: Arc<RwLock<MetashrewRuntime<T>>>) -> Self {
+    pub fn new(runtime: Arc<MetashrewRuntime<T>>) -> Self {
         Self {
             runtime,
             snapshot_manager: Arc::new(RwLock::new(None)),
@@ -224,10 +230,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapt
 }
 
 #[async_trait]
-impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for MetashrewRuntimeAdapter<T> {
+impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for MetashrewRuntimeAdapter<T>
+where
+    <T as KeyValueStoreLike>::Batch: Send,
+{
     async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
-        let runtime = self.runtime.read().await;
-        runtime.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
+        // No external lock needed - MetashrewRuntime handles internal synchronization
+        self.runtime.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
     async fn process_block_atomic(
         &self,
@@ -235,8 +244,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
         block_data: &[u8],
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
-        let runtime = self.runtime.read().await;
-        runtime.process_block_atomic(height, block_data, block_hash).await.map(|r| AtomicBlockResult {
+        // No external lock needed - MetashrewRuntime handles internal synchronization
+        self.runtime.process_block_atomic(height, block_data, block_hash).await.map(|r| AtomicBlockResult {
             state_root: r.state_root,
             batch_data: r.batch_data,
             height: r.height,
@@ -245,10 +254,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        let runtime = self.runtime.read().await;
-        let context = runtime.context.lock().await;
-        let adapter = context.db.clone();
-        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
+        // Briefly lock to get DB clone, then release for concurrent access
+        let db = {
+            let context = self.runtime.context.lock().await;
+            context.db.clone()
+        };
+        let smt_helper = metashrew_runtime::smt::SMTHelper::new(db);
         match smt_helper.get_smt_root_at_height(height) {
             Ok(root) => Ok(root.to_vec()),
             Err(e) => Err(SyncError::Runtime(format!(
@@ -259,8 +270,10 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.read().await;
-        let result = runtime
+        // view() creates a completely independent WASM runtime instance
+        // No external locking needed - the method handles internal coordination
+        // Database reads are safe due to append-only structure and height-based queries
+        let result = self.runtime
             .view(call.function_name, &call.input_data, call.height)
             .await
             .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
@@ -268,8 +281,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.read().await;
-        let result = runtime
+        // preview() creates an isolated DB copy, processes the block, then runs a view function
+        // No external locking needed - all isolation is handled internally
+        let result = self.runtime
             .preview_async(
                 &call.block_data,
                 call.function_name,
@@ -286,13 +300,16 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter for Me
     }
 
     async fn is_ready(&self) -> bool {
-        self.runtime.try_read().is_ok()
+        // No try_read needed - runtime is always ready for concurrent access
+        true
     }
 
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
-        let runtime = self.runtime.write().await;
-        let context = runtime.context.lock().await;
-        let blocks_processed = context.height;
+        // Briefly lock to get height, then release
+        let blocks_processed = {
+            let context = self.runtime.context.lock().await;
+            context.height
+        };
         Ok(RuntimeStats {
             memory_usage_bytes: 0,
             blocks_processed,

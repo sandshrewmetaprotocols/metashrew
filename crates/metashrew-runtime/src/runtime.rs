@@ -611,31 +611,34 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         symbol: String,
         input: &Vec<u8>,
         height: u32,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Vec<u8>> where <T as KeyValueStoreLike>::Batch: Send {
         // Create preview context with isolated DB copy
                         let preview_db = {
-                            let guard = self.context.blocking_lock();
+                            let guard = self.context.lock().await;
                             guard.db.create_isolated_copy()
                         };
                 
-                        // Create a new runtime with preview db using the synchronous engine
+                        // Create a new runtime with preview db using the async engine
                         // Process the preview block at height + 1 to simulate adding it after the target height
                         let preview_height = height + 1;
+                        
+                        // Use new_with_db_indexer which sets up proper indexer linker for processing blocks
                         let runtime =
-                            Self::new_with_db(preview_db, preview_height, self.async_engine.clone(), self.async_module.clone()).await?;
-                        runtime.context.blocking_lock().block = block.clone();
+                            Self::new_with_db_indexer(preview_db, preview_height, self.async_engine.clone(), self.async_module.clone()).await?;
+                        runtime.context.lock().await.block = block.clone();
                 
                         // Execute block via _start to populate preview db
                         {
-                            let mut instance_guard = runtime.instance.blocking_lock();
+                            let mut instance_guard = runtime.instance.lock().await;
                         let WasmInstance { ref mut store, instance } = &mut *instance_guard;
                             let start = instance
                                 .get_typed_func::<(), ()>(&mut *store, "_start")
                                 .context("Failed to get _start function for preview")?;
                 
-                            match start.call(&mut *store, ()) {
+                            // Use call_async since we're using an async store
+                            match start.call_async(&mut *store, ()).await {
                                 Ok(_) => {
-                                    let context_guard = runtime.context.blocking_lock();
+                                    let context_guard = runtime.context.lock().await;
                                     if context_guard.state != 1 && !store.data().had_failure {
                                         return Err(anyhow!("indexer exited unexpectedly during preview"));
                                     }
@@ -647,7 +650,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         // Create new runtime just for the view using the updated preview DB
                         // Query at the preview height to see the state after processing the preview block
                         let view_runtime = {
-                            let context = runtime.context.blocking_lock();
+                            let context = runtime.context.lock().await;
                             // Create a view runtime with the updated database
                             let mut linker = Linker::<State>::new(&self.engine);
                             let mut wasmstore = Store::<State>::new(&self.engine, State::new());
@@ -664,7 +667,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             linker.define_unknown_imports_as_traps(&self.module)?;
                 
                             let instance = linker
-                                .instantiate(&mut wasmstore, &self.module)
+                                .instantiate_async(&mut wasmstore, &self.module)
+                                .await
                                 .context("Failed to instantiate WASM module for preview view")?;
                 
                             MetashrewRuntime {
@@ -679,18 +683,19 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         };
                 
                         // Set block to input for view
-                        view_runtime.context.blocking_lock().block = input.clone();
+                        view_runtime.context.lock().await.block = input.clone();
                 
                         // Execute view function
                         let result = {
-                            let mut instance_guard = view_runtime.instance.blocking_lock();
+                            let mut instance_guard = view_runtime.instance.lock().await;
                         let WasmInstance { ref mut store, instance } = &mut *instance_guard;
                             let func = instance
                                 .get_typed_func::<(), i32>(&mut *store, symbol.as_str())
                                 .context("Failed to get view function")?;
                 
+                            // Use call_async since we're using an async store
                             let result = func
-                                .call(&mut *store, ())
+                                .call_async(&mut *store, ()).await
                                 .context("Failed to execute view function")?;
                 
                             let memory = instance
@@ -712,7 +717,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         symbol: String,
         input: &Vec<u8>,
         height: u32,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Vec<u8>> where <T as KeyValueStoreLike>::Batch: Send {
         // For now, just use the synchronous version
         // In the future, we can implement a fully async version if needed
         self.preview(block, symbol, input, height).await
@@ -846,7 +851,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             wasmstore.limiter(|state| &mut state.limits);
             let new_instance = self
                 .linker
-                .instantiate(&mut wasmstore, &self.module)
+                .instantiate_async(&mut wasmstore, &self.module)
+                .await
                 .context("Failed to instantiate module during memory refresh")?;
             *instance_guard = WasmInstance {
                 store: wasmstore,
@@ -936,7 +942,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             // Note: Chain reorganization detection is now handled at the sync framework level
             // using proper block hash comparison, not at the runtime level
 
-            match start.call(&mut *store, ()) {
+            // Use call_async since we're using an async store
+            match start.call_async(&mut *store, ()).await {
                 Ok(_) => {
                     if self.context.lock().await.state != 1
                         && !store.data().had_failure
@@ -1281,7 +1288,7 @@ pub async fn setup_linker_view(
 
                         let data = mem.data(&caller);
 
-                        let height = context_get.clone().blocking_lock().height;
+                        let height = context_get.clone().lock().await.height;
 
 
 
@@ -1396,7 +1403,7 @@ pub async fn setup_linker_view(
 
                         let data = mem.data(&caller);
 
-                        let height = context_get_len.clone().blocking_lock().height;
+                        let height = context_get_len.clone().lock().await.height;
 
 
 
@@ -1460,7 +1467,46 @@ pub async fn setup_linker_view(
             linker.define_unknown_imports_as_traps(&module)?;
         }
         let instance = linker
-            .instantiate(&mut wasmstore, &module)
+            .instantiate_async(&mut wasmstore, &module)
+            .await
+            .context("Failed to instantiate WASM module")?;
+        Ok(MetashrewRuntime {
+            engine: engine.clone(),
+            async_engine: engine,
+            module: module.clone(),
+            async_module: module.clone(),
+            linker,
+            context,
+            instance: Mutex::new(WasmInstance { store: wasmstore, instance }),
+        })
+    }
+
+    async fn new_with_db_indexer(
+        db: T,
+        height: u32,
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+    ) -> Result<MetashrewRuntime<T>> where <T as KeyValueStoreLike>::Batch: Send {
+        let mut linker = Linker::<State>::new(&engine);
+        let mut wasmstore = Store::<State>::new(&engine, State::new());
+        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+            MetashrewRuntimeContext<T>,
+        >::new(
+            MetashrewRuntimeContext::new(db, height, vec![]),
+        ));
+        {
+            wasmstore.limiter(|state| &mut state.limits)
+        }
+        {
+            Self::setup_linker(context.clone(), &mut linker).await
+                .context("Failed to setup basic linker")?;
+            Self::setup_linker_indexer(context.clone(), &mut linker).await
+                .context("Failed to setup indexer linker")?;
+            linker.define_unknown_imports_as_traps(&module)?;
+        }
+        let instance = linker
+            .instantiate_async(&mut wasmstore, &module)
+            .await
             .context("Failed to instantiate WASM module")?;
         Ok(MetashrewRuntime {
             engine: engine.clone(),
@@ -1779,11 +1825,16 @@ pub async fn setup_linker_view(
                             .collect();
 
                         // Track key-value updates for any external listeners (like snapshotting)
+                        // Clone DB first and release lock immediately for concurrent access
                         {
-                            let context_ref_clone = context_ref.clone();
-                            let mut ctx_guard = context_ref_clone.lock().await;
+                            let mut db_for_tracking = {
+                                let context_arc = context_ref.clone();
+                                let ctx_guard = context_arc.lock().await;
+                                ctx_guard.db.clone()
+                            };
+                            // Now track updates without holding the context lock
                             for (k, v) in &key_values {
-                                ctx_guard.db.track_kv_update(k.clone(), v.clone());
+                                db_for_tracking.track_kv_update(k.clone(), v.clone());
                             }
                         }
 
@@ -2079,7 +2130,8 @@ pub async fn setup_linker_view(
                 .get_typed_func::<(), ()>(&mut *store, "_start")
                 .context("Failed to get _start function")?;
 
-            match start.call(&mut *store, ()) {
+            // Use call_async since we're using an async store
+            match start.call_async(&mut *store, ()).await {
                 Ok(_) => {
                     let context_state = {
                         let guard = self.context.lock().await;

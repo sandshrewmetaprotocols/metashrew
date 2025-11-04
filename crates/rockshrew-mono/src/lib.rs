@@ -385,11 +385,14 @@ where
             info!("Block processor task started.");
             while let Some(block_data) = block_receiver.recv().await {
                 debug!("Processing block {} ({})", block_data.height, block_data.block_data.len());
-                let engine = sync_engine_clone.write().await;
+                // Don't hold the write lock during block processing - just get a reference
+                // The runtime handles its own internal synchronization
+                let engine = sync_engine_clone.read().await;
                 let result = match engine.process_block(block_data.height, block_data.block_data, block_data.block_hash).await {
                     Ok(_) => BlockResult::Success(block_data.height),
                     Err(e) => BlockResult::Error(block_data.height, e.into()),
                 };
+                drop(engine); // Explicitly release the read lock
                 if result_sender_clone.send(result).await.is_err() {
                     break;
                 }
@@ -562,7 +565,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
             }
         };
         let runtime_adapter =
-            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+            MetashrewRuntimeAdapter::new(Arc::new(runtime));
         run_generic(args, runtime_adapter, storage_adapter).await
     } else {
         let adapter =
@@ -573,7 +576,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =
-            MetashrewRuntimeAdapter::new(Arc::new(tokio::sync::RwLock::new(runtime)));
+            MetashrewRuntimeAdapter::new(Arc::new(runtime));
         run_generic(args, runtime_adapter, storage_adapter).await
     }
 }

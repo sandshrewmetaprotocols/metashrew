@@ -89,7 +89,6 @@
 use async_trait::async_trait;
 use metashrew_runtime::{KeyValueStoreLike, MetashrewRuntime};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 
 use crate::{
     AtomicBlockResult, PreviewCall, RuntimeAdapter, RuntimeStats, SyncError, SyncResult, ViewCall,
@@ -97,18 +96,24 @@ use crate::{
 };
 
 /// Real runtime adapter that wraps MetashrewRuntime
+///
+/// No locking is needed because:
+/// - View/preview calls create independent WASM runtime instances
+/// - Block processing is sequential (one block at a time)
+/// - Database is append-only with height-based reads (ACID compliant)
+/// - MetashrewRuntime handles internal synchronization for context/instance access
 pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
-    runtime: Arc<Mutex<MetashrewRuntime<T>>>,
+    runtime: Arc<MetashrewRuntime<T>>,
 }
 
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapter<T> {
     pub fn new(runtime: MetashrewRuntime<T>) -> Self {
         Self {
-            runtime: Arc::new(Mutex::new(runtime)),
+            runtime: Arc::new(runtime),
         }
     }
 
-    pub fn from_arc(runtime: Arc<Mutex<MetashrewRuntime<T>>>) -> Self {
+    pub fn from_arc(runtime: Arc<MetashrewRuntime<T>>) -> Self {
         Self { runtime }
     }
 }
@@ -124,32 +129,33 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> Clone for MetashrewRu
 #[async_trait]
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     for MetashrewRuntimeAdapter<T>
+where
+    <T as KeyValueStoreLike>::Batch: Send,
 {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
-        let mut runtime = self.runtime.lock().await;
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+        // Set block data and height in context
         {
-            let mut context = runtime
-                .context
-                .lock()
-                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+            let mut context = self.runtime.context.lock().await;
             context.block = block_data.to_vec();
             context.height = height;
             context.db.set_height(height);
         }
-        runtime.run().map_err(|e| {
+        
+        // Execute block processing
+        self.runtime.run().await.map_err(|e| {
             SyncError::Runtime(format!("Runtime execution failed: {}", e))
         })?;
         Ok(())
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
     ) -> SyncResult<AtomicBlockResult> {
-        let mut runtime = self.runtime.lock().await;
-        match runtime.process_block_atomic(height, block_data, block_hash).await {
+        // Process block atomically - no external lock needed
+        match self.runtime.process_block_atomic(height, block_data, block_hash).await {
             Ok(result) => {
                 Ok(AtomicBlockResult {
                     state_root: result.state_root,
@@ -166,17 +172,21 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.lock().await;
-        let result = runtime
+        // view() creates a completely independent WASM runtime instance
+        // No external locking needed - the method handles internal coordination
+        // Database reads are safe due to append-only structure and height-based queries
+        let result = self.runtime
             .view(call.function_name, &call.input_data, call.height)
             .await
             .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
+        
         Ok(ViewResult { data: result })
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
-        let runtime = self.runtime.lock().await;
-        let result = runtime
+        // preview() creates an isolated DB copy, processes the block, then runs a view function
+        // No external locking needed - all isolation is handled internally
+        let result = self.runtime
             .preview_async(
                 &call.block_data,
                 call.function_name,
@@ -185,18 +195,18 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
             )
             .await
             .map_err(|e| SyncError::ViewFunction(format!("Preview function failed: {}", e)))?;
+        
         Ok(ViewResult { data: result })
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        let runtime = self.runtime.lock().await;
-        runtime
+        self.runtime
             .get_state_root(height)
             .await
             .map_err(|e| SyncError::Runtime(format!("Failed to get state root for height {}: {}", height, e)))
     }
 
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         log::info!("Manual memory refresh requested - note that memory is now refreshed automatically after each block");
         Ok(())
     }
@@ -206,13 +216,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> RuntimeAdapter
     }
 
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
-        let runtime = self.runtime.lock().await;
         let memory_usage_bytes = 0;
         let blocks_processed = {
-            let context = runtime
-                .context
-                .lock()
-                .map_err(|e| SyncError::Runtime(format!("Failed to lock context: {}", e)))?;
+            let context = self.runtime.context.lock().await;
             context.height
         };
         Ok(RuntimeStats {

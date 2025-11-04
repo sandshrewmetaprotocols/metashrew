@@ -99,7 +99,10 @@ async fn test_comprehensive_e2e() -> Result<()> {
     info!("--- Phase 1: Initial Indexing ---");
     let initial_chain = ChainBuilder::new().add_blocks(10);
     let initial_node = MockNode::new(initial_chain.clone());
-    let initial_runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let initial_runtime = config.create_runtime_from_adapter(shared_adapter.clone(), engine).await?;
     let initial_runtime_adapter = MetashrewRuntimeAdapter::new(initial_runtime);
     let initial_sync_config = SyncConfig {
         start_block: 0,
@@ -138,7 +141,10 @@ async fn test_comprehensive_e2e() -> Result<()> {
         .with_salt(1)
         .add_blocks(5);
     let reorg_node = MockNode::new(reorg_chain.clone());
-    let reorg_runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let reorg_runtime = config.create_runtime_from_adapter(shared_adapter.clone(), engine).await?;
     let reorg_runtime_adapter = MetashrewRuntimeAdapter::new(reorg_runtime);
     let reorg_sync_config = SyncConfig {
         start_block: 0, // This will be ignored as the adapter already has a height

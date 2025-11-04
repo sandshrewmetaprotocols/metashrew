@@ -14,6 +14,9 @@ metashrew-sync = { path = "crates/metashrew-sync" }
 memshrew-runtime = { path = "crates/memshrew-runtime" }
 prost = "0.12.6"
 prost-build = "0.12.6"
+tokio = { version = "1.43.0", features = ["full"] }
+futures = "0.3.30"
+sha2 = "0.10"
 
 # Root package for running tests
 [package]
@@ -29,6 +32,7 @@ futures = "0.3.30"
 async-trait = "0.1"
 log = "0.4.22"
 env_logger = "0.11"
+wasmtime = "18.0.4"
 
 # Metashrew dependencies
 metashrew-runtime = { path = "crates/metashrew-runtime" }

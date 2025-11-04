@@ -30,7 +30,10 @@ fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Ve
 #[tokio::test]
 async fn test_complete_indexing_workflow() -> Result<()> {
     let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime(engine).await?;
 
     // Create a realistic chain of blocks
     let chain = ChainBuilder::new().add_blocks(10).blocks();
@@ -40,17 +43,17 @@ async fn test_complete_indexing_workflow() -> Result<()> {
         let block_bytes = utils::consensus_encode(block)?;
 
         {
-            let mut context = runtime.context.lock().unwrap();
+            let mut context = runtime.context.lock().await;
             context.block = block_bytes;
             context.height = height as u32;
         }
 
-        runtime.run()?;
-        runtime.refresh_memory()?;
+        runtime.run().await?;
+        runtime.refresh_memory().await?;
     }
 
     // Verify final state using direct database access
-    let adapter = &runtime.context.lock().unwrap().db;
+    let adapter = &runtime.context.lock().await.db;
 
     // Check that all blocks are stored using append-only access
     for height in 0..chain.len() {
@@ -74,7 +77,10 @@ async fn test_complete_indexing_workflow() -> Result<()> {
 #[tokio::test]
 async fn test_database_state_consistency() -> Result<()> {
     let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime(engine).await?;
 
     // Process some blocks
     let chain = ChainBuilder::new().add_blocks(3).blocks();
@@ -86,16 +92,16 @@ async fn test_database_state_consistency() -> Result<()> {
         let block_bytes = utils::consensus_encode(block)?;
 
         {
-            let mut context = runtime.context.lock().unwrap();
+            let mut context = runtime.context.lock().await;
             context.block = block_bytes;
             context.height = height as u32;
         }
 
-        runtime.run()?;
-        runtime.refresh_memory()?;
+        runtime.run().await?;
+        runtime.refresh_memory().await?;
 
         // Take a snapshot of the database state
-        let adapter = &runtime.context.lock().unwrap().db;
+        let adapter = &runtime.context.lock().await.db;
         snapshots.push(adapter.get_all_data());
     }
 

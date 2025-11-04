@@ -122,7 +122,11 @@ async fn test_block_retry_fix() -> Result<()> {
     // Create a node that fails 2 times per block before succeeding
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
     
-    let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    
+    let runtime = config.create_runtime_from_adapter(shared_adapter.clone(), engine).await?;
     let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
     let counting_adapter = CountingRuntimeAdapter::new(runtime_adapter);
     
@@ -202,8 +206,10 @@ async fn test_snapshot_sync_retry_fix() -> Result<()> {
     
     // Create a node that fails 2 times per block before succeeding
     let retrying_node = RetryingMockNode::new(chain.clone(), 2);
-    
-    let runtime = config.create_runtime_from_adapter(shared_adapter.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime_from_adapter(shared_adapter.clone(), engine).await?;
     let runtime_adapter = MetashrewRuntimeAdapter::new(runtime);
     
     let sync_config = SyncConfig {
@@ -281,14 +287,14 @@ impl<T: RuntimeAdapter> CountingRuntimeAdapter<T> {
 
 #[async_trait]
 impl<T: RuntimeAdapter + Clone + Send + Sync> RuntimeAdapter for CountingRuntimeAdapter<T> {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         let mut counts = self.call_counts.lock().await;
         *counts.entry(height).or_insert(0) += 1;
         self.inner.process_block(height, block_data).await
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
@@ -310,7 +316,7 @@ impl<T: RuntimeAdapter + Clone + Send + Sync> RuntimeAdapter for CountingRuntime
         self.inner.execute_preview(call).await
     }
     
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         self.inner.refresh_memory().await
     }
 
@@ -344,7 +350,7 @@ impl CrashingRuntimeAdapter {
 
 #[async_trait]
 impl RuntimeAdapter for CrashingRuntimeAdapter {
-    async fn process_block(&mut self, height: u32, _block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, _block_data: &[u8]) -> SyncResult<()> {
         if height == self.crash_at_height {
             return Err(SyncError::Runtime("indexer exited unexpectedly".to_string()));
         }
@@ -356,7 +362,7 @@ impl RuntimeAdapter for CrashingRuntimeAdapter {
     }
 
     async fn process_block_atomic(
-        &mut self,
+        &self,
         height: u32,
         _block_data: &[u8],
         block_hash: &[u8],
@@ -388,7 +394,7 @@ impl RuntimeAdapter for CrashingRuntimeAdapter {
         unimplemented!()
     }
     
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         Ok(())
     }
 

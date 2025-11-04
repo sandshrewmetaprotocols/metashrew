@@ -12,7 +12,10 @@ use bitcoin::{hashes::Hash, BlockHash};
 #[tokio::test]
 async fn test_reorg_handling() -> Result<()> {
     let config = TestConfig::new();
-    let mut runtime = config.create_runtime()?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = config.create_runtime(engine).await?;
 
     // 1. Process an initial chain of 5 blocks
     let mut chain_a_hashes = vec![BlockHash::all_zeros()];
@@ -22,12 +25,12 @@ async fn test_reorg_handling() -> Result<()> {
         chain_a_hashes.push(block.block_hash());
         let block_bytes = TestUtils::serialize_block(&block);
         {
-            let mut context = runtime.context.lock().unwrap();
+            let mut context = runtime.context.lock().await;
             context.block = block_bytes;
             context.height = height;
         }
-        runtime.run()?;
-        runtime.refresh_memory()?;
+        runtime.run().await?;
+        runtime.refresh_memory().await?;
     }
 
     // Verify state of chain A at height 4
@@ -49,12 +52,12 @@ async fn test_reorg_handling() -> Result<()> {
         chain_b_hashes.push(block.block_hash());
         let block_bytes = TestUtils::serialize_block(&block);
         {
-            let mut context = runtime.context.lock().unwrap();
+            let mut context = runtime.context.lock().await;
             context.block = block_bytes;
             context.height = height;
         }
-        runtime.run()?;
-        runtime.refresh_memory()?;
+        runtime.run().await?;
+        runtime.refresh_memory().await?;
     }
 
     // 3. Verify the state now reflects chain B

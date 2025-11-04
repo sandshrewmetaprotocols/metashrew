@@ -17,7 +17,10 @@ async fn test_historical_view() -> Result<(), Box<dyn std::error::Error>> {
     let genesis_block_hash = BlockHash::from_slice(&[0; 32])?;
     let genesis_block = TestUtils::create_test_block(0, genesis_block_hash);
     let storage = MemStoreAdapter::new();
-    let runtime = TestConfig::new().create_runtime_from_adapter(storage.clone())?;
+    let mut config_engine = wasmtime::Config::default();
+    config_engine.async_support(true);
+    let engine = wasmtime::Engine::new(&config_engine)?;
+    let runtime = TestConfig::new().create_runtime_from_adapter(storage.clone(), engine).await?;
     let mut agent = MetashrewSync::new(
         InMemoryBitcoinNode::new(genesis_block.clone()),
         storage,
@@ -45,13 +48,13 @@ async fn test_historical_view() -> Result<(), Box<dyn std::error::Error>> {
         input_data: 2u32.to_le_bytes().to_vec(), // Input for getblock: height 2
         height: 2,
     };
-    let result_latest = agent.runtime().read().await.execute_view(view_call_latest).await?;
+    let result_latest = agent.runtime().execute_view(view_call_latest).await?;
     let view_call_historical = ViewCall {
         function_name: "getblock".to_string(),
         input_data: 1u32.to_le_bytes().to_vec(), // Input for getblock: height 1
         height: 1,
     };
-    let result_historical = agent.runtime().read().await.execute_view(view_call_historical).await?;
+    let result_historical = agent.runtime().execute_view(view_call_historical).await?;
     assert_ne!(result_latest.data, result_historical.data);
     Ok(())
 }

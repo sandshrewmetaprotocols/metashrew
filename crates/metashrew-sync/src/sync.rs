@@ -113,7 +113,7 @@ where
 {
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
-    runtime: Arc<RwLock<R>>,
+    runtime: Arc<R>,
     pub config: SyncConfig,
     is_running: Arc<AtomicBool>,
     pub current_height: Arc<AtomicU32>,
@@ -133,7 +133,7 @@ where
         Self {
             node: Arc::new(node),
             storage: Arc::new(RwLock::new(storage)),
-            runtime: Arc::new(RwLock::new(runtime)),
+            runtime: Arc::new(runtime),
             config,
             is_running: Arc::new(AtomicBool::new(false)),
             current_height: Arc::new(AtomicU32::new(0)),
@@ -144,19 +144,26 @@ where
     }
 
     pub async fn init(&self) {
-        let storage = self.storage.read().await;
-        let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
-        let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
-            self.config.start_block
-        } else if indexed_height > 0 {
-            indexed_height + 1
-        } else {
-            self.config.start_block
+        let (indexed_height, start_height) = {
+            let storage = self.storage.read().await;
+            let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
+            let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
+                self.config.start_block
+            } else if indexed_height > 0 {
+                indexed_height + 1
+            } else {
+                self.config.start_block
+            };
+            (indexed_height, start_height)
         };
 
         if indexed_height == 0 && self.config.start_block > 0 {
             let prev_height = self.config.start_block.saturating_sub(1);
-            if let Ok(None) = storage.get_state_root(prev_height).await {
+            let state_root = {
+                let storage = self.storage.read().await;
+                storage.get_state_root(prev_height).await
+            };
+            if let Ok(None) = state_root {
                 let empty_state_root = vec![0u8; 32];
                 let mut storage = self.storage.write().await;
                 storage.store_state_root(prev_height, &empty_state_root).await.unwrap();
@@ -178,7 +185,7 @@ where
     }
 
     /// Get a reference to the runtime adapter
-    pub fn runtime(&self) -> &Arc<RwLock<R>> {
+    pub fn runtime(&self) -> &Arc<R> {
         &self.runtime
     }
 
@@ -264,12 +271,9 @@ where
         );
 
         // Try atomic processing first
-        let atomic_result = {
-            let mut runtime = self.runtime.write().await;
-            runtime
-                .process_block_atomic(height, &block_data, &block_hash)
-                .await
-        };
+        let atomic_result = self.runtime
+            .process_block_atomic(height, &block_data, &block_hash)
+            .await;
 
         match atomic_result {
             Ok(result) => {
@@ -305,22 +309,16 @@ where
                 );
 
                 // Process with runtime (non-atomic fallback)
-                {
-                    let mut runtime = self.runtime.write().await;
-                    runtime
-                        .process_block(height, &block_data)
-                        .await
-                        .map_err(|e| SyncError::BlockProcessing {
-                            height,
-                            message: e.to_string(),
-                        })?;
-                }
+                self.runtime
+                    .process_block(height, &block_data)
+                    .await
+                    .map_err(|e| SyncError::BlockProcessing {
+                        height,
+                        message: e.to_string(),
+                    })?;
 
                 // Get state root after processing
-                let state_root = {
-                    let runtime = self.runtime.read().await;
-                    runtime.get_state_root(height).await?
-                };
+                let state_root = self.runtime.get_state_root(height).await?;
 
                 // Update storage with height, block hash, and state root
                 {
@@ -572,7 +570,7 @@ where
 {
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
-    runtime: Arc<RwLock<R>>,
+    runtime: Arc<R>,
     config: SyncConfig,
     is_running: Arc<AtomicBool>,
     current_height: Arc<AtomicU32>,
@@ -587,12 +585,9 @@ where
 {
     async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
         // Try atomic processing first
-        let atomic_result = {
-            let mut runtime = self.runtime.write().await;
-            runtime
-                .process_block_atomic(height, &block_data, &block_hash)
-                .await
-        };
+        let atomic_result = self.runtime
+            .process_block_atomic(height, &block_data, &block_hash)
+            .await;
 
         match atomic_result {
             Ok(result) => {
@@ -620,22 +615,16 @@ where
                 );
 
                 // Process with runtime (non-atomic fallback)
-                {
-                    let mut runtime = self.runtime.write().await;
-                    runtime
-                        .process_block(height, &block_data)
-                        .await
-                        .map_err(|e| SyncError::BlockProcessing {
-                            height,
-                            message: e.to_string(),
-                        })?;
-                }
+                self.runtime
+                    .process_block(height, &block_data)
+                    .await
+                    .map_err(|e| SyncError::BlockProcessing {
+                        height,
+                        message: e.to_string(),
+                    })?;
 
                 // Get state root after processing
-                let state_root = {
-                    let runtime = self.runtime.read().await;
-                    runtime.get_state_root(height).await?
-                };
+                let state_root = self.runtime.get_state_root(height).await?;
 
                 // Update storage with height, block hash, and state root
                 {
@@ -679,11 +668,9 @@ where
         }
         drop(storage);
 
-        let runtime = self.runtime.read().await;
-        if !runtime.is_ready().await {
+        if !self.runtime.is_ready().await {
             return Err(SyncError::Runtime("Runtime is not ready".to_string()));
         }
-        drop(runtime);
 
         // Start the pipeline
         self.run_pipeline().await?;
@@ -738,7 +725,7 @@ pub async fn handle_reorg<N, S, R>(
     current_height: u32,
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
-    runtime: Arc<RwLock<R>>,
+    runtime: Arc<R>,
     config: &SyncConfig,
 ) -> SyncResult<u32>
 where
@@ -789,9 +776,7 @@ where
         drop(storage_guard);
 
         // Refresh runtime memory
-        let mut runtime_guard = runtime.write().await;
-        runtime_guard.refresh_memory().await?;
-        drop(runtime_guard);
+        runtime.refresh_memory().await?;
 
         return Ok(rollback_height + 1);
     }
@@ -829,8 +814,7 @@ where
             height,
         };
 
-        let runtime = self.runtime.read().await;
-        let result = runtime.execute_view(call).await?;
+        let result = self.runtime.execute_view(call).await?;
 
         Ok(format!("0x{}", hex::encode(result.data)))
     }
@@ -863,8 +847,7 @@ where
             height,
         };
 
-        let runtime = self.runtime.read().await;
-        let result = runtime.execute_preview(call).await?;
+        let result = self.runtime.execute_preview(call).await?;
 
         Ok(format!("0x{}", hex::encode(result.data)))
     }

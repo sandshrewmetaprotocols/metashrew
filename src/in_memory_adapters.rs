@@ -11,6 +11,8 @@ use metashrew_sync::{
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use wasmtime::Engine;
+
 /// An in-memory Bitcoin node adapter for testing
 #[derive(Clone)]
 pub struct InMemoryBitcoinNode {
@@ -98,9 +100,12 @@ pub struct InMemoryRuntime {
 }
 
 impl InMemoryRuntime {
-    pub fn new(wasm_bytes: &[u8]) -> Self {
+    pub async fn new(wasm_bytes: &[u8]) -> Self {
         let store = MemStore::new();
-        let runtime = MetashrewRuntime::new(wasm_bytes, store).unwrap();
+        let mut config = wasmtime::Config::default();
+        config.async_support(true);
+        let engine = Engine::new(&config).unwrap();
+        let runtime = MetashrewRuntime::new(wasm_bytes, store, engine).await.unwrap();
         Self { runtime }
     }
 
@@ -111,11 +116,11 @@ impl InMemoryRuntime {
 
 #[async_trait]
 impl RuntimeAdapter for InMemoryRuntime {
-    async fn process_block(&mut self, height: u32, block_data: &[u8]) -> SyncResult<()> {
+    async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         self.runtime.process_block(height, block_data).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
-    async fn process_block_atomic(&mut self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
+    async fn process_block_atomic(&self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
         self.runtime.process_block_atomic(height, block_data, block_hash).await.map(|res| AtomicBlockResult {
             state_root: res.state_root,
             batch_data: res.batch_data,
@@ -129,14 +134,17 @@ impl RuntimeAdapter for InMemoryRuntime {
     }
 
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult> {
-        self.runtime.preview_async(&call.block_data, call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| SyncError::Runtime(e.to_string()))
+        self.runtime.preview_async(&call.block_data, call.function_name, &call.input_data, call.height).await.map(|res| ViewResult { data: res }).map_err(|e| {
+            eprintln!("Preview execution error: {:?}", e);
+            SyncError::Runtime(format!("Preview failed: {:?}", e))
+        })
     }
 
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
         self.runtime.get_state_root(height).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
-    async fn refresh_memory(&mut self) -> SyncResult<()> {
+    async fn refresh_memory(&self) -> SyncResult<()> {
         Ok(())
     }
 

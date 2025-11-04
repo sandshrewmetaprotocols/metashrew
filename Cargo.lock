@@ -2802,19 +2802,14 @@ name = "metashrew-runtime"
 version = "9.0.1"
 dependencies = [
  "anyhow",
- "env_logger",
  "hex",
  "itertools 0.12.1",
  "log",
  "prost",
  "prost-build",
- "serde",
- "serde_json",
  "sha2",
- "snap",
- "tempfile",
+ "tokio",
  "wasmtime",
- "zstd 0.13.3",
 ]
 
 [[package]]
@@ -2874,6 +2869,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-test",
+ "wasmtime",
  "zstd 0.13.3",
 ]
 
@@ -3825,6 +3821,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wasmtime",
  "zstd 0.13.3",
 ]
 
@@ -4436,12 +4433,6 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
-
-[[package]]
-name = "snap"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b6b67fb9a61334225b5b790716f609cd58395f895b3fe8b328786812a40bc3b"
 
 [[package]]
 name = "socket2"

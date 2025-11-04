@@ -206,6 +206,7 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 /// - Block processing is sequential (one block at a time)
 /// - Database is append-only with height-based reads (concurrent reads are safe)
 /// - MetashrewRuntime handles internal synchronization for context/instance access
+#[derive(Clone)]
 pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
     runtime: Arc<MetashrewRuntime<T>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,

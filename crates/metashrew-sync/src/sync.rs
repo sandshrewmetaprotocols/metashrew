@@ -114,7 +114,7 @@ where
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
     runtime: Arc<R>,
-    config: SyncConfig,
+    pub config: SyncConfig,
     is_running: Arc<AtomicBool>,
     pub current_height: Arc<AtomicU32>,
     last_block_time: Arc<RwLock<Option<SystemTime>>>,
@@ -170,6 +170,7 @@ where
             }
         }
 
+        
         self.current_height.store(start_height, Ordering::SeqCst);
     }
 
@@ -720,7 +721,7 @@ where
 }
 
 /// Handles chain reorganizations by finding the common ancestor and rolling back state.
-pub(crate) async fn handle_reorg<N, S, R>(
+pub async fn handle_reorg<N, S, R>(
     current_height: u32,
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
@@ -734,7 +735,9 @@ where
 {
     let mut check_height = current_height.saturating_sub(1);
     let mut reorg_detected = false;
-
+    if current_height == 0 {
+        return Ok(0);
+    }
     // Find the common ancestor
     while check_height > 0 && check_height >= current_height.saturating_sub(config.max_reorg_depth) {
         let storage_guard = storage.read().await;

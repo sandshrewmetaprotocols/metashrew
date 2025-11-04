@@ -355,9 +355,22 @@ where
                     }
                 }
 
+                let current_height = engine.current_height();
+                {
+                    let processing_heights = engine.processing_heights.lock().await;
+                    if processing_heights.contains(&current_height) {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        continue;
+                    }
+                }
+
                 match engine.get_next_block_data().await {
                     Ok(Some((height, block_data, block_hash))) => {
                         debug!("Fetched block {} ({})", height, block_data.len());
+                        {
+                            let mut processing_heights = engine.processing_heights.lock().await;
+                            processing_heights.insert(height);
+                        }
                         if block_sender_clone.send(BlockData { height, block_data, block_hash }).await.is_err() {
                             break;
                         }
@@ -401,7 +414,9 @@ where
         }
     });
 
-    let indexer_handle = tokio::spawn(async move {
+    let indexer_handle = tokio::spawn({
+        let sync_engine_clone = sync_engine_arc.clone();
+        async move {
         info!("Starting block indexing process...");
         let mut block_count = 0u64;
         let mut total_processing_time = std::time::Duration::ZERO;
@@ -410,6 +425,9 @@ where
         while let Some(result) = result_receiver.recv().await {
             match result {
                 BlockResult::Success(height) => {
+                    let engine = sync_engine_clone.read().await;
+                    let mut processing_heights = engine.processing_heights.lock().await;
+                    processing_heights.remove(&height);
                     let block_duration = start_time.elapsed(); // This is not block duration, but time since start
                     block_count += 1;
                     total_processing_time += block_duration;
@@ -430,6 +448,9 @@ where
                     debug!("Successfully processed block {}", height);
                 }
                 BlockResult::Error(height, error) => {
+                    let engine = sync_engine_clone.read().await;
+                    let mut processing_heights = engine.processing_heights.lock().await;
+                    processing_heights.remove(&height);
                     error!("Failed to process block {}: {}", height, error);
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
@@ -441,7 +462,7 @@ where
                 }
             }
         }
-    });
+    }});
 
     let server_handle = tokio::spawn({
         let args_clone = Arc::new(args.clone());

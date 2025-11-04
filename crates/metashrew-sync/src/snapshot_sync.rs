@@ -21,6 +21,11 @@ use crate::{
 };
 
 /// Snapshot-enabled synchronization engine
+use std::collections::HashSet;
+use tokio::sync::Mutex;
+
+//... (rest of the file)
+
 pub struct SnapshotMetashrewSync<N, S, R>
 where
     N: BitcoinNodeAdapter,
@@ -46,6 +51,7 @@ where
     snapshots_applied: Arc<AtomicU32>,
     blocks_synced_normally: Arc<AtomicU32>,
     blocks_synced_from_snapshots: Arc<AtomicU32>,
+    pub processing_heights: Arc<Mutex<HashSet<u32>>>,
 
     // Timing
     last_block_time: Arc<RwLock<Option<SystemTime>>>,
@@ -78,6 +84,7 @@ where
             snapshots_applied: Arc::new(AtomicU32::new(0)),
             blocks_synced_normally: Arc::new(AtomicU32::new(0)),
             blocks_synced_from_snapshots: Arc::new(AtomicU32::new(0)),
+            processing_heights: Arc::new(Mutex::new(HashSet::new())),
 
             last_block_time: Arc::new(RwLock::new(None)),
             last_snapshot_check: Arc::new(RwLock::new(None)),
@@ -85,7 +92,7 @@ where
     }
 
     pub async fn init(&self) {
-        let storage = self.storage.read().await;
+        let mut storage = self.storage.write().await;
         let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
         let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
             self.config.start_block
@@ -99,7 +106,6 @@ where
             let prev_height = self.config.start_block.saturating_sub(1);
             if let Ok(None) = storage.get_state_root(prev_height).await {
                 let empty_state_root = vec![0u8; 32];
-                let mut storage = self.storage.write().await;
                 storage.store_state_root(prev_height, &empty_state_root).await.unwrap();
             }
         }

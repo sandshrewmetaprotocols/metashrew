@@ -338,10 +338,11 @@ where
 
         // Collect all keys that were changed in the height range
         let mut all_changed_keys = std::collections::HashSet::new();
-        log::debug!("all changed keys length {}", all_changed_keys.len());
         for height in (from_height + 1)..=to_height {
+            log::info!("height {}", height);
             match smt_helper.get_keys_at_height(height) {
                 Ok(keys) => {
+                    log::info!("keys length {}", keys.len());
                     for key in keys {
                         all_changed_keys.insert(key);
                     }
@@ -352,11 +353,12 @@ where
                 }
             }
         }
+        log::info!("all changed keys length {}", all_changed_keys.len());
 
         // Get values for all changed keys at the end height
         let mut diff = serde_json::Map::new();
         for key in all_changed_keys {
-            log::debug!("key {}", hex::encode(&key));
+            log::info!("key {}", hex::encode(&key));
             match smt_helper.get_at_height(&key, to_height) {
                 Ok(Some(value)) => {
                     let key_hex = hex::encode(&key);

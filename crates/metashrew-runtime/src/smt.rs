@@ -1671,6 +1671,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
                 // Check if this key was updated at the specified height
                 let heights = self.get_heights_for_key(original_key)?;
                 if heights.contains(&height) {
+                    log::info!("pushing original_key in get_keys_at_height {}", hex::encode(original_key));
                     keys.push(original_key.to_vec());
                 }
             }

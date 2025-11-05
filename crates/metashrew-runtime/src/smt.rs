@@ -1706,50 +1706,6 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(())
     }
 
-    /// Rollback all keys to their state before a specific height using the new append-only approach
-    ///
-    /// WARNING: This method creates and writes a batch immediately for each call.
-    /// For better performance during block processing, use rollback_to_height_batched() instead.
-    pub fn rollback_to_height(&mut self, target_height: u32) -> Result<()> {
-        let mut batch = self.storage.create_batch();
-        self.rollback_to_height_to_batch(&mut batch, target_height)?;
-        self.storage.write(batch)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-        Ok(())
-    }
-
-    /// Rollback all keys to their state before a specific height using an existing batch
-    pub fn rollback_to_height_batched(&mut self, batch: &mut T::Batch, target_height: u32) -> Result<()> {
-        self.rollback_to_height_to_batch(batch, target_height)
-    }
-
-    /// Internal method to add rollback operations to a batch using the new append-only approach
-    fn rollback_to_height_to_batch(&self, batch: &mut T::Batch, target_height: u32) -> Result<()> {
-        // For the new append-only approach, we need to scan all keys and rollback each one
-        // This is more complex since we don't have a height index anymore
-        // We'll need to scan all keys that have a "/length" suffix
-        
-        let length_suffix = "/length";
-        let mut keys_to_rollback = Vec::new();
-        
-        // Scan for all keys with "/length" suffix to find all keys in the database
-        for (stored_key, _) in self.storage.scan_prefix(b"")
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            if stored_key.ends_with(length_suffix.as_bytes()) {
-                // Extract the original key by removing the "/length" suffix
-                let original_key = &stored_key[..stored_key.len() - length_suffix.len()];
-                keys_to_rollback.push(original_key.to_vec());
-            }
-        }
-        
-        // Rollback each key
-        for key in keys_to_rollback {
-            self.rollback_key_to_batch(batch, &key, target_height)?;
-        }
-
-        Ok(())
-    }
-
     /// Iterate backwards through all values of a key from most recent using the new append-only approach
     pub fn iterate_backwards(
         &self,

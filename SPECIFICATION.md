@@ -1430,6 +1430,66 @@ Get snapshot and indexer status information.
 }
 ```
 
+**7. metashrew_blockdiff**
+Get the diff of keys added or changed between two block heights. Returns all keys that were modified in the specified height range along with their final values at the end height.
+
+**Parameters:** `[from_height, to_height]`
+- `from_height` (number): Starting block height (exclusive - keys changed at from_height+1 and onwards are included)
+- `to_height` (number): Ending block height (inclusive - final values are from this height)
+
+**Request Example:**
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "metashrew_blockdiff",
+  "params": [850000, 850010],
+  "id": 10
+}
+```
+
+**Response:**
+```json
+{
+  "jsonrpc": "2.0",
+  "result": "{\"0x1234567890abcdef\":\"0xdeadbeef\",\"0xfedcba0987654321\":\"0xcafebabe\",\"0x1111111111111111\":null}",
+  "id": 10
+}
+```
+
+**Parsed Response Object:**
+```json
+{
+  "0x1234567890abcdef": "0xdeadbeef",
+  "0xfedcba0987654321": "0xcafebabe",
+  "0x1111111111111111": null
+}
+```
+
+**Response Format:**
+- Keys are hex-encoded byte arrays (without 0x prefix in the JSON object keys)
+- Values are hex-encoded byte arrays (with 0x prefix) or `null` if the key was deleted
+- Only keys that were modified in the range `[from_height+1, to_height]` are included
+- The value for each key is its state at `to_height`
+
+**Usage Notes:**
+- `from_height` must be less than `to_height`
+- Heights must be within the indexed range
+- The method efficiently tracks changes using the append-only database structure
+- Keys that were modified multiple times in the range appear only once in the result
+- Keys with `null` values indicate they were deleted at some point in the range
+
+**Error Example (Invalid Height Range):**
+```json
+{
+  "jsonrpc": "2.0",
+  "error": {
+    "code": -32602,
+    "message": "Invalid height range: from_height 850010 must be less than to_height 850000"
+  },
+  "id": 10
+}
+```
+
 #### 8.1.3 Parameter Format Specifications
 
 **Height Parameters:**
@@ -1518,6 +1578,7 @@ Get snapshot and indexer status information.
 4. **`metashrew_getblockhash`** - Get block hash by height
 5. **`metashrew_stateroot`** - Get cryptographic state root at height
 6. **`metashrew_snapshot`** - Get indexer status and statistics
+7. **`metashrew_blockdiff`** - Get diff of keys changed between two block heights
 
 #### 8.1.6 JsonRpcProvider Trait
 **Location:** [`crates/rockshrew-sync/src/traits.rs`](crates/rockshrew-sync/src/traits.rs:294)
@@ -1554,6 +1615,9 @@ pub trait JsonRpcProvider: Send + Sync {
 
     /// Get snapshot information
     async fn metashrew_snapshot(&self) -> SyncResult<serde_json::Value>;
+
+    /// Get the diff of keys added/changed between two block heights
+    async fn metashrew_blockdiff(&self, from_height: u32, to_height: u32) -> SyncResult<serde_json::Value>;
 }
 ```
 
@@ -1574,6 +1638,7 @@ async fn handle_jsonrpc(
         "metashrew_getblockhash" => { /* Implementation */ },
         "metashrew_stateroot" => { /* Implementation */ },
         "metashrew_snapshot" => { /* Implementation */ },
+        "metashrew_blockdiff" => { /* Implementation */ },
         _ => { /* Method not found error */ }
     }
 }

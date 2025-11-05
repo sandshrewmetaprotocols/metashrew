@@ -46,9 +46,6 @@
 //!
 //! // Store key-value pairs with height indexing
 //! smt_helper.put(key, value, height)?;
-//!
-//! // Calculate and store state root
-//! let state_root = smt_helper.calculate_and_store_state_root(height)?;
 //! ```
 //!
 //! ## Historical Queries
@@ -180,9 +177,6 @@ pub enum SMTNode {
 ///
 /// // Store a key-value pair at specific height
 /// smt.put(b"key", b"value", height)?;
-///
-/// // Calculate state root for the height
-/// let root = smt.calculate_and_store_state_root(height)?;
 /// ```
 ///
 /// ## Historical Queries
@@ -1656,29 +1650,6 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(heights)
     }
 
-    /// Get all keys that were updated at a specific height using the new append-only approach
-    pub fn get_keys_at_height(&self, height: u32) -> Result<Vec<Vec<u8>>> {
-        let mut keys = Vec::new();
-        let length_suffix = "/length";
-        
-        // Scan for all keys with "/length" suffix to find all keys in the database
-        for (stored_key, _) in self.storage.scan_prefix(b"")
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            if stored_key.ends_with(length_suffix.as_bytes()) {
-                // Extract the original key by removing the "/length" suffix
-                let original_key = &stored_key[..stored_key.len() - length_suffix.len()];
-                
-                // Check if this key was updated at the specified height
-                let heights = self.get_heights_for_key(original_key)?;
-                if heights.contains(&height) {
-                    keys.push(original_key.to_vec());
-                }
-            }
-        }
-
-        Ok(keys)
-    }
-
     /// Rollback a key to its state before a specific height using the new append-only approach
     ///
     /// WARNING: This method creates and writes a batch immediately for each call.
@@ -1800,48 +1771,6 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         Ok(results)
-    }
-
-    /// Calculate and store the SMT state root for a specific height using incremental updates
-    ///
-    /// WARNING: This method creates and writes a batch immediately for each call.
-    /// For better performance during block processing, use calculate_and_store_state_root_batched() instead.
-    pub fn calculate_and_store_state_root(&mut self, height: u32) -> Result<[u8; 32]> {
-        let prev_root = if height > 0 {
-            // For heights > 0, get the previous state root
-            match self.get_smt_root_at_height(height - 1) {
-                Ok(root) => root,
-                Err(_) => EMPTY_NODE_HASH, // If no previous root exists, start with empty
-            }
-        } else {
-            // For height 0, start with empty root
-            EMPTY_NODE_HASH
-        };
-
-        // Get all keys that were updated at this height
-        let updated_keys = self.get_keys_at_height(height)?;
-
-        if updated_keys.is_empty() {
-            // No updates at this height, return previous root
-            let mut batch = self.storage.create_batch();
-            let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-            batch.put(root_key, prev_root.to_vec());
-            self.storage.write(batch)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-            return Ok(prev_root);
-        }
-
-        // Use incremental SMT updates instead of full state enumeration
-        let new_root = self.compute_incremental_smt_root(prev_root, &updated_keys, height)?;
-
-        // Store the new root
-        let mut batch = self.storage.create_batch();
-        let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-        batch.put(root_key, new_root.to_vec());
-        self.storage.write(batch)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-
-        Ok(new_root)
     }
 
     /// Optimized batch calculation of state root for multiple keys

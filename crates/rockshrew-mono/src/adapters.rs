@@ -317,4 +317,62 @@ where
             last_refresh_height: Some(blocks_processed),
         })
     }
+
+    async fn get_block_diff(&self, from_height: u32, to_height: u32) -> SyncResult<serde_json::Value> {
+        // Validate height range
+        if from_height >= to_height {
+            return Err(SyncError::Serialization(format!(
+                "Invalid height range: from_height {} must be less than to_height {}",
+                from_height, to_height
+            )));
+        }
+
+        // Get the database from runtime context
+        let db = {
+            let context = self.runtime.context.lock().await;
+            context.db.clone()
+        };
+
+        // Create SMTHelper to access key tracking functionality
+        let smt_helper = metashrew_runtime::smt::SMTHelper::new(db);
+
+        // Collect all keys that were changed in the height range
+        let mut all_changed_keys = std::collections::HashSet::new();
+        for height in (from_height + 1)..=to_height {
+            match smt_helper.get_keys_at_height(height) {
+                Ok(keys) => {
+                    for key in keys {
+                        all_changed_keys.insert(key);
+                    }
+                }
+                Err(e) => {
+                    // Log warning but continue - some heights might not have changes
+                    log::debug!("No keys found at height {}: {}", height, e);
+                }
+            }
+        }
+
+        // Get values for all changed keys at the end height
+        let mut diff = serde_json::Map::new();
+        for key in all_changed_keys {
+            match smt_helper.get_at_height(&key, to_height) {
+                Ok(Some(value)) => {
+                    let key_hex = hex::encode(&key);
+                    let value_hex = hex::encode(&value);
+                    diff.insert(key_hex, serde_json::Value::String(value_hex));
+                }
+                Ok(None) => {
+                    // Key was deleted at this height
+                    let key_hex = hex::encode(&key);
+                    diff.insert(key_hex, serde_json::Value::Null);
+                }
+                Err(e) => {
+                    // Log error but continue
+                    log::debug!("Error getting value for key {} at height {}: {}", hex::encode(&key), to_height, e);
+                }
+            }
+        }
+
+        Ok(serde_json::Value::Object(diff))
+    }
 }

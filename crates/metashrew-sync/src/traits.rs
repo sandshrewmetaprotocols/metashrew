@@ -61,7 +61,7 @@
 //! - **Dependency injection**: Easy substitution of components
 //! - **Isolated testing**: Test individual components in isolation
 
-use crate::{BlockInfo, ChainTip, PreviewCall, SyncResult, ViewCall, ViewResult};
+use crate::{BlockInfo, ChainTip, PreviewCall, SyncError, SyncResult, ViewCall, ViewResult};
 use async_trait::async_trait;
 
 /// Trait for Bitcoin node adapters that provide blockchain data.
@@ -275,6 +275,13 @@ pub trait RuntimeAdapter: Send + Sync {
         // Default implementation does nothing - only MetashrewRuntimeAdapter implements this
         Ok(())
     }
+
+    /// Get the diff of keys added/changed between two block heights
+    /// Returns a JSON object with keys and their values at the end height
+    /// Default implementation returns an error - must be implemented by concrete adapters
+    async fn get_block_diff(&self, _from_height: u32, _to_height: u32) -> SyncResult<serde_json::Value> {
+        Err(SyncError::Runtime("Block diff not supported by this runtime adapter".to_string()))
+    }
 }
 
 /// Result of atomic block processing containing all operations to be committed
@@ -329,6 +336,10 @@ pub trait JsonRpcProvider: Send + Sync {
 
     /// Get snapshot information
     async fn metashrew_snapshot(&self) -> SyncResult<serde_json::Value>;
+
+    /// Get the diff of keys added/changed between two block heights
+    /// Returns a JSON object with keys and their values at the end height
+    async fn metashrew_blockdiff(&self, from_height: u32, to_height: u32) -> SyncResult<serde_json::Value>;
 }
 
 /// Trait for the complete sync engine that coordinates all components

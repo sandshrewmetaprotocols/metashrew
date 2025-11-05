@@ -872,4 +872,17 @@ where
             "blocks_synced_from_snapshots": snapshot_stats.blocks_synced_from_snapshots
         }))
     }
+
+    async fn metashrew_blockdiff(&self, from_height: u32, to_height: u32) -> SyncResult<serde_json::Value> {
+        // Validate height range
+        if from_height >= to_height {
+            return Err(SyncError::Serialization(format!(
+                "Invalid height range: from_height {} must be less than to_height {}",
+                from_height, to_height
+            )));
+        }
+
+        // Delegate to runtime adapter which has access to the database
+        self.runtime.get_block_diff(from_height, to_height).await
+    }
 }

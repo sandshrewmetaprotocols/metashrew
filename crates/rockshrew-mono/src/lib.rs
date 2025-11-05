@@ -208,6 +208,17 @@ where
             state.sync_engine.read().await.metashrew_stateroot(height).await
         }
         "metashrew_snapshot" => state.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
+        "metashrew_blockdiff" => {
+            let from_height = params[0].as_u64().unwrap_or_default() as u32;
+            let to_height = params[1].as_u64().unwrap_or_default() as u32;
+            state
+                .sync_engine
+                .read()
+                .await
+                .metashrew_blockdiff(from_height, to_height)
+                .await
+                .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string()))
+        }
         _ => Err(anyhow::anyhow!("Method not found").into()),
     };
 

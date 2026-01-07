@@ -303,10 +303,16 @@ where
         }
 
         debug!(
+<<<<<<< HEAD
             "✓ Block {} hash verified: {}...{}",
             height,
             hex::encode(&computed_hash[..4]),
             hex::encode(&computed_hash[28..])
+=======
+            "✓ Block {} hash verified: {}",
+            height,
+            hex::encode(&computed_hash[..8])
+>>>>>>> bb88797a68d4092f25a0ef7d512d91bf7f756f89
         );
 
         // Genesis block has no previous block to check
@@ -337,11 +343,18 @@ where
                     Ok(false)
                 } else {
                     debug!(
+<<<<<<< HEAD
                         "✓ Block {} connects to previous block {} (prev_hash: {}...{})",
                         height,
                         height - 1,
                         hex::encode(&block_prev_hash[..4]),
                         hex::encode(&block_prev_hash[28..])
+=======
+                        "✓ Block {} connects to previous block {} (prev_hash: {})",
+                        height,
+                        height - 1,
+                        hex::encode(&block_prev_hash[..8])
+>>>>>>> bb88797a68d4092f25a0ef7d512d91bf7f756f89
                     );
                     Ok(true)
                 }

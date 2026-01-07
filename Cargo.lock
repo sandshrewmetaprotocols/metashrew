@@ -2826,7 +2826,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-sync"
-version = "9.0.1"
+version = "9.0.1-rc.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2838,13 +2838,14 @@ dependencies = [
  "rocksdb",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
 ]
 
 [[package]]
 name = "metashrew-tests"
-version = "9.0.1"
+version = "9.0.1-rc.2"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -3786,7 +3787,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-mono"
-version = "9.0.1"
+version = "9.0.1-rc.2"
 dependencies = [
  "actix-cors",
  "actix-web",

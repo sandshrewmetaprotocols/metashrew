@@ -479,8 +479,35 @@ where
                     let mut processing_heights = engine.processing_heights.lock().await;
                     processing_heights.remove(&height);
                     drop(processing_heights);
+
+                    let error_str = error.to_string();
+
+                    // Check if this is a chain validation error - trigger reorg handling
+                    if error_str.contains("does not connect to previous block") || error_str.contains("CHAIN DISCONTINUITY") {
+                        warn!("Chain discontinuity detected at height {}. Triggering reorg handling.", height);
+
+                        // Trigger reorg handling to find common ancestor and rollback
+                        match metashrew_sync::sync::handle_reorg(
+                            height,
+                            engine.node().clone(),
+                            engine.storage().clone(),
+                            engine.runtime().clone(),
+                            &engine.config,
+                        )
+                        .await
+                        {
+                            Ok(rollback_height) => {
+                                info!("Rolled back to height {}. Resuming sync.", rollback_height);
+                                // The sync engine will pick up from the new height
+                            }
+                            Err(e) => {
+                                error!("Failed to handle reorg: {}", e);
+                            }
+                        }
+                    }
+
                     drop(engine);
-                    error!("Failed to process block {}: {}", height, error);
+                    error!("Failed to process block {}: {}", height, error_str);
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
             }

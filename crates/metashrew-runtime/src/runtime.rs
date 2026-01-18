@@ -852,21 +852,27 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
     pub async fn refresh_memory(&self) -> Result<()> {
         let mut instance_guard = self.instance.lock().await;
-        // Only refresh memory if there was actual execution or failure
-        // This reduces overhead for blocks with minimal processing
-        if instance_guard.store.data().had_failure || self.context.lock().await.state == 1 {
-            let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-            wasmstore.limiter(|state| &mut state.limits);
-            let new_instance = self
-                .linker
-                .instantiate_async(&mut wasmstore, &self.module)
-                .await
-                .context("Failed to instantiate module during memory refresh")?;
-            *instance_guard = WasmInstance {
-                store: wasmstore,
-                instance: new_instance,
-            };
-        }
+
+        // Log memory state before refresh
+        let had_failure = instance_guard.store.data().had_failure;
+        log::debug!("Memory refresh: had_failure={}", had_failure);
+
+        // ALWAYS refresh memory for deterministic behavior between blocks
+        // This ensures no WASM state persists between blocks, preventing non-determinism
+        // under high load or resource constraints
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        wasmstore.limiter(|state| &mut state.limits);
+        let new_instance = self
+            .linker
+            .instantiate_async(&mut wasmstore, &self.module)
+            .await
+            .context("Failed to instantiate module during memory refresh")?;
+        *instance_guard = WasmInstance {
+            store: wasmstore,
+            instance: new_instance,
+        };
+
+        log::debug!("Memory refresh completed successfully");
         Ok(())
     }
 
@@ -939,7 +945,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Memory refresh fails after execution
     /// - Host function failures occur during execution
     pub async fn run(&self) -> Result<(), anyhow::Error> {
-        self.context.lock().await.state = 0;
+        let height = {
+            let mut ctx = self.context.lock().await;
+            ctx.state = 0;
+            ctx.height
+        };
+        log::info!("Starting block processing for height {}", height);
+
         let execution_result = {
             let mut instance_guard = self.instance.lock().await;
             let WasmInstance { ref mut store, instance } = &mut *instance_guard;
@@ -956,24 +968,29 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                     if self.context.lock().await.state != 1
                         && !store.data().had_failure
                     {
+                        log::error!("Block {} indexer exited unexpectedly (state != 1 and no failure)", height);
                         Err(anyhow!("indexer exited unexpectedly"))
                     } else {
+                        log::info!("Block {} WASM execution completed successfully", height);
                         Ok(())
                     }
                 }
-                Err(e) => Err(e).context("Error calling _start function"),
+                Err(e) => {
+                    log::error!("Block {} WASM execution failed: {:?}", height, e);
+                    Err(e).context("Error calling _start function")
+                }
             }
         };
 
         // ALWAYS refresh memory after block execution for deterministic behavior
         // This ensures no WASM state persists between blocks
         if let Err(refresh_err) = self.refresh_memory().await {
-            log::error!("Failed to refresh memory after block execution: {}", refresh_err);
+            log::error!("Block {} failed to refresh memory after block execution: {}", height, refresh_err);
             // Return the refresh error as it's critical for deterministic execution
             return Err(refresh_err).context("Memory refresh failed after block execution");
         }
 
-        log::debug!("Memory refreshed after block execution for deterministic state isolation");
+        log::info!("Block {} completed processing with memory refresh", height);
         execution_result
     }
 
@@ -1142,13 +1159,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
                         let sz = to_usize_or_trap(&mut caller, data_start);
                         if sz == usize::MAX {
-                            caller.data_mut().had_failure = true;
-                            return;
+                            panic!("FATAL: __load_input failed to convert data_start to usize - invalid pointer");
                         }
 
-                        if let Err(_) = mem.write(&mut caller, sz, input_clone.as_slice()) {
-                            caller.data_mut().had_failure = true;
-                        }
+                        // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                        mem.write(&mut caller, sz, input_clone.as_slice())
+                            .expect("FATAL: __load_input memory write failed - WASM memory bounds exceeded.");
                     })
                 },
             )
@@ -1301,71 +1317,34 @@ pub async fn setup_linker_view(
 
 
                         match try_read_arraybuffer_as_vec(data, key) {
-
                             Ok(key_vec) => {
-
                                 // Use append-only store for historical queries in view functions
-
                                 let lookup = Self::get_value_at_height(context_get.clone(), &key_vec, height).await;
 
-
-
                                 match lookup {
-
                                     Ok(lookup) => {
-
-                                        if let Err(_) =
-
-                                            mem.write(&mut caller, value as usize, lookup.as_slice())
-
-                                        {
-
-                                            caller.data_mut().had_failure = true;
-
-                                        }
-
+                                        // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                        mem.write(&mut caller, value as usize, lookup.as_slice())
+                                            .expect("FATAL: view __get memory write failed - WASM memory bounds exceeded.");
                                     }
-
                                     Err(_) => {
-
                                         // Key not found, return empty
-
-                                        if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
-
-                                            caller.data_mut().had_failure = true;
-
-                                        }
-
+                                        // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                        mem.write(&mut caller, value as usize, &[])
+                                            .expect("FATAL: view __get memory write failed for empty value - WASM memory bounds exceeded.");
                                     }
-
                                 }
-
                             }
-
                             Err(_) => {
-
-                                if let Ok(error_bits) = u32_to_vec(i32::MAX.try_into().unwrap()) {
-
-                                    if let Err(_) = mem.write(
-
-                                        &mut caller,
-
-                                        (value - 4) as usize,
-
-                                        error_bits.as_slice(),
-
-                                    ) {
-
-                                        caller.data_mut().had_failure = true;
-
-                                    }
-
-                                } else {
-
-                                    caller.data_mut().had_failure = true;
-
-                                }
-
+                                let error_bits = u32_to_vec(i32::MAX.try_into().unwrap())
+                                    .expect("FATAL: Failed to convert error code to bytes");
+                                // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                mem.write(
+                                    &mut caller,
+                                    (value - 4) as usize,
+                                    error_bits.as_slice(),
+                                )
+                                .expect("FATAL: view __get memory write failed for error bits - WASM memory bounds exceeded.");
                             }
 
                         }
@@ -1696,35 +1675,31 @@ pub async fn setup_linker_view(
                                                 Ok(key_vec) => {
                                                     // Use append-only store for historical queries in view functions
                                                     let lookup = Self::get_value_at_height(context_get.clone(), &key_vec, height).await;
-                    
+
                                                     match lookup {
                                                         Ok(lookup) => {
-                                                            if let Err(_) =
-                                                                mem.write(&mut caller, value as usize, lookup.as_slice())
-                                                            {
-                                                                caller.data_mut().had_failure = true;
-                                                            }
+                                                            // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                                            mem.write(&mut caller, value as usize, lookup.as_slice())
+                                                                .expect("FATAL: preview __get memory write failed - WASM memory bounds exceeded.");
                                                         }
                                                         Err(_) => {
                                                             // Key not found, return empty
-                                                            if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
-                                                                caller.data_mut().had_failure = true;
-                                                            }
+                                                            // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                                            mem.write(&mut caller, value as usize, &[])
+                                                                .expect("FATAL: preview __get memory write failed for empty value - WASM memory bounds exceeded.");
                                                         }
                                                     }
                                                 }
                                                 Err(_) => {
-                                                    if let Ok(error_bits) = u32_to_vec(i32::MAX.try_into().unwrap()) {
-                                                        if let Err(_) = mem.write(
-                                                            &mut caller,
-                                                            (value - 4) as usize,
-                                                            error_bits.as_slice(),
-                                                        ) {
-                                                            caller.data_mut().had_failure = true;
-                                                        }
-                                                    } else {
-                                                        caller.data_mut().had_failure = true;
-                                                    }
+                                                    let error_bits = u32_to_vec(i32::MAX.try_into().unwrap())
+                                                        .expect("FATAL: Failed to convert error code to bytes");
+                                                    // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                                    mem.write(
+                                                        &mut caller,
+                                                        (value - 4) as usize,
+                                                        error_bits.as_slice(),
+                                                    )
+                                                    .expect("FATAL: preview __get memory write failed for error bits - WASM memory bounds exceeded.");
                                                 }
                                             }
                                                     })
@@ -1783,8 +1758,11 @@ pub async fn setup_linker_view(
                 move |mut caller: Caller<'_, State>, encoded: i32| {
                     let context_ref = context_ref.clone();
                     Box::new(async move {
-                        let height = context_ref.clone().lock().await.height;
-
+                        // Optimize: Lock once to get both height and db, reducing lock contention
+                        let (height, db) = {
+                            let guard = context_ref.lock().await;
+                            (guard.height, guard.db.clone())
+                        };
 
                         let mem = match caller.get_export("memory") {
                             Some(export) => match export.into_memory() {
@@ -1819,11 +1797,8 @@ pub async fn setup_linker_view(
                             }
                         };
 
-                        // Get the database from context to use SMT operations
-                        let db = context_ref.clone().lock().await.db.clone();
-
                         // Use optimized BatchedSMTHelper for better performance
-                        let mut batched_smt = crate::smt::BatchedSMTHelper::new(db);
+                        let mut batched_smt = crate::smt::BatchedSMTHelper::new(db.clone());
 
                         // Collect all key-value pairs for batch processing
                         // This is the new, correct flow for handling state updates.
@@ -1837,14 +1812,10 @@ pub async fn setup_linker_view(
                             .collect();
 
                         // Track key-value updates for any external listeners (like snapshotting)
-                        // Clone DB first and release lock immediately for concurrent access
+                        // Optimize: Use the db we already cloned to avoid additional lock
                         {
-                            let mut db_for_tracking = {
-                                let context_arc = context_ref.clone();
-                                let ctx_guard = context_arc.lock().await;
-                                ctx_guard.db.clone()
-                            };
-                            // Now track updates without holding the context lock
+                            let mut db_for_tracking = db.clone();
+                            // Track updates without holding the context lock
                             for (k, v) in &key_values {
                                 db_for_tracking.track_kv_update(k.clone(), v.clone());
                             }
@@ -1914,8 +1885,11 @@ pub async fn setup_linker_view(
                         let data = mem.data(&caller);
                         let key_vec_result = try_read_arraybuffer_as_vec(data, key);
 
-                        let height = context_get.clone().lock().await.height;
-                        let context_clone = context_get.clone();
+                        // Optimize: Lock once to get both height and db, reducing lock contention
+                        let (height, db) = {
+                            let guard = context_get.lock().await;
+                            (guard.height, guard.db.clone())
+                        };
 
                         match key_vec_result {
                             Ok(key_vec) => {
@@ -1923,36 +1897,38 @@ pub async fn setup_linker_view(
                                 // to correctly build upon the previous state, especially during reorgs.
                                 // If height is 0, there is no parent, so we read at height 0 (which will be empty).
                                 let target_height = if height > 0 { height - 1 } else { 0 };
-                                let lookup = Self::get_value_at_height(context_clone, &key_vec, target_height).await;
+                                // Use db directly to avoid additional lock in get_value_at_height
+                                let smt_helper = crate::smt::SMTHelper::new(db);
+                                let lookup = match smt_helper.get_at_height(&key_vec, target_height) {
+                                    Ok(Some(value)) => Ok(value),
+                                    Ok(None) => Ok(Vec::new()),
+                                    Err(e) => Err(anyhow::anyhow!("Append-only query error: {}", e)),
+                                };
 
                                 match lookup {
                                     Ok(lookup) => {
-                                        if let Err(_) =
-                                            mem.write(&mut caller, value as usize, lookup.as_slice())
-                                        {
-                                            caller.data_mut().had_failure = true;
-                                        }
+                                        // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                        mem.write(&mut caller, value as usize, lookup.as_slice())
+                                            .expect("FATAL: __get memory write failed - WASM memory bounds exceeded. This indicates insufficient memory allocation or memory corruption.");
                                     }
                                     Err(_) => {
                                         // Key not found, return empty
-                                        if let Err(_) = mem.write(&mut caller, value as usize, &[]) {
-                                            caller.data_mut().had_failure = true;
-                                        }
+                                        // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                        mem.write(&mut caller, value as usize, &[])
+                                            .expect("FATAL: __get memory write failed for empty value - WASM memory bounds exceeded.");
                                     }
                                 }
                             }
                             Err(_) => {
-                                if let Ok(error_bits) = u32_to_vec(i32::MAX.try_into().unwrap()) {
-                                    if let Err(_) = mem.write(
-                                        &mut caller,
-                                        (value - 4) as usize,
-                                        error_bits.as_slice(),
-                                    ) {
-                                        caller.data_mut().had_failure = true;
-                                    }
-                                } else {
-                                    caller.data_mut().had_failure = true;
-                                }
+                                let error_bits = u32_to_vec(i32::MAX.try_into().unwrap())
+                                    .expect("FATAL: Failed to convert error code to bytes");
+                                // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
+                                mem.write(
+                                    &mut caller,
+                                    (value - 4) as usize,
+                                    error_bits.as_slice(),
+                                )
+                                .expect("FATAL: __get memory write failed for error bits - WASM memory bounds exceeded.");
                             }
                         }
                     })

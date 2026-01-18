@@ -406,11 +406,21 @@ where
                 );
                 Ok(())
             }
-            Err(_) => {
-                // Fallback to non-atomic processing
-                warn!(
-                    "Atomic processing failed for height {}, falling back to non-atomic",
-                    height
+            Err(atomic_err) => {
+                // CRITICAL WARNING: Fallback to non-atomic processing can cause state divergence
+                // between instances under different load conditions. This should be investigated.
+                error!(
+                    "CRITICAL: Atomic processing failed for height {}, falling back to non-atomic. \
+                     This may cause STATE DIVERGENCE between indexer instances! Error: {:?}",
+                    height, atomic_err
+                );
+
+                // Log memory and resource state to help diagnose why atomic processing failed
+                log::warn!(
+                    "Block {} triggered fallback: block_size={} bytes, consider investigating \
+                     if this happens frequently under load",
+                    height,
+                    block_data.len()
                 );
 
                 // Process with runtime (non-atomic fallback)
@@ -419,7 +429,7 @@ where
                     .await
                     .map_err(|e| SyncError::BlockProcessing {
                         height,
-                        message: e.to_string(),
+                        message: format!("Fallback processing also failed: {}", e),
                     })?;
 
                 // Get state root after processing
@@ -740,11 +750,21 @@ where
 
                 Ok(())
             }
-            Err(_) => {
-                // Fallback to non-atomic processing
-                warn!(
-                    "Atomic processing failed for height {} in pipeline, falling back",
-                    height
+            Err(atomic_err) => {
+                // CRITICAL WARNING: Fallback to non-atomic processing can cause state divergence
+                // between instances under different load conditions. This should be investigated.
+                error!(
+                    "CRITICAL: Atomic processing failed for height {} in pipeline, falling back. \
+                     This may cause STATE DIVERGENCE between indexer instances! Error: {:?}",
+                    height, atomic_err
+                );
+
+                // Log memory and resource state to help diagnose why atomic processing failed
+                log::warn!(
+                    "Block {} in pipeline triggered fallback: block_size={} bytes, \
+                     investigate if this happens frequently under load",
+                    height,
+                    block_data.len()
                 );
 
                 // Process with runtime (non-atomic fallback)
@@ -753,7 +773,7 @@ where
                     .await
                     .map_err(|e| SyncError::BlockProcessing {
                         height,
-                        message: e.to_string(),
+                        message: format!("Pipeline fallback processing also failed: {}", e),
                     })?;
 
                 // Get state root after processing

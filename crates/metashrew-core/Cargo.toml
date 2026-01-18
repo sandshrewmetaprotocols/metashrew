@@ -30,3 +30,5 @@ prost-build.workspace = true
 [features]
 test-utils = []
 panic-hook = []
+allocator = []
+default = ["allocator"]

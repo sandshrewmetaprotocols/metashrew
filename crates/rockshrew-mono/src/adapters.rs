@@ -129,9 +129,18 @@ impl BitcoinRpcAdapter {
                 }
             }
 
+            // CRITICAL: Use deterministic jitter based on method name and attempt number
+            // This ensures reproducible retry timing across different instances
+            // Random jitter would cause non-deterministic block fetching patterns
             let jitter = {
-                use rand::Rng;
-                rand::thread_rng().gen_range(0..=100) as u64
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+
+                let mut hasher = DefaultHasher::new();
+                method.hash(&mut hasher);
+                attempt.hash(&mut hasher);
+                let hash = hasher.finish();
+                (hash % 101) as u64 // 0-100 milliseconds, deterministic for same method+attempt
             };
             retry_delay = std::cmp::min(max_delay, retry_delay * 2 + Duration::from_millis(jitter));
             tokio::time::sleep(retry_delay).await;

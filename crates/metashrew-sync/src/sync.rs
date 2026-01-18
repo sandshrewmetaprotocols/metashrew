@@ -396,6 +396,7 @@ where
                 // Update metrics
                 self.blocks_processed.fetch_add(1, Ordering::SeqCst);
                 {
+                    // NOTE: Timestamp is for monitoring/metrics only, not used in state calculation
                     let mut last_time = self.last_block_time.write().await;
                     *last_time = Some(SystemTime::now());
                 }
@@ -446,6 +447,7 @@ where
                 // Update metrics
                 self.blocks_processed.fetch_add(1, Ordering::SeqCst);
                 {
+                    // NOTE: Timestamp is for monitoring/metrics only, not used in state calculation
                     let mut last_time = self.last_block_time.write().await;
                     *last_time = Some(SystemTime::now());
                 }
@@ -462,9 +464,19 @@ where
     /// Run the sync pipeline with parallel fetching and processing
     async fn run_pipeline(&self) -> SyncResult<()> {
         // Determine pipeline size
+        // NOTE: For deterministic behavior across instances, pipeline_size should be
+        // explicitly configured rather than auto-detected from CPU count.
+        // CPU-based sizing can cause different instances to process blocks in different
+        // concurrent patterns, potentially affecting resource contention and timing.
         let pipeline_size = self.config.pipeline_size.unwrap_or_else(|| {
             let cpu_count = num_cpus::get();
-            std::cmp::min(std::cmp::max(5, cpu_count / 2), 16)
+            let auto_size = std::cmp::min(std::cmp::max(5, cpu_count / 2), 16);
+            warn!(
+                "Pipeline size not configured, using auto-detected value {} based on {} CPUs. \
+                 For deterministic behavior, explicitly set pipeline_size in config.",
+                auto_size, cpu_count
+            );
+            auto_size
         });
 
         info!("Starting sync pipeline with size {}", pipeline_size);

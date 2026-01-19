@@ -7,6 +7,14 @@ edition = "2021"
 name = "rockshrew_mono"
 path = "src/lib.rs"
 
+[[bin]]
+name = "rockshrew-mono"
+path = "src/main.rs"
+
+[[bin]]
+name = "rockshrew-rollback"
+path = "src/bin/rollback.rs"
+
 [dependencies]
 async-trait = "0.1"
 rand = "0.8"

@@ -360,6 +360,55 @@ resources:
     memory: "4Gi"    # High memory
 ```
 
+## ⚠️ CRITICAL UPDATE: Memory Pre-allocation Issue
+
+**NEW FINDING**: The runtime does NOT actually pre-allocate the full 4GB WASM32 memory space!
+
+### Test Results (January 2026)
+
+We created additional tests to verify memory pre-allocation behavior:
+
+#### Test: Runtime Instantiation in 512MB Environment
+
+```bash
+docker run --rm --memory=512m metashrew-preallocate-test
+```
+
+**Expected**: ❌ Should fail - cannot pre-allocate 4GB in 512MB environment
+**Actual**: ✅ Succeeds - runtime instantiates successfully
+
+**This proves**: `static_memory_maximum_size(0x100000000)` only sets a MAXIMUM, it does NOT pre-allocate!
+
+### Root Cause
+
+In `/data/metashrew/crates/metashrew-runtime/src/runtime.rs:494-498`:
+
+```rust
+config.static_memory_maximum_size(0x100000000); // 4GB max memory
+config.static_memory_guard_size(0x10000); // 64KB guard
+config.memory_init_cow(false); // Disable copy-on-write
+```
+
+**What the comments claim**: "Pre-allocate memory to maximum size"
+**What actually happens**: Sets maximum limit, uses demand paging
+
+Wasmtime uses virtual memory - pages are only committed when accessed, not upfront.
+
+### Impact
+
+1. **Late failure**: Process crashes during execution (OOM killer), not at startup
+2. **Non-deterministic**: Same WASM succeeds on high-memory hosts, fails on low-memory hosts
+3. **Silent divergence**: Both complete `_start()` but store different data
+
+### Solution
+
+See [FINDINGS.md](./FINDINGS.md) and [force_memory_commit_poc.rs](./force_memory_commit_poc.rs) for:
+- Detailed analysis of the issue
+- Proof-of-concept fix that forces memory commit
+- Implementation guide for the fix
+
+**Fix summary**: After instantiation, touch every page (65,536 writes) to force OS to commit physical memory. Runtime fails fast if 4GB not available.
+
 ## Conclusion
 
 This test suite **proves** that WASM execution in Metashrew is **non-deterministic** when host memory constraints vary. This is a critical issue for blockchain indexers that must produce identical results across all nodes.
@@ -368,5 +417,6 @@ The non-determinism stems from:
 1. WASM memory operations depending on host memory availability
 2. IndexPointer storage allocating in host memory
 3. Different environments (containers, VMs, bare metal) having different memory limits
+4. **Lack of actual 4GB pre-allocation** (allows runtime to start when it shouldn't)
 
 **Impact**: Nodes with different memory configurations can produce different state roots, leading to consensus failures and reorg issues.

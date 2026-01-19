@@ -13,32 +13,23 @@ COPY . .
 # Add wasm32 target
 RUN rustup target add wasm32-unknown-unknown --toolchain 1.86.0
 
-# Build WASM modules separately (don't rely on build.rs)
-RUN cargo build --target wasm32-unknown-unknown --release -p metashrew-minimal
+# Build metashrew-memory-stress WASM (for our memory test)
 RUN cargo build --target wasm32-unknown-unknown --release -p metashrew-memory-stress
 
-# Disable build.rs by removing it
-RUN mv build.rs build.rs.disabled || true
-
-# Set the environment variable that build.rs would have set
-# Point to the WASM we already built
-ENV METASHREW_MINIMAL_WASM_PATH=/metashrew/target/wasm32-unknown-unknown/release/metashrew_minimal.wasm
-
-# Now build tests without build.rs (with env var set)
+# Build tests (this will trigger build.rs which builds metashrew_minimal.wasm)
+# Just let it build everything naturally
 RUN cargo test --lib --no-run
 
 # Find the test binary
 RUN cp $(find target/debug/deps -name "metashrew_tests-*" -type f -executable | head -1) /metashrew_tests
 
-# Stage 2: Minimal runtime
+# Stage 2: Runtime with same glibc
 FROM rust:1.86-slim
 
 WORKDIR /metashrew
 RUN mkdir -p target/wasm32-unknown-unknown/release
 
-# Copy WASM modules
-COPY --from=builder /metashrew/target/wasm32-unknown-unknown/release/metashrew_minimal.wasm \
-    target/wasm32-unknown-unknown/release/
+# Copy WASM module
 COPY --from=builder /metashrew/target/wasm32-unknown-unknown/release/metashrew_memory_stress.wasm \
     target/wasm32-unknown-unknown/release/
 

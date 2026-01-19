@@ -8,7 +8,7 @@ use bitcoin::hashes::Hash;
 use crate::in_memory_adapters::{InMemoryBitcoinNode, InMemoryRuntime};
 use metashrew_sync::{PreviewCall, RuntimeAdapter};
 
-const WASM: &[u8] = include_bytes!("../../target/debug/build/metashrew-tests-79490238d5927c0f/out/wasm/wasm32-unknown-unknown/release/metashrew_minimal.wasm");
+const WASM: &[u8] = include_bytes!(env!("METASHREW_MINIMAL_WASM_PATH"));
 
 #[tokio::test]
 async fn test_preview_e2e() {

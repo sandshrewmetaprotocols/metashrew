@@ -1,4 +1,4 @@
-# Stage 1: Build with NO memory limits
+# Stage 1: Build everything with no memory limits
 FROM rust:1.86 as builder
 
 RUN apt-get update && apt-get install -y \
@@ -13,33 +13,33 @@ COPY . .
 # Add wasm32 target
 RUN rustup target add wasm32-unknown-unknown --toolchain 1.86.0
 
-# Build WASM modules separately (don't rely on build.rs)
+# Build metashrew-minimal WASM first (required by build.rs)
 RUN cargo build --target wasm32-unknown-unknown --release -p metashrew-minimal
+
+# Build metashrew-memory-stress WASM
 RUN cargo build --target wasm32-unknown-unknown --release -p metashrew-memory-stress
 
-# Disable build.rs by removing it
-RUN mv build.rs build.rs.disabled || true
+# Now build the main library (this runs build.rs which needs metashrew_minimal.wasm)
+RUN cargo build --lib
 
-# Set the environment variable that build.rs would have set
-# Point to the WASM we already built
-ENV METASHREW_MINIMAL_WASM_PATH=/metashrew/target/wasm32-unknown-unknown/release/metashrew_minimal.wasm
+# Build tests
+RUN cargo test --lib memory_determinism_test --no-run
 
-# Now build tests without build.rs (with env var set)
-RUN cargo test --lib --no-run
-
-# Find the test binary
+# Find and copy the test binary to a known location
 RUN cp $(find target/debug/deps -name "metashrew_tests-*" -type f -executable | head -1) /metashrew_tests
 
-# Stage 2: Minimal runtime
+# Stage 2: Minimal runtime with same glibc
 FROM rust:1.86-slim
 
 WORKDIR /metashrew
+
+# Create directory structure
 RUN mkdir -p target/wasm32-unknown-unknown/release
 
 # Copy WASM modules
-COPY --from=builder /metashrew/target/wasm32-unknown-unknown/release/metashrew_minimal.wasm \
-    target/wasm32-unknown-unknown/release/
 COPY --from=builder /metashrew/target/wasm32-unknown-unknown/release/metashrew_memory_stress.wasm \
+    target/wasm32-unknown-unknown/release/
+COPY --from=builder /metashrew/target/wasm32-unknown-unknown/release/metashrew_minimal.wasm \
     target/wasm32-unknown-unknown/release/
 
 # Copy test binary
@@ -48,4 +48,5 @@ RUN chmod +x metashrew_tests
 
 ENV RUST_LOG=info
 
+# Default: run memory stress test
 CMD ["./metashrew_tests", "memory_stress_normal_environment", "--ignored", "--nocapture"]

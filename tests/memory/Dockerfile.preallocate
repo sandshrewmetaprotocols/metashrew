@@ -1,0 +1,35 @@
+# Test to verify that metashrew-runtime pre-allocates 4GB on instantiation
+# Stage 1: Build with NO memory limits
+FROM rust:1.86 as builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    clang \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /metashrew
+COPY . .
+
+# Add wasm32 target
+RUN rustup target add wasm32-unknown-unknown --toolchain 1.86.0
+
+# Build tests (this will trigger build.rs which builds metashrew_minimal.wasm)
+RUN cargo test --lib --no-run
+
+# Find the test binary
+RUN cp $(find target/debug/deps -name "metashrew_tests-*" -type f -executable | head -1) /metashrew_tests
+
+# Stage 2: Runtime with same glibc
+FROM rust:1.86-slim
+
+WORKDIR /metashrew
+
+# Copy test binary
+COPY --from=builder /metashrew_tests ./metashrew_tests
+RUN chmod +x metashrew_tests
+
+ENV RUST_LOG=info
+
+# Run the minimal instantiation test
+CMD ["./metashrew_tests", "minimal_runtime_instantiation", "--ignored", "--nocapture"]

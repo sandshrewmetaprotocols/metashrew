@@ -207,9 +207,15 @@ use async_trait::async_trait;
 
 // Implement SmtRollback trait for proper reorg handling
 impl SmtRollback for MemStoreAdapter {
-    fn get_all_keys(&self) -> anyhow::Result<Vec<Vec<u8>>> {
+    fn iter_keys<F>(&self, mut callback: F) -> anyhow::Result<()>
+    where
+        F: FnMut(&[u8]) -> anyhow::Result<()>,
+    {
         let db = self.db.lock().unwrap();
-        Ok(db.keys().cloned().collect())
+        for key in db.keys() {
+            callback(key)?;
+        }
+        Ok(())
     }
 
     fn delete_key(&mut self, key: &[u8]) -> anyhow::Result<()> {

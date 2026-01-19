@@ -23,16 +23,18 @@ impl RocksDBStorageAdapter {
 
 // Implement SmtRollback trait for proper reorg handling
 impl SmtRollback for RocksDBStorageAdapter {
-    fn get_all_keys(&self) -> anyhow::Result<Vec<Vec<u8>>> {
-        let mut keys = Vec::new();
+    fn iter_keys<F>(&self, mut callback: F) -> anyhow::Result<()>
+    where
+        F: FnMut(&[u8]) -> anyhow::Result<()>,
+    {
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
         for item in iter {
             match item {
-                Ok((key, _)) => keys.push(key.to_vec()),
+                Ok((key, _)) => callback(&key)?,
                 Err(e) => return Err(anyhow::anyhow!("Failed to iterate keys: {}", e)),
             }
         }
-        Ok(keys)
+        Ok(())
     }
 
     fn delete_key(&mut self, key: &[u8]) -> anyhow::Result<()> {

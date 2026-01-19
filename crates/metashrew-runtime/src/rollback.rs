@@ -10,8 +10,10 @@ use std::collections::HashSet;
 
 /// Trait for rolling back SMT data during blockchain reorganizations
 pub trait SmtRollback {
-    /// Get all keys from storage
-    fn get_all_keys(&self) -> Result<Vec<Vec<u8>>>;
+    /// Iterate over all keys in storage (streaming, memory-efficient)
+    fn iter_keys<F>(&self, callback: F) -> Result<()>
+    where
+        F: FnMut(&[u8]) -> Result<()>;
 
     /// Delete a key from storage
     fn delete_key(&mut self, key: &[u8]) -> Result<()>;
@@ -59,11 +61,9 @@ pub fn rollback_smt_data<S: SmtRollback>(
         return Ok(());
     }
 
-    let all_keys = storage.get_all_keys()?;
-
-    // --- Step 1: Delete metadata keys for heights > rollback_height ---
-    let mut metadata_keys_deleted = 0;
-    for key in &all_keys {
+    // --- Step 1: Collect metadata keys to delete (streaming) ---
+    let mut metadata_keys_to_delete = Vec::new();
+    storage.iter_keys(|key| {
         let key_str = String::from_utf8_lossy(key);
 
         // Check for metadata keys and parse their height
@@ -79,25 +79,29 @@ pub fn rollback_smt_data<S: SmtRollback>(
 
         if let Some(h) = metadata_height {
             if h > rollback_height {
-                storage.delete_key(key)?;
-                metadata_keys_deleted += 1;
-                debug!("Deleted metadata key for height {}", h);
+                metadata_keys_to_delete.push(key.to_vec());
             }
         }
-    }
-    info!("Deleted {} metadata keys", metadata_keys_deleted);
+        Ok(())
+    })?;
 
-    // --- Step 2: Roll back append-only SMT data structures ---
+    // Delete metadata keys
+    for key in &metadata_keys_to_delete {
+        storage.delete_key(key)?;
+    }
+    info!("Deleted {} metadata keys", metadata_keys_to_delete.len());
+
+    // --- Step 2: Collect base keys for SMT structures (streaming) ---
     let length_suffix = b"/length";
     let mut base_keys = HashSet::new();
 
-    // Find all "base" keys by looking for keys ending in "/length"
-    for key in &all_keys {
+    storage.iter_keys(|key| {
         if key.ends_with(length_suffix) {
             let base_key = &key[..key.len() - length_suffix.len()];
             base_keys.insert(base_key.to_vec());
         }
-    }
+        Ok(())
+    })?;
 
     let mut smt_structures_rolled_back = 0;
     for base_key in base_keys {
@@ -171,8 +175,14 @@ mod tests {
     }
 
     impl SmtRollback for MockStorage {
-        fn get_all_keys(&self) -> Result<Vec<Vec<u8>>> {
-            Ok(self.data.keys().cloned().collect())
+        fn iter_keys<F>(&self, mut callback: F) -> Result<()>
+        where
+            F: FnMut(&[u8]) -> Result<()>,
+        {
+            for key in self.data.keys() {
+                callback(key)?;
+            }
+            Ok(())
         }
 
         fn delete_key(&mut self, key: &[u8]) -> Result<()> {

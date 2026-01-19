@@ -1,0 +1,17 @@
+[package]
+name = "metashrew-memory-stress"
+version = "9.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+metashrew-core = { path = "../metashrew-core" }
+metashrew-support = { path = "../metashrew-support" }
+bitcoin = { version = "0.32.6", default-features = false }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

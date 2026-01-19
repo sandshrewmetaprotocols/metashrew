@@ -4,6 +4,7 @@ pub mod comprehensive_e2e_test;
 pub mod concurrent_view_test;
 pub mod historical_view_test;
 pub mod integration_tests;
+pub mod memory_determinism_test;
 pub mod preview_e2e_test;
 pub mod prove_reorg_bug_test;
 pub mod reorg_focused_test;

@@ -2787,6 +2787,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "metashrew-memory-stress"
+version = "9.0.1"
+dependencies = [
+ "bitcoin 0.32.6",
+ "metashrew-core",
+ "metashrew-support",
+]
+
+[[package]]
 name = "metashrew-minimal"
 version = "9.0.1"
 dependencies = [

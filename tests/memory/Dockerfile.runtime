@@ -1,0 +1,21 @@
+FROM debian:bookworm-slim
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set working directory
+WORKDIR /metashrew
+
+# Copy pre-built test binary
+COPY target/debug/deps/metashrew_tests-* ./metashrew_tests
+
+# Copy pre-built WASM module
+COPY target/wasm32-unknown-unknown/release/metashrew_memory_stress.wasm ./target/wasm32-unknown-unknown/release/
+
+# Make test binary executable
+RUN chmod +x ./metashrew_tests
+
+# Default command: run the memory stress test
+CMD ["./metashrew_tests", "memory_stress_normal_environment", "--ignored", "--nocapture"]

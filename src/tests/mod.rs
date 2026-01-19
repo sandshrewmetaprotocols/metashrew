@@ -5,5 +5,7 @@ pub mod concurrent_view_test;
 pub mod historical_view_test;
 pub mod integration_tests;
 pub mod preview_e2e_test;
+pub mod prove_reorg_bug_test;
 pub mod reorg_focused_test;
+pub mod reorg_rollback_bug_test;
 pub mod start_block_test;

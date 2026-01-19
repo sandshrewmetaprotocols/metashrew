@@ -1,4 +1,5 @@
 use bitcoin;
+use bitcoin::hashes::Hash;
 use metashrew_core::{flush, get, index_pointer::IndexPointer, input};
 use metashrew_support::{compat::export_bytes, index_pointer::KeyValuePointer};
 use std::io::Cursor;
@@ -10,11 +11,21 @@ pub fn _start() {
     let mut input_data = Cursor::new(input());
     let height = metashrew_support::utils::consume_sized_int::<u32>(&mut input_data).unwrap();
     let block_bytes = metashrew_support::utils::consume_to_end(&mut input_data).unwrap();
-    IndexPointer::from_keyword(format!("/blocks/{}", height).as_str())
-        .set(Arc::new(block_bytes.clone()));
+
+    // Store block data under two keys for testing reorg rollback:
+    // 1. /blocks/{height} - the block bytes (may be rolled back during reorg)
+    // 2. /block-hashes/{height} - just the hash for quick comparison
+    let mut block_pointer = IndexPointer::from_keyword(format!("/blocks/{}", height).as_str());
+
+    block_pointer.set(Arc::new(block_bytes.clone()));
     let block =
         metashrew_support::utils::consensus_decode::<bitcoin::Block>(&mut Cursor::new(block_bytes))
             .unwrap();
+
+    // Also store just the block hash for verification
+    let mut hash_pointer = IndexPointer::from_keyword(format!("/block-hashes/{}", height).as_str());
+    hash_pointer.set(Arc::new(block.block_hash().as_byte_array().to_vec()));
+
     let mut tracker = IndexPointer::from_keyword("/blocktracker");
     let mut new_tracker = tracker.get().as_ref().clone();
     new_tracker.extend((&[block.header.block_hash()[0]]).to_vec());

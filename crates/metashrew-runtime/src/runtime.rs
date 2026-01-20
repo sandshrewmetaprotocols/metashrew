@@ -901,24 +901,22 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             log::debug!("Memory grown successfully to {} pages (4GB)", WASM_MAX_PAGES);
         }
 
-        // Now touch each page to force OS to commit physical memory
-        // CRITICAL: We write non-zero data to prevent copy-on-write optimization
-        // Writing zeros would use shared zero pages and not allocate physical memory
-        log::debug!("Touching all {} pages to force physical memory commit...", WASM_MAX_PAGES);
+        // Now touch NEW pages (after initial_pages) to force OS to commit physical memory
+        // CRITICAL: We ONLY touch pages that were newly allocated, NOT the initial pages
+        // The initial pages contain WASM data sections and heap metadata that must be preserved
+        log::debug!("Touching {} NEW pages (preserving {} initial pages with WASM data) to force physical memory commit...",
+            pages_to_grow, initial_pages);
 
-        // Use a non-zero pattern that varies per page to force actual allocation
-        // Pattern: page number as bytes (prevents COW zero page optimization)
-        let mut page_pattern = vec![0u8; 64]; // Just write 64 bytes per page (enough to commit it)
+        // Use a zero buffer to touch pages - since these are new pages, writing zeros is fine
+        // The initial pages already have proper WASM initialization and we must NOT overwrite them
+        let zero_block = vec![0u8; 65536]; // Full 64KB page
 
-        for page_num in 0..WASM_MAX_PAGES as usize {
+        // Start from initial_pages (skip the initialized memory) and touch only NEW pages
+        for page_num in initial_pages as usize..WASM_MAX_PAGES as usize {
             let offset = page_num * WASM_PAGE_SIZE;
 
-            // Write page number as pattern (ensures non-zero, unique data)
-            let page_bytes = (page_num as u64).to_le_bytes();
-            page_pattern[0..8].copy_from_slice(&page_bytes);
-            page_pattern[8] = 0xFF; // Additional non-zero marker
-
-            memory.write(&mut *store, offset, &page_pattern)
+            // Touch the page to force physical allocation (just write zeros to new pages)
+            memory.write(&mut *store, offset, &zero_block)
                 .with_context(|| {
                     format!(
                         "Failed to commit memory page {} of {} (offset 0x{:x}). \
@@ -931,26 +929,9 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 })?;
 
             // Log progress every 8192 pages (512MB)
-            if page_num % 8192 == 0 && page_num > 0 {
+            if page_num % 8192 == 0 && page_num > initial_pages as usize {
                 let gb = (page_num * WASM_PAGE_SIZE) / (1024 * 1024 * 1024);
                 log::debug!("  Committed {}GB of 4GB...", gb);
-            }
-        }
-
-        let duration = start.elapsed();
-        log::info!("✅ Successfully forced 4GB physical allocation in {:?}", duration);
-
-        // Now zero out the memory to ensure clean state
-        // This is fast since pages are already committed
-        log::debug!("Zeroing memory for clean initial state...");
-        let zero_block = vec![0u8; 65536]; // Full 64KB page
-        for page_num in 0..WASM_MAX_PAGES as usize {
-            let offset = page_num * WASM_PAGE_SIZE;
-            memory.write(&mut *store, offset, &zero_block)?;
-
-            if page_num % 8192 == 0 && page_num > 0 {
-                let gb = (page_num * WASM_PAGE_SIZE) / (1024 * 1024 * 1024);
-                log::debug!("  Zeroed {}GB of 4GB...", gb);
             }
         }
 
@@ -995,23 +976,27 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
     pub async fn refresh_memory(&self) -> Result<()> {
         let mut instance_guard = self.instance.lock().await;
-        let WasmInstance { ref mut store, instance } = &mut *instance_guard;
 
         // Log memory state before refresh
-        let had_failure = store.data().had_failure;
+        let had_failure = instance_guard.store.data().had_failure;
         log::debug!("Memory refresh: had_failure={}", had_failure);
 
-        // OPTIMIZED: Instead of recreating the instance (100-500ms),
-        // just zero out the memory that was used (1-10ms)
-        // Memory is already committed from initial instantiation
-        let memory = instance.get_memory(&mut *store, "memory")
-            .context("Failed to get WASM memory for refresh")?;
+        // ALWAYS refresh memory for deterministic behavior between blocks
+        // This ensures no WASM state persists between blocks, preventing non-determinism
+        // We recreate the instance to ensure all data sections and heap are properly initialized
+        // The physical 4GB allocation was already done at startup, so this is just reinitializing
+        let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+        wasmstore.limiter(|state| &mut state.limits);
+        let new_instance = self
+            .linker
+            .instantiate_async(&mut wasmstore, &self.module)
+            .await
+            .context("Failed to instantiate module during memory refresh")?;
 
-        Self::fast_memory_reset(&memory, store)
-            .context("Failed to reset WASM memory")?;
-
-        // Reset store state for next block
-        store.data_mut().had_failure = false;
+        *instance_guard = WasmInstance {
+            store: wasmstore,
+            instance: new_instance,
+        };
 
         log::debug!("Memory refresh completed successfully");
         Ok(())

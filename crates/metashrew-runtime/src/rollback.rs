@@ -5,8 +5,7 @@
 //! implement this trait to ensure consistent reorg handling.
 
 use anyhow::Result;
-use log::{debug, info};
-use std::collections::HashSet;
+use log::{debug, info, warn};
 
 /// Trait for rolling back SMT data during blockchain reorganizations
 pub trait SmtRollback {
@@ -93,72 +92,109 @@ pub fn rollback_smt_data<S: SmtRollback>(
 
     // --- Step 2: Collect base keys for SMT structures (streaming) ---
     let length_suffix = b"/length";
-    let mut base_keys = HashSet::new();
+    let mut base_keys = Vec::new(); // Use Vec instead of HashSet to save memory
+    let max_keys_to_collect = 100_000; // Safety limit to prevent OOM
 
+    info!("Scanning for SMT structures to roll back...");
+    let mut total_length_keys_found = 0;
     storage.iter_keys(|key| {
         if key.ends_with(length_suffix) {
+            total_length_keys_found += 1;
             let base_key = &key[..key.len() - length_suffix.len()];
-            base_keys.insert(base_key.to_vec());
+
+            // Only collect up to max limit to prevent OOM
+            if base_keys.len() < max_keys_to_collect {
+                base_keys.push(base_key.to_vec());
+            }
+
+            // Log progress every 10000 keys
+            if total_length_keys_found % 10000 == 0 {
+                info!("Found {} SMT /length keys so far...", total_length_keys_found);
+            }
         }
         Ok(())
     })?;
 
+    if total_length_keys_found > max_keys_to_collect {
+        warn!("WARNING: Found {} SMT structures, but can only process {} at a time due to memory limits.",
+              total_length_keys_found, max_keys_to_collect);
+        warn!("Consider implementing multi-pass rollback for very large databases.");
+    }
+
+    // Deduplicate and sort for consistent processing
+    base_keys.sort_unstable();
+    base_keys.dedup();
+
+    info!("Collected {} unique SMT structures to process (found {} total /length keys)",
+          base_keys.len(), total_length_keys_found);
+
+    // Process structures in batches to limit memory usage
+    let batch_size = 100; // Process 100 structures at a time
     let mut smt_structures_rolled_back = 0;
-    for base_key in base_keys {
-        let mut length_key = base_key.clone();
-        length_key.extend_from_slice(length_suffix);
 
-        // Read the current length
-        let old_length = if let Some(length_bytes) = storage.get_value(&length_key)? {
-            String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-        } else {
-            continue;
-        };
+    for (batch_idx, batch) in base_keys.chunks(batch_size).enumerate() {
+        info!("Processing batch {} ({} structures)...", batch_idx + 1, batch.len());
 
-        // Collect valid updates (height <= rollback_height)
-        let mut valid_updates = Vec::new();
-        for i in 0..old_length {
-            let update_key_suffix = format!("/{}", i);
-            let mut update_key = base_key.clone();
-            update_key.extend_from_slice(update_key_suffix.as_bytes());
+        for base_key in batch {
+            let mut length_key = base_key.clone();
+            length_key.extend_from_slice(length_suffix);
 
-            if let Some(update_data) = storage.get_value(&update_key)? {
-                if let Some(update_height) = parse_height_from_smt_value(&update_data) {
-                    if update_height <= rollback_height {
-                        valid_updates.push((i, update_data));
-                    } else {
-                        debug!("Removing SMT update at height {} (> {})", update_height, rollback_height);
+            // Read the current length
+            let old_length = if let Some(length_bytes) = storage.get_value(&length_key)? {
+                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            } else {
+                continue;
+            };
+
+            // Collect valid updates (height <= rollback_height)
+            let mut valid_updates = Vec::new();
+            for i in 0..old_length {
+                let update_key_suffix = format!("/{}", i);
+                let mut update_key = base_key.clone();
+                update_key.extend_from_slice(update_key_suffix.as_bytes());
+
+                if let Some(update_data) = storage.get_value(&update_key)? {
+                    if let Some(update_height) = parse_height_from_smt_value(&update_data) {
+                        if update_height <= rollback_height {
+                            valid_updates.push((i, update_data));
+                        } else {
+                            debug!("Removing SMT update at height {} (> {})", update_height, rollback_height);
+                        }
                     }
                 }
             }
-        }
 
-        // Remove all old entries
-        for i in 0..old_length {
-            let update_key_suffix = format!("/{}", i);
-            let mut update_key = base_key.clone();
-            update_key.extend_from_slice(update_key_suffix.as_bytes());
-            storage.delete_key(&update_key)?;
-        }
+            // Remove all old entries
+            for i in 0..old_length {
+                let update_key_suffix = format!("/{}", i);
+                let mut update_key = base_key.clone();
+                update_key.extend_from_slice(update_key_suffix.as_bytes());
+                storage.delete_key(&update_key)?;
+            }
 
-        // Re-insert valid entries with compacted indices
-        for (new_index, (_, update_data)) in valid_updates.iter().enumerate() {
-            let update_key_suffix = format!("/{}", new_index);
-            let mut update_key = base_key.clone();
-            update_key.extend_from_slice(update_key_suffix.as_bytes());
-            storage.put_key(&update_key, update_data)?;
-        }
+            // Re-insert valid entries with compacted indices
+            for (new_index, (_, update_data)) in valid_updates.iter().enumerate() {
+                let update_key_suffix = format!("/{}", new_index);
+                let mut update_key = base_key.clone();
+                update_key.extend_from_slice(update_key_suffix.as_bytes());
+                storage.put_key(&update_key, update_data)?;
+            }
 
-        // Update or remove the length key
-        let new_length = valid_updates.len() as u32;
-        if new_length > 0 {
-            storage.put_key(&length_key, new_length.to_string().as_bytes())?;
-            debug!("SMT structure {} compacted from {} to {} entries", String::from_utf8_lossy(&base_key), old_length, new_length);
-        } else {
-            storage.delete_key(&length_key)?;
-            debug!("SMT structure {} completely removed (no valid entries)", String::from_utf8_lossy(&base_key));
+            // Update or remove the length key
+            let new_length = valid_updates.len() as u32;
+            if new_length > 0 {
+                storage.put_key(&length_key, new_length.to_string().as_bytes())?;
+                debug!("SMT structure {} compacted from {} to {} entries", String::from_utf8_lossy(&base_key), old_length, new_length);
+            } else {
+                storage.delete_key(&length_key)?;
+                debug!("SMT structure {} completely removed (no valid entries)", String::from_utf8_lossy(&base_key));
+            }
+            smt_structures_rolled_back += 1;
+
+            if smt_structures_rolled_back % 1000 == 0 {
+                info!("Rolled back {} SMT structures so far...", smt_structures_rolled_back);
+            }
         }
-        smt_structures_rolled_back += 1;
     }
 
     info!("Successfully rolled back {} SMT data structures to height {}", smt_structures_rolled_back, rollback_height);

@@ -70,7 +70,7 @@ use itertools::Itertools;
 use prost::Message;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::context::MetashrewRuntimeContext;
@@ -257,7 +257,7 @@ pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     ///
     /// Protected by [`Arc<Mutex<_>>`] for thread-safe access across
     /// different execution modes and concurrent view operations.
-    pub context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+    pub context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
     
     /// Synchronous Wasmtime engine for block processing
     ///
@@ -455,7 +455,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             }
             _ => 0,
         };
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+        let context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::<
             MetashrewRuntimeContext<T>,
         >::new(
             MetashrewRuntimeContext::new(store, tip_height, vec![]),
@@ -515,7 +515,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             }
             _ => 0,
         };
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+        let context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::<
             MetashrewRuntimeContext<T>,
         >::new(
             MetashrewRuntimeContext::new(store, tip_height, vec![]),
@@ -623,7 +623,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ) -> Result<Vec<u8>> where <T as KeyValueStoreLike>::Batch: Send {
         // Create preview context with isolated DB copy
                         let preview_db = {
-                            let guard = self.context.lock().await;
+                            let guard = self.context.read().await;
                             guard.db.create_isolated_copy()
                         };
                 
@@ -634,7 +634,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         // Use new_with_db_indexer which sets up proper indexer linker for processing blocks
                         let runtime =
                             Self::new_with_db_indexer(preview_db, preview_height, self.async_engine.clone(), self.async_module.clone()).await?;
-                        runtime.context.lock().await.block = block.clone();
+                        runtime.context.write().await.block = block.clone();
                 
                         // Execute block via _start to populate preview db
                         {
@@ -647,7 +647,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                             // Use call_async since we're using an async store
                             match start.call_async(&mut *store, ()).await {
                                 Ok(_) => {
-                                    let context_guard = runtime.context.lock().await;
+                                    let context_guard = runtime.context.read().await;
                                     let had_failure = store.data().had_failure;
                                     let state = context_guard.state;
                                     if state != 1 && !had_failure {
@@ -667,11 +667,11 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         // Create new runtime just for the view using the updated preview DB
                         // Query at the preview height to see the state after processing the preview block
                         let view_runtime = {
-                            let context = runtime.context.lock().await;
+                            let context = runtime.context.read().await;
                             // Create a view runtime with the updated database
                             let mut linker = Linker::<State>::new(&self.engine);
                             let mut wasmstore = Store::<State>::new(&self.engine, State::new());
-                            let view_context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::new(
+                            let view_context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::new(
                                 MetashrewRuntimeContext::new(context.db.clone(), preview_height, vec![]),
                             ));
                 
@@ -700,7 +700,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         };
                 
                         // Set block to input for view
-                        view_runtime.context.lock().await.block = input.clone();
+                        view_runtime.context.write().await.block = input.clone();
                 
                         // Execute view function
                         let result = {
@@ -812,7 +812,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Memory access violations occur
         pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
             let db = {
-                let guard = self.context.lock().await;
+                let guard = self.context.read().await;
                 guard.db.clone()
             };
     
@@ -826,7 +826,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             .await?;
     
             // Set the input as the block data
-            view_runtime.context.lock().await.block = input.clone();
+            view_runtime.context.write().await.block = input.clone();
     
             // Set fuel for cooperative yielding
             let result = {
@@ -1072,7 +1072,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Host function failures occur during execution
     pub async fn run(&self) -> Result<(), anyhow::Error> {
         let height = {
-            let mut ctx = self.context.lock().await;
+            let mut ctx = self.context.write().await;
             ctx.state = 0;
             ctx.height
         };
@@ -1091,7 +1091,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             // Use call_async since we're using an async store
             match start.call_async(&mut *store, ()).await {
                 Ok(_) => {
-                    if self.context.lock().await.state != 1
+                    if self.context.read().await.state != 1
                         && !store.data().had_failure
                     {
                         log::error!("Block {} indexer exited unexpectedly (state != 1 and no failure)", height);
@@ -1131,7 +1131,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     #[deprecated(note = "Reorg detection moved to sync framework level")]
     pub async fn handle_reorg(&self) -> Result<()> {
         let (context_height, db_tip_height) = {
-            let mut guard = self.context.lock().await;
+            let mut guard = self.context.write().await;
             let db_tip = match guard.db.get(&TIP_HEIGHT_KEY.as_bytes().to_vec()) {
                 Ok(Some(bytes)) if bytes.len() >= 4 => {
                     u32::from_le_bytes(bytes[..4].try_into().unwrap())
@@ -1163,7 +1163,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 target_height
             );
 
-            let mut db = self.context.lock().await.db.clone();
+            let mut db = self.context.read().await.db.clone();
             let mut smt_helper = SMTHelper::new(db.clone());
             let mut batch = db.create_batch();
 
@@ -1193,12 +1193,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// Get the value of a key at a specific block height using the append-only data structure.
     /// This function performs a binary search on the list of historical values for the key.
     pub async fn get_value_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         key: &Vec<u8>,
         height: u32,
     ) -> Result<Vec<u8>> {
         let db = {
-            let guard = context.lock().await;
+            let guard = context.read().await;
             guard.db.clone()
         };
         let smt_helper = SMTHelper::new(db);
@@ -1211,7 +1211,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
     /// Append a key to an update list
     pub fn db_append(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         batch: &mut T::Batch,
         update_key: &Vec<u8>,
         key: &Vec<u8>,
@@ -1226,7 +1226,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     }
 
     pub async fn setup_linker(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref_len = context.clone();
@@ -1239,7 +1239,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 move |mut _caller: Caller<'_, State>| {
                     let context_ref_len = context_ref_len.clone();
                     Box::new(async move {
-                        let ctx = context_ref_len.lock().await;
+                        let ctx = context_ref_len.read().await;
                         ctx.block.len() as i32 + 4
                     })
                 },
@@ -1268,7 +1268,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                         };
 
                         let (input, height) = {
-                            let ctx = context_ref_input.lock().await;
+                            let ctx = context_ref_input.read().await;
                             (ctx.block.clone(), ctx.height)
                         };
 
@@ -1341,7 +1341,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
 
 pub async fn setup_linker_view(
 
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
 
         linker: &mut Linker<State>,
 
@@ -1438,7 +1438,7 @@ pub async fn setup_linker_view(
 
                         let data = mem.data(&caller);
 
-                        let height = context_get.clone().lock().await.height;
+                        let height = context_get.clone().read().await.height;
 
 
 
@@ -1516,7 +1516,7 @@ pub async fn setup_linker_view(
 
                         let data = mem.data(&caller);
 
-                        let height = context_get_len.clone().lock().await.height;
+                        let height = context_get_len.clone().read().await.height;
 
 
 
@@ -1564,7 +1564,7 @@ pub async fn setup_linker_view(
     ) -> Result<MetashrewRuntime<T>> {
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+        let context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::<
             MetashrewRuntimeContext<T>,
         >::new(
             MetashrewRuntimeContext::new(db, height, vec![]),
@@ -1602,7 +1602,7 @@ pub async fn setup_linker_view(
     ) -> Result<MetashrewRuntime<T>> where <T as KeyValueStoreLike>::Batch: Send {
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+        let context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::<
             MetashrewRuntimeContext<T>,
         >::new(
             MetashrewRuntimeContext::new(db, height, vec![]),
@@ -1644,7 +1644,7 @@ pub async fn setup_linker_view(
     ) -> Result<MetashrewRuntime<T>> {
         let mut linker = Linker::<State>::new(&engine);
         let mut wasmstore = Store::<State>::new(&engine, State::new());
-        let context = Arc::<Mutex<MetashrewRuntimeContext<T>>>::new(Mutex::<
+        let context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::<
             MetashrewRuntimeContext<T>,
         >::new(
             MetashrewRuntimeContext::new(db, height, vec![]),
@@ -1675,7 +1675,7 @@ pub async fn setup_linker_view(
     }
 
     pub async fn setup_linker_preview(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> {
         let context_ref = context.clone();
@@ -1695,7 +1695,7 @@ pub async fn setup_linker_view(
 
                             Box::new(async move {
 
-                                let height = context_ref.clone().lock().await.height;
+                                let height = context_ref.clone().read().await.height;
 
         
 
@@ -1746,7 +1746,7 @@ pub async fn setup_linker_view(
                         };
 
                         let binding = context_ref.clone();
-                        let mut ctx = binding.lock().await;
+                        let mut ctx = binding.write().await;
                         ctx.state = 1;
                         
                         // Use append-only store for preview operations with batching
@@ -1796,7 +1796,7 @@ pub async fn setup_linker_view(
                                                         }
                                                     };
                                                     let data = mem.data(&caller);
-                                                        let height = context_get.clone().lock().await.height;
+                                                        let height = context_get.clone().read().await.height;
                                             match try_read_arraybuffer_as_vec(data, key) {
                                                 Ok(key_vec) => {
                                                     // Use append-only store for historical queries in view functions
@@ -1847,7 +1847,7 @@ pub async fn setup_linker_view(
                         None => return i32::MAX,
                     };
                     let data = mem.data(&caller);
-                        let height = context_get_len.clone().lock().await.height;
+                        let height = context_get_len.clone().read().await.height;
 
                         match try_read_arraybuffer_as_vec(data, key) {
                             Ok(key_vec) => {
@@ -1870,7 +1870,7 @@ pub async fn setup_linker_view(
     }
 
     pub async fn setup_linker_indexer(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
     ) -> Result<()> where <T as KeyValueStoreLike>::Batch: Send {
         let context_ref = context.clone();
@@ -1886,7 +1886,7 @@ pub async fn setup_linker_view(
                     Box::new(async move {
                         // Optimize: Lock once to get both height and db, reducing lock contention
                         let (height, db) = {
-                            let guard = context_ref.lock().await;
+                            let guard = context_ref.read().await;
                             (guard.height, guard.db.clone())
                         };
 
@@ -1967,7 +1967,7 @@ pub async fn setup_linker_view(
 
                         // Set completion state
                         let context_clone = context_ref.clone();
-                        let mut ctx = context_clone.lock().await;
+                        let mut ctx = context_clone.write().await;
                         ctx.state = 1;
                     })
                 },
@@ -2013,7 +2013,7 @@ pub async fn setup_linker_view(
 
                         // Optimize: Lock once to get both height and db, reducing lock contention
                         let (height, db) = {
-                            let guard = context_get.lock().await;
+                            let guard = context_get.read().await;
                             (guard.height, guard.db.clone())
                         };
 
@@ -2089,7 +2089,7 @@ pub async fn setup_linker_view(
 
                         let context_clone = context_get_len.clone();
                         let (_db, height) = {
-                            let ctx = context_clone.lock().await;
+                            let ctx = context_clone.read().await;
                             (ctx.db.clone(), ctx.height)
                         };
 
@@ -2116,7 +2116,7 @@ pub async fn setup_linker_view(
 
     /// Get all keys that were touched at a specific block height
     pub fn get_keys_touched_at_height(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         _height: u32,
     ) -> Result<Vec<Vec<u8>>> {
         // For now, return an empty list
@@ -2126,7 +2126,7 @@ pub async fn setup_linker_view(
 
     /// Iterate backwards through all values of a key from most recent update
     pub fn iterate_key_backwards(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         _key: &Vec<u8>,
         _from_height: u32,
     ) -> Result<Vec<(u32, Vec<u8>)>> {
@@ -2137,10 +2137,10 @@ pub async fn setup_linker_view(
 
     /// Get the current state root (merkle root of entire state)
     pub async fn get_current_state_root(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
     ) -> Result<[u8; 32]> {
         let db = {
-            let guard = context.lock().await;
+            let guard = context.read().await;
             guard.db.clone()
         };
 
@@ -2150,11 +2150,11 @@ pub async fn setup_linker_view(
 
     /// Get the state root at a specific height
     pub async fn get_state_root_at_height(
-        context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         height: u32,
     ) -> Result<[u8; 32]> {
         let db = {
-            let guard = context.lock().await;
+            let guard = context.read().await;
             guard.db.clone()
         };
 
@@ -2164,7 +2164,7 @@ pub async fn setup_linker_view(
 
     /// Perform a complete rollback to a specific height
     pub fn rollback_to_height(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         target_height: u32,
     ) -> Result<()> {
         // For now, just log the rollback
@@ -2175,7 +2175,7 @@ pub async fn setup_linker_view(
 
     /// Get all heights at which a key was updated
     pub fn get_key_update_heights(
-        _context: Arc<Mutex<MetashrewRuntimeContext<T>>>,
+        _context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         _key: &Vec<u8>,
     ) -> Result<Vec<u32>> {
         // For now, return an empty list
@@ -2187,7 +2187,7 @@ pub async fn setup_linker_view(
     /// This is used by the atomic block processing to get the state root after execution
     pub async fn calculate_state_root(&self) -> Result<Vec<u8>> {
         let db = {
-            let guard = self.context.lock().await;
+            let guard = self.context.read().await;
             guard.db.clone()
         };
 
@@ -2200,7 +2200,7 @@ pub async fn setup_linker_view(
     /// This collects all the operations that would be written to the database
     pub async fn get_accumulated_batch(&self) -> Result<Vec<u8>> {
         let db = {
-            let guard = self.context.lock().await;
+            let guard = self.context.read().await;
             guard.db.clone()
         };
 
@@ -2227,7 +2227,7 @@ pub async fn setup_linker_view(
     ) -> Result<crate::traits::AtomicBlockResult> {
         // Set the block data and height in context
         {
-            let mut guard = self.context.lock().await;
+            let mut guard = self.context.write().await;
             guard.block = block_data.to_vec();
             guard.height = height;
             guard.state = 0;
@@ -2248,7 +2248,7 @@ pub async fn setup_linker_view(
             match start.call_async(&mut *store, ()).await {
                 Ok(_) => {
                     let context_state = {
-                        let guard = self.context.lock().await;
+                        let guard = self.context.read().await;
                         guard.state
                     };
 
@@ -2311,7 +2311,7 @@ pub async fn setup_linker_view(
     pub async fn process_block(&self, height: u32, block_data: &[u8]) -> Result<()> {
         // Set the block data and height in context
         {
-            let mut guard = self.context.lock().await;
+            let mut guard = self.context.write().await;
             guard.block = block_data.to_vec();
             guard.height = height;
             guard.state = 0;

@@ -78,7 +78,7 @@ async fn run_memory_stress_test(config: MemoryStressConfig) -> Result<String> {
 
     // Set input in context
     {
-        let mut context = runtime.context.lock().await;
+        let mut context = runtime.context.write().await;
         context.block = input_bytes;
         context.height = config.height;
         context.db.set_height(config.height);

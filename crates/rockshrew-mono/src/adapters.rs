@@ -266,7 +266,7 @@ where
     async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
         // Briefly lock to get DB clone, then release for concurrent access
         let db = {
-            let context = self.runtime.context.lock().await;
+            let context = self.runtime.context.read().await;
             context.db.clone()
         };
         let smt_helper = metashrew_runtime::smt::SMTHelper::new(db);
@@ -317,7 +317,7 @@ where
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
         // Briefly lock to get height, then release
         let blocks_processed = {
-            let context = self.runtime.context.lock().await;
+            let context = self.runtime.context.read().await;
             context.height
         };
         Ok(RuntimeStats {

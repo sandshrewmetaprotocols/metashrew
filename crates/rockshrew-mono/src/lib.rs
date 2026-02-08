@@ -633,7 +633,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
         config_engine.async_support(true);
         let engine = wasmtime::Engine::new(&config_engine)?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter, engine).await?;
-        let storage_adapter = match runtime.context.lock().await.db {
+        let storage_adapter = match runtime.context.read().await.db {
             ForkAdapter::Modern(ref modern_adapter) => {
                 RocksDBStorageAdapter::new(modern_adapter.db.clone())
             }

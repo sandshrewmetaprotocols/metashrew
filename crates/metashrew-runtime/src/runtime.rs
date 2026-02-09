@@ -1884,10 +1884,10 @@ pub async fn setup_linker_view(
                 move |mut caller: Caller<'_, State>, encoded: i32| {
                     let context_ref = context_ref.clone();
                     Box::new(async move {
-                        // Optimize: Lock once to get both height and db, reducing lock contention
-                        let (height, db) = {
+                        // Optimize: Lock once to get height, db, and block_hash, reducing lock contention
+                        let (height, db, block_hash) = {
                             let guard = context_ref.read().await;
-                            (guard.height, guard.db.clone())
+                            (guard.height, guard.db.clone(), guard.block_hash.clone())
                         };
 
                         let mem = match caller.get_export("memory") {
@@ -1947,9 +1947,9 @@ pub async fn setup_linker_view(
                             }
                         }
 
-                        // The new `calculate_and_store_state_root_batched` will handle all database writes atomically.
-                        // It will be refactored to accept key-value pairs directly.
-                        match batched_smt.calculate_and_store_state_root_batched(height, &key_values) {
+                        // The new `calculate_and_store_state_root_batched` handles all database writes atomically
+                        // and tags entries with the block hash for deferred reorg validation.
+                        match batched_smt.calculate_and_store_state_root_batched(height, &key_values, &block_hash) {
                             Ok(state_root) => {
                                 log::info!(
                                     "indexed block {} with {} k/v pairs atomically, state root: {}",
@@ -2225,11 +2225,12 @@ pub async fn setup_linker_view(
         block_data: &[u8],
         block_hash: &[u8],
     ) -> Result<crate::traits::AtomicBlockResult> {
-        // Set the block data and height in context
+        // Set the block data, height, and block hash in context
         {
             let mut guard = self.context.write().await;
             guard.block = block_data.to_vec();
             guard.height = height;
+            guard.block_hash = block_hash.to_vec();
             guard.state = 0;
         }
 

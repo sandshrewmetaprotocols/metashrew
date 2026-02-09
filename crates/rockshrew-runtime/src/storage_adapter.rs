@@ -117,14 +117,31 @@ impl StorageAdapter for RocksDBStorageAdapter {
     }
 
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
-        use metashrew_runtime::rollback::rollback_smt_data;
+        use metashrew_runtime::rollback::{
+            manifests_exist_for_range, rollback_deferred, rollback_smt_data,
+        };
 
         info!("Starting rollback to height {}", height);
         let current_height = self.get_indexed_height().await?;
 
-        // Use the shared SMT rollback implementation
-        rollback_smt_data(self, height, current_height)
-            .map_err(|e| SyncError::Storage(format!("SMT rollback failed: {}", e)))?;
+        // Choose rollback strategy based on manifest availability
+        if manifests_exist_for_range(self, height, current_height) {
+            info!(
+                "All manifests present for heights {}..={}, using DEFERRED rollback",
+                height + 1,
+                current_height
+            );
+            rollback_deferred(self, height, current_height)
+                .map_err(|e| SyncError::Storage(format!("Deferred rollback failed: {}", e)))?;
+        } else {
+            warn!(
+                "Not all manifests present for heights {}..={}, falling back to LEGACY rollback",
+                height + 1,
+                current_height
+            );
+            rollback_smt_data(self, height, current_height)
+                .map_err(|e| SyncError::Storage(format!("SMT rollback failed: {}", e)))?;
+        }
 
         self.set_indexed_height(height).await?;
         info!("Successfully completed rollback to height {}", height);

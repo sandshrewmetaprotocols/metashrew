@@ -260,13 +260,20 @@ impl StorageAdapter for MemStoreAdapter {
         Ok(self.get_immutable(format!("state_root_{}", height).as_bytes()).unwrap())
     }
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
-        use metashrew_runtime::rollback::rollback_smt_data;
+        use metashrew_runtime::rollback::{
+            manifests_exist_for_range, rollback_deferred, rollback_smt_data,
+        };
 
         let current_height = self.get_height();
 
-        // Use the shared SMT rollback implementation
-        rollback_smt_data(self, height, current_height)
-            .map_err(|e| metashrew_sync::SyncError::Storage(format!("SMT rollback failed: {}", e)))?;
+        // Choose rollback strategy based on manifest availability
+        if manifests_exist_for_range(self, height, current_height) {
+            rollback_deferred(self, height, current_height)
+                .map_err(|e| metashrew_sync::SyncError::Storage(format!("Deferred rollback failed: {}", e)))?;
+        } else {
+            rollback_smt_data(self, height, current_height)
+                .map_err(|e| metashrew_sync::SyncError::Storage(format!("SMT rollback failed: {}", e)))?;
+        }
 
         self.set_height(height);
         Ok(())

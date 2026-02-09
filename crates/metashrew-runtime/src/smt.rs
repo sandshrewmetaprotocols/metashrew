@@ -334,9 +334,19 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         &mut self,
         height: u32,
         key_values: &[(Vec<u8>, Vec<u8>)],
+        block_hash: &[u8],
     ) -> Result<[u8; 32]> {
         // Clear caches at start of block processing
         self.clear_caches();
+
+        // Compute blockhash tag: first 8 bytes hex-encoded (16 chars)
+        let blockhash8_hex = if block_hash.len() >= 8 {
+            hex::encode(&block_hash[..8])
+        } else if !block_hash.is_empty() {
+            hex::encode(block_hash)
+        } else {
+            String::new()
+        };
 
         let prev_root = if height > 0 {
             match self.get_smt_root_at_height(height - 1) {
@@ -351,6 +361,12 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             let mut batch = self.storage.create_batch();
             let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
             batch.put(root_key, prev_root.to_vec());
+
+            // Write empty manifest for this height
+            let manifest_key = format!("/__INTERNAL/keys-at-height/{}", height).into_bytes();
+            let manifest_data = serialize_key_manifest(&[]);
+            batch.put(&manifest_key, &manifest_data);
+
             self.storage.write(batch)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
             return Ok(prev_root);
@@ -358,7 +374,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         // Create a batch for all operations
         let mut batch = self.storage.create_batch();
-        
+
         // Use a map to track key lengths within this batch to handle multiple
         // updates to the same key correctly.
         let mut key_lengths: HashMap<Vec<u8>, u32> = HashMap::new();
@@ -380,10 +396,14 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                 }
             };
 
-            // Append the new value.
+            // Append the new value with blockhash tag
             let update_key = [key.as_slice(), b"/".as_slice(), length.to_string().as_bytes()].concat();
             let value_hex = hex::encode(value);
-            let update_value = format!("{}:{}", height, value_hex);
+            let update_value = if !blockhash8_hex.is_empty() {
+                format!("{}:{}:{}", height, blockhash8_hex, value_hex)
+            } else {
+                format!("{}:{}", height, value_hex)
+            };
             batch.put(&update_key, update_value.as_bytes());
 
             // Update length in the batch and our in-memory map.
@@ -392,7 +412,13 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             batch.put(&length_key, new_length.to_string().as_bytes());
             key_lengths.insert(key.clone(), new_length);
         }
-        
+
+        // Write per-height key manifest
+        let manifest_keys: Vec<&[u8]> = key_values.iter().map(|(k, _)| k.as_slice()).collect();
+        let manifest_key = format!("/__INTERNAL/keys-at-height/{}", height).into_bytes();
+        let manifest_data = serialize_key_manifest(&manifest_keys);
+        batch.put(&manifest_key, &manifest_data);
+
         // MINIMAL SMT: Only compute and store the final root, not intermediate nodes
         let new_root = self.compute_minimal_smt_root(prev_root, key_values)?;
 
@@ -417,6 +443,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
     }
 
     /// Fast lookup using the new append-only approach with binary search
+    /// and reorg-aware validation when a reorg has occurred.
     pub fn get_at_height_fast(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
         // 1. Get the length of updates for this key
         let length_key = [key, b"/length"].concat();
@@ -432,7 +459,61 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             return Ok(None);
         }
 
-        // 2. Binary search through the updates to find the most recent one at or before the target height
+        // Check for reorg marker
+        let reorg_height = get_reorg_height(&self.storage);
+
+        // Fast path: no reorg or querying below reorg range
+        if reorg_height.is_none() || height < reorg_height.unwrap() {
+            return self.binary_search_at_height(key, length, height);
+        }
+
+        let reorg_h = reorg_height.unwrap();
+
+        // Phase 1: Binary search to find approximate upper bound (ignoring validity)
+        let upper = self.binary_search_upper_bound(key, length, height);
+
+        // Phase 2: Scan backwards from upper + BUBBLE_PADDING
+        let scan_from = std::cmp::min(upper + BUBBLE_PADDING, length);
+
+        // Build canonical hash cache for the reorg range
+        let mut canonical_hash_cache: HashMap<u32, Vec<u8>> = HashMap::new();
+
+        for i in (0..scan_from).rev() {
+            let update_key = [key, b"/", i.to_string().as_bytes()].concat();
+            match self.storage.get_immutable(&update_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                Some(update_data) => {
+                    let update_str = String::from_utf8_lossy(&update_data);
+                    let parsed = parse_entry(&update_str)?;
+
+                    if parsed.height > height {
+                        continue; // Too recent
+                    }
+
+                    // Pre-fork entries are always valid
+                    if parsed.height < reorg_h {
+                        let value_bytes = hex::decode(&parsed.value_hex)
+                            .map_err(|_| anyhow!("Invalid hex encoding in stored value"))?;
+                        return Ok(Some(value_bytes));
+                    }
+
+                    // Check if this entry is canonical
+                    if is_canonical_or_old_format(&self.storage, parsed.height, &parsed.blockhash8_hex, &canonical_hash_cache) {
+                        let value_bytes = hex::decode(&parsed.value_hex)
+                            .map_err(|_| anyhow!("Invalid hex encoding in stored value"))?;
+                        return Ok(Some(value_bytes));
+                    }
+                    // Not canonical, continue scanning
+                }
+                None => continue,
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Standard binary search for entries at a given height (no reorg awareness)
+    fn binary_search_at_height(&self, key: &[u8], length: u32, height: u32) -> Result<Option<Vec<u8>>> {
         let mut left = 0;
         let mut right = length;
         let mut best_value: Option<Vec<u8>> = None;
@@ -440,32 +521,20 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         while left < right {
             let mid = (left + right) / 2;
             let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
-            
+
             match self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 Some(update_data) => {
                     let update_str = String::from_utf8_lossy(&update_data);
-                    if let Some(colon_pos) = update_str.find(':') {
-                        let height_str = &update_str[..colon_pos];
-                        if let Ok(update_height) = height_str.parse::<u32>() {
-                            if update_height <= height {
-                                // This update is valid, save it and search for a more recent one
-                                let value_hex = &update_str[colon_pos + 1..];
-                                if let Ok(value_bytes) = hex::decode(value_hex) {
-                                    best_value = Some(value_bytes);
-                                } else {
-                                    return Err(anyhow!("Invalid hex encoding in stored value"));
-                                }
-                                left = mid + 1;
-                            } else {
-                                // This update is too recent, search earlier
-                                right = mid;
-                            }
-                        } else {
-                            return Err(anyhow!("Invalid height format in update"));
-                        }
+                    let parsed = parse_entry(&update_str)?;
+
+                    if parsed.height <= height {
+                        let value_bytes = hex::decode(&parsed.value_hex)
+                            .map_err(|_| anyhow!("Invalid hex encoding in stored value"))?;
+                        best_value = Some(value_bytes);
+                        left = mid + 1;
                     } else {
-                        return Err(anyhow!("Invalid update format"));
+                        right = mid;
                     }
                 }
                 None => {
@@ -475,6 +544,38 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         }
 
         Ok(best_value)
+    }
+
+    /// Binary search to find the approximate upper bound index for a given height.
+    /// Returns the index just past the last entry with height <= target.
+    fn binary_search_upper_bound(&self, key: &[u8], length: u32, height: u32) -> u32 {
+        let mut left = 0u32;
+        let mut right = length;
+
+        while left < right {
+            let mid = (left + right) / 2;
+            let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
+
+            match self.storage.get_immutable(&update_key) {
+                Ok(Some(update_data)) => {
+                    let update_str = String::from_utf8_lossy(&update_data);
+                    if let Ok(parsed) = parse_entry(&update_str) {
+                        if parsed.height <= height {
+                            left = mid + 1;
+                        } else {
+                            right = mid;
+                        }
+                    } else {
+                        right = mid;
+                    }
+                }
+                _ => {
+                    right = mid;
+                }
+            }
+        }
+
+        left
     }
 
     /// Compute minimal SMT root without storing intermediate nodes
@@ -1528,7 +1629,8 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(())
     }
 
-    /// Get the value of a key at a specific height using binary search through the flat list
+    /// Get the value of a key at a specific height using binary search through the flat list,
+    /// with reorg-aware validation when a reorg has occurred.
     pub fn get_at_height(&self, key: &[u8], height: u32) -> Result<Option<Vec<u8>>> {
         let length_key = [key, b"/length"].concat();
         let length = match self.storage.get_immutable(&length_key)
@@ -1543,7 +1645,61 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             return Ok(None);
         }
 
-        // 2. Binary search through the updates to find the most recent one at or before the target height
+        // Check for reorg marker
+        let reorg_height = get_reorg_height(&self.storage);
+
+        // Fast path: no reorg or querying below reorg range
+        if reorg_height.is_none() || height < reorg_height.unwrap() {
+            return self.binary_search_at_height(key, length, height);
+        }
+
+        let reorg_h = reorg_height.unwrap();
+
+        // Phase 1: Binary search to find approximate upper bound (ignoring validity)
+        let upper = self.binary_search_upper_bound(key, length, height);
+
+        // Phase 2: Scan backwards from upper + BUBBLE_PADDING
+        let scan_from = std::cmp::min(upper + BUBBLE_PADDING, length);
+
+        // Build canonical hash cache for the reorg range
+        let canonical_hash_cache: HashMap<u32, Vec<u8>> = HashMap::new();
+
+        for i in (0..scan_from).rev() {
+            let update_key = [key, b"/", i.to_string().as_bytes()].concat();
+            match self.storage.get_immutable(&update_key)
+                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
+                Some(update_data) => {
+                    let update_str = String::from_utf8_lossy(&update_data);
+                    let parsed = parse_entry(&update_str)?;
+
+                    if parsed.height > height {
+                        continue; // Too recent
+                    }
+
+                    // Pre-fork entries are always valid
+                    if parsed.height < reorg_h {
+                        let value_bytes = hex::decode(&parsed.value_hex)
+                            .map_err(|_| anyhow!("Invalid hex encoding in stored value"))?;
+                        return Ok(Some(value_bytes));
+                    }
+
+                    // Check if this entry is canonical
+                    if is_canonical_or_old_format(&self.storage, parsed.height, &parsed.blockhash8_hex, &canonical_hash_cache) {
+                        let value_bytes = hex::decode(&parsed.value_hex)
+                            .map_err(|_| anyhow!("Invalid hex encoding in stored value"))?;
+                        return Ok(Some(value_bytes));
+                    }
+                    // Not canonical, continue scanning
+                }
+                None => continue,
+            }
+        }
+
+        Ok(None)
+    }
+
+    /// Standard binary search for entries at a given height (no reorg awareness)
+    fn binary_search_at_height(&self, key: &[u8], length: u32, height: u32) -> Result<Option<Vec<u8>>> {
         let mut left = 0;
         let mut right = length;
         let mut best_value: Option<Vec<u8>> = None;
@@ -1551,32 +1707,20 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         while left < right {
             let mid = (left + right) / 2;
             let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
-            
+
             match self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 Some(update_data) => {
                     let update_str = String::from_utf8_lossy(&update_data);
-                    if let Some(colon_pos) = update_str.find(':') {
-                        let height_str = &update_str[..colon_pos];
-                        if let Ok(update_height) = height_str.parse::<u32>() {
-                            if update_height <= height {
-                                // This update is valid, save it and search for a more recent one
-                                let value_hex = &update_str[colon_pos + 1..];
-                                if let Ok(value_bytes) = hex::decode(value_hex) {
-                                    best_value = Some(value_bytes);
-                                    left = mid + 1;
-                                } else {
-                                    return Err(anyhow!("Invalid hex encoding in stored value"));
-                                }
-                            } else {
-                                // This update is too recent, search earlier
-                                right = mid;
-                            }
-                        } else {
-                            return Err(anyhow!("Invalid height format in update"));
-                        }
+                    let parsed = parse_entry(&update_str)?;
+
+                    if parsed.height <= height {
+                        let value_bytes = hex::decode(&parsed.value_hex)
+                            .map_err(|_| anyhow!("Invalid hex encoding in stored value"))?;
+                        best_value = Some(value_bytes);
+                        left = mid + 1;
                     } else {
-                        return Err(anyhow!("Invalid update format"));
+                        right = mid;
                     }
                 }
                 None => {
@@ -1586,6 +1730,37 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         Ok(best_value)
+    }
+
+    /// Binary search to find the approximate upper bound index for a given height.
+    fn binary_search_upper_bound(&self, key: &[u8], length: u32, height: u32) -> u32 {
+        let mut left = 0u32;
+        let mut right = length;
+
+        while left < right {
+            let mid = (left + right) / 2;
+            let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
+
+            match self.storage.get_immutable(&update_key) {
+                Ok(Some(update_data)) => {
+                    let update_str = String::from_utf8_lossy(&update_data);
+                    if let Ok(parsed) = parse_entry(&update_str) {
+                        if parsed.height <= height {
+                            left = mid + 1;
+                        } else {
+                            right = mid;
+                        }
+                    } else {
+                        right = mid;
+                    }
+                }
+                _ => {
+                    right = mid;
+                }
+            }
+        }
+
+        left
     }
 
     /// Get the current (most recent) value of a key across all heights
@@ -1609,16 +1784,10 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(update_data) => {
                 let update_str = String::from_utf8_lossy(&update_data);
-                if let Some(colon_pos) = update_str.find(':') {
-                    let value_hex = &update_str[colon_pos + 1..];
-                    if let Ok(value_bytes) = hex::decode(value_hex) {
-                        Ok(Some(value_bytes))
-                    } else {
-                        Err(anyhow!("Invalid hex encoding in stored value"))
-                    }
-                } else {
-                    Err(anyhow!("Invalid update format"))
-                }
+                let parsed = parse_entry(&update_str)?;
+                let value_bytes = hex::decode(&parsed.value_hex)
+                    .map_err(|_| anyhow!("Invalid hex encoding in stored value"))?;
+                Ok(Some(value_bytes))
             }
             None => Ok(None),
         }
@@ -1636,18 +1805,15 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         };
 
         let mut heights = Vec::new();
-        
+
         // Iterate through all updates and extract heights
         for i in 0..length {
             let update_key = [key, b"/", i.to_string().as_bytes()].concat();
             if let Some(update_data) = self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 let update_str = String::from_utf8_lossy(&update_data);
-                if let Some(colon_pos) = update_str.find(':') {
-                    let height_str = &update_str[..colon_pos];
-                    if let Ok(height) = height_str.parse::<u32>() {
-                        heights.push(height);
-                    }
+                if let Ok(parsed) = parse_entry(&update_str) {
+                    heights.push(parsed.height);
                 }
             }
         }
@@ -2428,3 +2594,131 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         Ok(EMPTY_NODE_HASH)
     }
 }
+
+// ===== Manifest serialization/deserialization =====
+// Format: [u32 count][u32 len][key bytes]...
+
+/// Serialize a list of keys into a binary manifest
+pub fn serialize_key_manifest(keys: &[&[u8]]) -> Vec<u8> {
+    let count = keys.len() as u32;
+    let mut data = Vec::new();
+    data.extend_from_slice(&count.to_le_bytes());
+    for key in keys {
+        let key_len = key.len() as u32;
+        data.extend_from_slice(&key_len.to_le_bytes());
+        data.extend_from_slice(key);
+    }
+    data
+}
+
+/// Deserialize a binary manifest into a list of keys
+pub fn deserialize_key_manifest(data: &[u8]) -> Result<Vec<Vec<u8>>> {
+    if data.len() < 4 {
+        return Err(anyhow!("Manifest data too short"));
+    }
+    let count = u32::from_le_bytes(data[..4].try_into().unwrap()) as usize;
+    let mut keys = Vec::with_capacity(count);
+    let mut offset = 4;
+    for _ in 0..count {
+        if offset + 4 > data.len() {
+            return Err(anyhow!("Manifest data truncated at key length"));
+        }
+        let key_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        offset += 4;
+        if offset + key_len > data.len() {
+            return Err(anyhow!("Manifest data truncated at key data"));
+        }
+        keys.push(data[offset..offset + key_len].to_vec());
+        offset += key_len;
+    }
+    Ok(keys)
+}
+
+/// Parsed entry from the append-only store
+pub struct ParsedEntry {
+    pub height: u32,
+    pub blockhash8_hex: Option<String>,
+    pub value_hex: String,
+}
+
+/// Parse an append-only entry value string.
+///
+/// Old format (1 colon): `height:value_hex`
+/// New format (2 colons): `height:blockhash8hex:value_hex`
+pub fn parse_entry(entry_str: &str) -> Result<ParsedEntry> {
+    let parts: Vec<&str> = entry_str.splitn(3, ':').collect();
+    match parts.len() {
+        2 => {
+            // Old format: height:value_hex
+            let height = parts[0].parse::<u32>()
+                .map_err(|_| anyhow!("Invalid height in entry"))?;
+            Ok(ParsedEntry {
+                height,
+                blockhash8_hex: None,
+                value_hex: parts[1].to_string(),
+            })
+        }
+        3 => {
+            // New format: height:blockhash8hex:value_hex
+            let height = parts[0].parse::<u32>()
+                .map_err(|_| anyhow!("Invalid height in entry"))?;
+            Ok(ParsedEntry {
+                height,
+                blockhash8_hex: Some(parts[1].to_string()),
+                value_hex: parts[2].to_string(),
+            })
+        }
+        _ => Err(anyhow!("Invalid entry format")),
+    }
+}
+
+/// Check if an entry's blockhash is canonical (matches the stored hash for that height)
+/// or if it's an old-format entry (always valid for backward compatibility).
+pub fn is_canonical_or_old_format<T: KeyValueStoreLike>(
+    storage: &T,
+    entry_height: u32,
+    blockhash8_hex: &Option<String>,
+    canonical_hash_cache: &HashMap<u32, Vec<u8>>,
+) -> bool {
+    match blockhash8_hex {
+        None => true, // Old format: always valid
+        Some(hash_hex) => {
+            // Look up canonical hash for this height
+            let canonical = if let Some(cached) = canonical_hash_cache.get(&entry_height) {
+                cached.clone()
+            } else {
+                let hash_key = format!("/__INTERNAL/height-to-hash/{}", entry_height).into_bytes();
+                match storage.get_immutable(&hash_key) {
+                    Ok(Some(hash)) => hash,
+                    _ => return false, // No canonical hash found, entry is invalid
+                }
+            };
+
+            // Compare first 8 bytes hex-encoded
+            if canonical.len() >= 8 {
+                hex::encode(&canonical[..8]) == *hash_hex
+            } else if !canonical.is_empty() {
+                hex::encode(&canonical) == *hash_hex
+            } else {
+                false
+            }
+        }
+    }
+}
+
+/// Internal key for storing the reorg height marker
+pub const REORG_HEIGHT_KEY: &str = "/__INTERNAL/reorg-height";
+
+/// Read the cached reorg height from the database, if any.
+pub fn get_reorg_height<T: KeyValueStoreLike>(storage: &T) -> Option<u32> {
+    match storage.get_immutable(REORG_HEIGHT_KEY.as_bytes()) {
+        Ok(Some(bytes)) if bytes.len() >= 4 => {
+            Some(u32::from_le_bytes(bytes[..4].try_into().unwrap()))
+        }
+        _ => None,
+    }
+}
+
+/// Maximum number of extra entries to scan past the binary search result
+/// when looking through a non-monotonic region after a reorg
+pub const BUBBLE_PADDING: u32 = 20;

@@ -886,6 +886,11 @@ where
 }
 
 /// Handles chain reorganizations by finding the common ancestor and rolling back state.
+///
+/// Uses a tiered approach:
+/// 1. If key manifests exist for all reorged heights → deferred rollback (zero k/v mutations)
+/// 2. If manifests exist but some are missing → targeted rollback using available manifests
+/// 3. Otherwise → legacy full-scan rollback
 pub async fn handle_reorg<N, S, R>(
     current_height: u32,
     node: Arc<N>,
@@ -935,7 +940,7 @@ where
         let rollback_height = check_height;
         warn!("Reorg detected. Rolling back to height {}", rollback_height);
 
-        // Rollback storage
+        // Rollback storage — the storage adapter handles choosing deferred vs legacy
         let mut storage_guard = storage.write().await;
         storage_guard.rollback_to_height(rollback_height).await?;
         drop(storage_guard);

@@ -81,7 +81,7 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// The generic design allows different storage implementations (RocksDB,
     /// in-memory, etc.) to be used based on deployment requirements.
     pub db: T,
-    
+
     /// Current block height being processed
     ///
     /// This height is used for:
@@ -90,14 +90,21 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// - Chain reorganization detection
     /// - State root calculations
     pub height: u32,
-    
+
     /// Raw block data available to WASM modules
     ///
     /// Contains the complete block data that WASM indexers can access through
     /// host functions. The format depends on the specific blockchain and
     /// indexer requirements.
     pub block: Vec<u8>,
-    
+
+    /// Block hash for the current block being processed
+    ///
+    /// Used to tag append-only entries with the block hash for
+    /// deferred reorg validation. The first 8 bytes are hex-encoded
+    /// and included in the entry format: `height:blockhash8hex:value_hex`
+    pub block_hash: Vec<u8>,
+
     /// WASM execution state tracking
     ///
     /// Tracks the progress of WASM module execution:
@@ -116,6 +123,7 @@ where
             db: self.db.clone(),
             height: self.height,
             block: self.block.clone(),
+            block_hash: self.block_hash.clone(),
             state: self.state,
         }
     }
@@ -171,6 +179,7 @@ impl<T: KeyValueStoreLike> MetashrewRuntimeContext<T> {
             db,
             height,
             block,
+            block_hash: Vec::new(),
             state: 0,
         }
     }

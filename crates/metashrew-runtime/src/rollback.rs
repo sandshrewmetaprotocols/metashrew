@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use log::{debug, info, warn};
+use crate::smt::{MANIFEST_PREFIX, SMT_ROOT_PREFIX, deserialize_key_manifest};
 
 /// Trait for rolling back SMT data during blockchain reorganizations
 pub trait SmtRollback {
@@ -201,6 +202,106 @@ pub fn rollback_smt_data<S: SmtRollback>(
     Ok(())
 }
 
+/// Fast rollback using per-height manifests.
+///
+/// Instead of scanning all keys in the database, reads the manifest for each
+/// rolled-back height to find exactly which keys were modified, then rolls
+/// back only those keys. Falls back to `rollback_smt_data()` if manifests
+/// are missing (e.g., blocks indexed before the upgrade).
+///
+/// Returns Ok(true) if fast rollback succeeded, Ok(false) if fallback is needed.
+pub fn rollback_with_manifests<S: SmtRollback>(
+    storage: &mut S,
+    rollback_height: u32,
+    current_height: u32,
+) -> Result<bool> {
+    if rollback_height >= current_height {
+        return Ok(true);
+    }
+
+    info!(
+        "Attempting fast manifest-based rollback from height {} to {}",
+        current_height, rollback_height
+    );
+
+    // Check if manifests exist for all heights in the rollback range
+    for h in (rollback_height + 1)..=current_height {
+        let manifest_key = format!("{}{}", MANIFEST_PREFIX, h).into_bytes();
+        if storage.get_value(&manifest_key)?.is_none() {
+            warn!(
+                "Manifest missing for height {}. Falling back to full rollback.",
+                h
+            );
+            return Ok(false);
+        }
+    }
+
+    // All manifests exist — do the fast rollback
+    let mut total_keys_rolled_back = 0;
+
+    for h in ((rollback_height + 1)..=current_height).rev() {
+        let manifest_key = format!("{}{}", MANIFEST_PREFIX, h).into_bytes();
+        let manifest_data = storage.get_value(&manifest_key)?.unwrap();
+        let keys = deserialize_key_manifest(&manifest_data);
+
+        for key in &keys {
+            // For each key modified at this height, trim append-only entries
+            // above the rollback height
+            let length_key = [key.as_slice(), b"/length"].concat();
+            if let Some(length_bytes) = storage.get_value(&length_key)? {
+                let length = String::from_utf8_lossy(&length_bytes)
+                    .parse::<u32>()
+                    .unwrap_or(0);
+
+                // Walk backward from the end to find entries above rollback_height
+                let mut new_length = length;
+                for i in (0..length).rev() {
+                    let update_key =
+                        [key.as_slice(), b"/", i.to_string().as_bytes()].concat();
+                    if let Some(update_data) = storage.get_value(&update_key)? {
+                        if let Some(entry_height) = parse_height_from_smt_value(&update_data) {
+                            if entry_height > rollback_height {
+                                storage.delete_key(&update_key)?;
+                                new_length = i;
+                            } else {
+                                break; // entries are ordered by height, stop early
+                            }
+                        }
+                    }
+                }
+
+                if new_length != length {
+                    if new_length > 0 {
+                        storage.put_key(&length_key, new_length.to_string().as_bytes())?;
+                    } else {
+                        storage.delete_key(&length_key)?;
+                    }
+                }
+            }
+            total_keys_rolled_back += 1;
+        }
+
+        // Delete manifest and metadata for this height
+        storage.delete_key(&manifest_key)?;
+
+        let root_key = format!("{}{}",SMT_ROOT_PREFIX, h).into_bytes();
+        storage.delete_key(&root_key)?;
+
+        let hash_key = format!("block_hash_{}", h).into_bytes();
+        storage.delete_key(&hash_key)?;
+
+        let state_key = format!("state_root_{}", h).into_bytes();
+        storage.delete_key(&state_key)?;
+    }
+
+    info!(
+        "Fast rollback complete: rolled back {} keys across {} heights",
+        total_keys_rolled_back,
+        current_height - rollback_height
+    );
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,5 +369,87 @@ mod tests {
         assert_eq!(parse_height_from_smt_value(b"0:data"), Some(0));
         assert_eq!(parse_height_from_smt_value(b"noheight"), None);
         assert_eq!(parse_height_from_smt_value(b":data"), None);
+    }
+
+    #[test]
+    fn test_manifest_rollback_basic() {
+        use crate::smt::{serialize_key_manifest, MANIFEST_PREFIX, SMT_ROOT_PREFIX};
+
+        let mut storage = MockStorage {
+            data: HashMap::new(),
+        };
+
+        // Simulate indexing 3 blocks (heights 1, 2, 3)
+        // Block 1: modifies key_a, key_b
+        storage.data.insert(b"key_a/length".to_vec(), b"1".to_vec());
+        storage.data.insert(b"key_a/0".to_vec(), b"1:aa".to_vec());
+        storage.data.insert(b"key_b/length".to_vec(), b"1".to_vec());
+        storage.data.insert(b"key_b/0".to_vec(), b"1:bb".to_vec());
+        let manifest1 = serialize_key_manifest(&[b"key_a", b"key_b"]);
+        storage.data.insert(format!("{}1", MANIFEST_PREFIX).into_bytes(), manifest1);
+        storage.data.insert(format!("{}1", SMT_ROOT_PREFIX).into_bytes(), b"root1".to_vec());
+        storage.data.insert(b"block_hash_1".to_vec(), b"hash1".to_vec());
+
+        // Block 2: modifies key_a, key_c
+        storage.data.insert(b"key_a/length".to_vec(), b"2".to_vec());
+        storage.data.insert(b"key_a/1".to_vec(), b"2:aa2".to_vec());
+        storage.data.insert(b"key_c/length".to_vec(), b"1".to_vec());
+        storage.data.insert(b"key_c/0".to_vec(), b"2:cc".to_vec());
+        let manifest2 = serialize_key_manifest(&[b"key_a", b"key_c"]);
+        storage.data.insert(format!("{}2", MANIFEST_PREFIX).into_bytes(), manifest2);
+        storage.data.insert(format!("{}2", SMT_ROOT_PREFIX).into_bytes(), b"root2".to_vec());
+        storage.data.insert(b"block_hash_2".to_vec(), b"hash2".to_vec());
+
+        // Block 3: modifies key_b
+        storage.data.insert(b"key_b/length".to_vec(), b"2".to_vec());
+        storage.data.insert(b"key_b/1".to_vec(), b"3:bb3".to_vec());
+        let manifest3 = serialize_key_manifest(&[b"key_b"]);
+        storage.data.insert(format!("{}3", MANIFEST_PREFIX).into_bytes(), manifest3);
+        storage.data.insert(format!("{}3", SMT_ROOT_PREFIX).into_bytes(), b"root3".to_vec());
+        storage.data.insert(b"block_hash_3".to_vec(), b"hash3".to_vec());
+
+        // Rollback to height 1 (undo blocks 2 and 3)
+        let result = rollback_with_manifests(&mut storage, 1, 3).unwrap();
+        assert!(result, "fast rollback should succeed with manifests");
+
+        // key_a should be back to length 1 (only block 1 entry)
+        assert_eq!(storage.data.get(b"key_a/length".as_ref()), Some(&b"1".to_vec()));
+        assert!(storage.data.contains_key(b"key_a/0".as_ref())); // block 1 entry kept
+        assert!(!storage.data.contains_key(b"key_a/1".as_ref())); // block 2 entry removed
+
+        // key_b should be back to length 1 (block 3 entry removed)
+        assert_eq!(storage.data.get(b"key_b/length".as_ref()), Some(&b"1".to_vec()));
+        assert!(storage.data.contains_key(b"key_b/0".as_ref())); // block 1 entry kept
+        assert!(!storage.data.contains_key(b"key_b/1".as_ref())); // block 3 entry removed
+
+        // key_c should be completely removed (only existed from block 2)
+        assert!(!storage.data.contains_key(b"key_c/length".as_ref()));
+        assert!(!storage.data.contains_key(b"key_c/0".as_ref()));
+
+        // Metadata for heights 2 and 3 should be gone
+        assert!(!storage.data.contains_key(format!("{}2", SMT_ROOT_PREFIX).as_bytes()));
+        assert!(!storage.data.contains_key(format!("{}3", SMT_ROOT_PREFIX).as_bytes()));
+        assert!(!storage.data.contains_key(b"block_hash_2".as_ref()));
+        assert!(!storage.data.contains_key(b"block_hash_3".as_ref()));
+
+        // Height 1 metadata should remain
+        assert!(storage.data.contains_key(format!("{}1", SMT_ROOT_PREFIX).as_bytes()));
+        assert!(storage.data.contains_key(b"block_hash_1".as_ref()));
+
+        // Manifests for 2 and 3 should be deleted
+        assert!(!storage.data.contains_key(format!("{}2", MANIFEST_PREFIX).as_bytes()));
+        assert!(!storage.data.contains_key(format!("{}3", MANIFEST_PREFIX).as_bytes()));
+    }
+
+    #[test]
+    fn test_manifest_rollback_falls_back_without_manifests() {
+        let mut storage = MockStorage {
+            data: HashMap::new(),
+        };
+
+        // No manifests — should return false for fallback
+        storage.data.insert(b"block_hash_2".to_vec(), b"hash2".to_vec());
+        let result = rollback_with_manifests(&mut storage, 1, 2).unwrap();
+        assert!(!result, "should fall back when manifests are missing");
     }
 }

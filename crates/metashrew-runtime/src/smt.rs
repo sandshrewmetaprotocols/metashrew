@@ -84,6 +84,42 @@ pub const SMT_NODE_PREFIX: &str = "smt:node:";
 ///
 /// Format: `smt:root:{height}` where height is the block height
 pub const SMT_ROOT_PREFIX: &str = "smt:root:";
+pub const MANIFEST_PREFIX: &str = "/__INTERNAL/keys-at-height/";
+
+/// Serialize a list of keys into a compact binary format for per-height manifests.
+/// Format: [u32 LE: num_keys][u32 LE: key1_len][key1_bytes][u32 LE: key2_len][key2_bytes]...
+pub fn serialize_key_manifest(keys: &[&[u8]]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+    for key in keys {
+        buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        buf.extend_from_slice(key);
+    }
+    buf
+}
+
+/// Deserialize a per-height key manifest back into a list of keys.
+pub fn deserialize_key_manifest(data: &[u8]) -> Vec<Vec<u8>> {
+    if data.len() < 4 {
+        return Vec::new();
+    }
+    let num_keys = u32::from_le_bytes(data[0..4].try_into().unwrap_or([0; 4])) as usize;
+    let mut keys = Vec::with_capacity(num_keys);
+    let mut offset = 4;
+    for _ in 0..num_keys {
+        if offset + 4 > data.len() {
+            break;
+        }
+        let key_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap_or([0; 4])) as usize;
+        offset += 4;
+        if offset + key_len > data.len() {
+            break;
+        }
+        keys.push(data[offset..offset + key_len].to_vec());
+        offset += key_len;
+    }
+    keys
+}
 
 /// Empty node hash representing uninitialized or empty SMT nodes
 ///
@@ -399,6 +435,16 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         // Store ONLY the new root (not intermediate SMT nodes)
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         batch.put(root_key, new_root.to_vec());
+
+        // Write per-height manifest of modified keys for fast rollback
+        {
+            let mut unique_keys: Vec<&[u8]> = key_values.iter().map(|(k, _)| k.as_slice()).collect();
+            unique_keys.sort_unstable();
+            unique_keys.dedup();
+            let manifest_key = format!("{}{}", MANIFEST_PREFIX, height).into_bytes();
+            let manifest_value = serialize_key_manifest(&unique_keys);
+            batch.put(&manifest_key, &manifest_value);
+        }
 
         // Update tip height
         batch.put(

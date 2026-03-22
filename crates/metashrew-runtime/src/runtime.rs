@@ -649,7 +649,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 Ok(_) => {
                                     let context_guard = runtime.context.read().await;
                                     let had_failure = store.data().had_failure;
-                                    let state = context_guard.state;
+                                    let state = context_guard.state.load(std::sync::atomic::Ordering::SeqCst);
                                     if state != 1 && !had_failure {
                                         return Err(anyhow!("indexer exited unexpectedly during preview: state={}, had_failure={}", state, had_failure));
                                     }
@@ -1072,8 +1072,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - Host function failures occur during execution
     pub async fn run(&self) -> Result<(), anyhow::Error> {
         let height = {
-            let mut ctx = self.context.write().await;
-            ctx.state = 0;
+            let ctx = self.context.read().await;
+            ctx.state.store(0, std::sync::atomic::Ordering::SeqCst);
             ctx.height
         };
         log::info!("Starting block processing for height {}", height);
@@ -1091,7 +1091,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             // Use call_async since we're using an async store
             match start.call_async(&mut *store, ()).await {
                 Ok(_) => {
-                    if self.context.read().await.state != 1
+                    if self.context.read().await.state.load(std::sync::atomic::Ordering::SeqCst) != 1
                         && !store.data().had_failure
                     {
                         log::error!("Block {} indexer exited unexpectedly (state != 1 and no failure)", height);
@@ -1746,9 +1746,10 @@ pub async fn setup_linker_view(
                         };
 
                         let binding = context_ref.clone();
+                        // Set state atomically before acquiring write lock
+                        binding.read().await.state.store(1, std::sync::atomic::Ordering::SeqCst);
                         let mut ctx = binding.write().await;
-                        ctx.state = 1;
-                        
+
                         // Use append-only store for preview operations with batching
                         let mut batch = ctx.db.create_batch();
                         let smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
@@ -1965,10 +1966,12 @@ pub async fn setup_linker_view(
                             }
                         }
 
-                        // Set completion state
+                        // Set completion state — uses atomic store, no write lock needed
+                        // This is critical: acquiring a write lock here would block all
+                        // concurrent view function read locks on the context
                         let context_clone = context_ref.clone();
-                        let mut ctx = context_clone.write().await;
-                        ctx.state = 1;
+                        let ctx = context_clone.read().await;
+                        ctx.state.store(1, std::sync::atomic::Ordering::SeqCst);
                     })
                 },
             )
@@ -2230,7 +2233,7 @@ pub async fn setup_linker_view(
             let mut guard = self.context.write().await;
             guard.block = block_data.to_vec();
             guard.height = height;
-            guard.state = 0;
+            guard.state.store(0, std::sync::atomic::Ordering::SeqCst);
         }
 
         // Note: Chain reorganization detection is now handled at the sync framework level
@@ -2249,7 +2252,7 @@ pub async fn setup_linker_view(
                 Ok(_) => {
                     let context_state = {
                         let guard = self.context.read().await;
-                        guard.state
+                        guard.state.load(std::sync::atomic::Ordering::SeqCst)
                     };
 
                     if context_state != 1 && !store.data().had_failure {
@@ -2314,7 +2317,7 @@ pub async fn setup_linker_view(
             let mut guard = self.context.write().await;
             guard.block = block_data.to_vec();
             guard.height = height;
-            guard.state = 0;
+            guard.state.store(0, std::sync::atomic::Ordering::SeqCst);
         }
 
         // Execute the block processing - run() now handles memory refresh automatically

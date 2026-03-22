@@ -399,39 +399,51 @@ where
         }
     });
 
-    let processor_handle = tokio::spawn({
-        let sync_engine_clone = sync_engine_arc.clone();
-        let result_sender_clone = result_sender.clone();
+    // Block processor runs on a dedicated tokio runtime so it never competes
+    // with RPC view calls for thread pool time. This ensures indexing progresses
+    // steadily regardless of RPC load, and views are never starved by indexing.
+    let processor_handle = std::thread::Builder::new()
+        .name("block-processor".into())
+        .spawn({
+            let sync_engine_clone = sync_engine_arc.clone();
+            let result_sender_clone = result_sender.clone();
 
-        async move {
-            info!("Block processor task started.");
-            while let Some(block_data) = block_receiver.recv().await {
-                let block_start = Instant::now();
-                info!("PROCESSOR: Starting block {} ({} bytes)", block_data.height, block_data.block_data.len());
-                
-                // Don't hold the write lock during block processing - just get a reference
-                // The runtime handles its own internal synchronization
-                let engine = sync_engine_clone.read().await;
-                let result = match engine.process_block(block_data.height, block_data.block_data, block_data.block_hash).await {
-                    Ok(_) => {
-                        info!("PROCESSOR: Completed block {} in {:?}", block_data.height, block_start.elapsed());
-                        BlockResult::Success(block_data.height)
-                    },
-                    Err(e) => {
-                        error!("PROCESSOR: Failed block {} after {:?}: {}", block_data.height, block_start.elapsed(), e);
-                        BlockResult::Error(block_data.height, e.into())
-                    },
-                };
-                drop(engine); // Explicitly release the read lock
-                
-                // Send result - this will block until indexer consumes it (channel size = 1)
-                if result_sender_clone.send(result).await.is_err() {
-                    break;
-                }
+            move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("processor-worker")
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create processor runtime");
+
+                rt.block_on(async move {
+                    info!("Block processor task started (dedicated runtime).");
+                    while let Some(block_data) = block_receiver.recv().await {
+                        let block_start = Instant::now();
+                        info!("PROCESSOR: Starting block {} ({} bytes)", block_data.height, block_data.block_data.len());
+
+                        let engine = sync_engine_clone.read().await;
+                        let result = match engine.process_block(block_data.height, block_data.block_data, block_data.block_hash).await {
+                            Ok(_) => {
+                                info!("PROCESSOR: Completed block {} in {:?}", block_data.height, block_start.elapsed());
+                                BlockResult::Success(block_data.height)
+                            },
+                            Err(e) => {
+                                error!("PROCESSOR: Failed block {} after {:?}: {}", block_data.height, block_start.elapsed(), e);
+                                BlockResult::Error(block_data.height, e.into())
+                            },
+                        };
+                        drop(engine);
+
+                        if result_sender_clone.send(result).await.is_err() {
+                            break;
+                        }
+                    }
+                    debug!("Block processor task completed.");
+                });
             }
-            debug!("Block processor task completed.");
-        }
-    });
+        })
+        .expect("Failed to spawn processor thread");
 
     let indexer_handle = tokio::spawn({
         let sync_engine_clone = sync_engine_arc.clone();
@@ -559,9 +571,11 @@ where
                 error!("Fetcher task failed: {}", e);
             }
         }
-        result = processor_handle => {
-            if let Err(e) = result {
-                error!("Processor task failed: {}", e);
+        result = tokio::task::spawn_blocking(move || processor_handle.join()) => {
+            match result {
+                Ok(Ok(_)) => {},
+                Ok(Err(_)) => error!("Processor thread panicked"),
+                Err(e) => error!("Processor join task failed: {}", e),
             }
         }
         result = indexer_handle => {

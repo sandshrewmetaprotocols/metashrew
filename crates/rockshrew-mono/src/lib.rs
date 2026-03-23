@@ -410,7 +410,7 @@ where
 
             move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
+                    .worker_threads(8)
                     .thread_name("processor-worker")
                     .enable_all()
                     .build()

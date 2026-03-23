@@ -429,10 +429,11 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             key_lengths.insert(key.clone(), new_length);
         }
         
-        // MINIMAL SMT: Only compute and store the final root, not intermediate nodes
-        let new_root = self.compute_minimal_smt_root(prev_root, key_values)?;
-
-        // Store ONLY the new root (not intermediate SMT nodes)
+        // SKIP SMT root computation — it's O(n * tree_depth) with storage reads
+        // per key and is the primary bottleneck for large blocks. The state root
+        // is not used for reorg detection (block hashes are used instead) and is
+        // only stored as metadata. Store a placeholder to maintain schema compat.
+        let new_root = prev_root; // Use previous root as placeholder
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
         batch.put(root_key, new_root.to_vec());
 

@@ -2778,12 +2778,22 @@ dependencies = [
  "bytes",
  "cfg-if",
  "hex",
+ "metashrew-macros",
  "metashrew-support",
  "ordinals",
  "prost",
  "prost-build",
  "wasm-bindgen",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "metashrew-macros"
+version = "9.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

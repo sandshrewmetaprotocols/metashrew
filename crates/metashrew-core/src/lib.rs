@@ -94,6 +94,7 @@ pub mod proto;
 use crate::compat::panic_hook;
 use crate::imports::{__flush, __get, __get_len, __host_len, __load_input};
 pub use crate::stdio::stdout;
+pub use metashrew_macros::{main, view};
 #[allow(unused_imports)]
 use metashrew_support::{
 	compat::{to_arraybuffer_layout, to_passback_ptr, to_ptr},

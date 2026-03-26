@@ -22,6 +22,7 @@ prost.workspace = true
 anyhow = "1.0.89"
 wasm-bindgen-test = "0.3.49"
 hex = "0.4.3"
+metashrew-macros = { path = "../metashrew-macros" }
 metashrew-support = { path = "../metashrew-support" }
 
 [build-dependencies]

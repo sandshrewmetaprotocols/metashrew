@@ -382,14 +382,9 @@ pub fn initialize() -> () {
 /// // Return ptr from your view function
 /// ```
 pub fn export_bytes(bytes: Vec<u8>) -> i32 {
-    // Create a buffer with the length prefix
-    let mut buffer = Vec::with_capacity(bytes.len() + 4);
-    let len = bytes.len() as u32;
-    buffer.extend_from_slice(&len.to_le_bytes());
-    buffer.extend_from_slice(&bytes);
-
-    // Return a pointer to the buffer
-    to_ptr(&mut buffer)
+    // Use the canonical ArrayBuffer export from metashrew-support
+    // which returns ptr+4 (pointing past the length prefix)
+    metashrew_support::compat::export_bytes(bytes)
 }
 
 /// Reset the flush queue

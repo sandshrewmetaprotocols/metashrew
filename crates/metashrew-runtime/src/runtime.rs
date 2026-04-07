@@ -1885,10 +1885,9 @@ pub async fn setup_linker_view(
                 move |mut caller: Caller<'_, State>, encoded: i32| {
                     let context_ref = context_ref.clone();
                     Box::new(async move {
-                        // Optimize: Lock once to get both height and db, reducing lock contention
-                        let (height, db) = {
+                        let (height, mut db, fast_sync) = {
                             let guard = context_ref.read().await;
-                            (guard.height, guard.db.clone())
+                            (guard.height, guard.db.clone(), guard.fast_sync)
                         };
 
                         let mem = match caller.get_export("memory") {
@@ -1914,8 +1913,6 @@ pub async fn setup_linker_view(
                             }
                         };
 
-                        let _batch = T::Batch::default();
-
                         let decoded = match KeyValueFlush::decode(&*encoded_vec) {
                             Ok(d) => d,
                             Err(_e) => {
@@ -1924,13 +1921,6 @@ pub async fn setup_linker_view(
                             }
                         };
 
-                        // Use optimized BatchedSMTHelper for better performance
-                        let mut batched_smt = crate::smt::BatchedSMTHelper::new(db.clone());
-
-                        // Collect all key-value pairs for batch processing
-                        // This is the new, correct flow for handling state updates.
-                        // All key-value pairs are collected and passed to a single, atomic
-                        // function that handles both the SMT update and the historical append-only storage.
                         let key_values: Vec<(Vec<u8>, Vec<u8>)> = decoded
                             .list
                             .iter()
@@ -1938,39 +1928,42 @@ pub async fn setup_linker_view(
                             .map(|(k, v)| (k.clone(), v.clone()))
                             .collect();
 
-                        // Track key-value updates for any external listeners (like snapshotting)
-                        // Optimize: Use the db we already cloned to avoid additional lock
-                        {
-                            let mut db_for_tracking = db.clone();
-                            // Track updates without holding the context lock
+                        if fast_sync {
+                            // Fast path: write raw k/v pairs directly, no append-only format
+                            let mut batch = db.create_batch();
                             for (k, v) in &key_values {
-                                db_for_tracking.track_kv_update(k.clone(), v.clone());
+                                batch.put(k, v);
                             }
-                        }
-
-                        // The new `calculate_and_store_state_root_batched` will handle all database writes atomically.
-                        // It will be refactored to accept key-value pairs directly.
-                        match batched_smt.calculate_and_store_state_root_batched(height, &key_values) {
-                            Ok(state_root) => {
-                                log::info!(
-                                    "indexed block {} with {} k/v pairs atomically, state root: {}",
-                                    height,
-                                    key_values.len(),
-                                    hex::encode(state_root)
-                                );
-                            },
-                            Err(e) => {
-                                log::error!("failed to calculate state root for height {}: {:?}", height, e);
+                            // Update tip height
+                            batch.put(
+                                &TIP_HEIGHT_KEY.as_bytes().to_vec(),
+                                &height.to_le_bytes(),
+                            );
+                            if let Err(e) = db.write(batch) {
+                                log::error!("fast flush failed at height {}: {:?}", height, e);
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
+                        } else {
+                            // Standard path: append-only format for historical queries
+                            let mut batched_smt = crate::smt::BatchedSMTHelper::new(db.clone());
+
+                            for (k, v) in &key_values {
+                                db.track_kv_update(k.clone(), v.clone());
+                            }
+
+                            match batched_smt.calculate_and_store_state_root_batched(height, &key_values) {
+                                Ok(_state_root) => {},
+                                Err(e) => {
+                                    log::error!("flush failed at height {}: {:?}", height, e);
+                                    caller.data_mut().had_failure = true;
+                                    return;
+                                }
+                            }
                         }
 
-                        // Set completion state — uses atomic store, no write lock needed
-                        // This is critical: acquiring a write lock here would block all
-                        // concurrent view function read locks on the context
-                        let context_clone = context_ref.clone();
-                        let ctx = context_clone.read().await;
+                        // Set completion state
+                        let ctx = context_ref.read().await;
                         ctx.state.store(1, std::sync::atomic::Ordering::SeqCst);
                     })
                 },
@@ -2014,50 +2007,51 @@ pub async fn setup_linker_view(
                         let data = mem.data(&caller);
                         let key_vec_result = try_read_arraybuffer_as_vec(data, key);
 
-                        // Optimize: Lock once to get both height and db, reducing lock contention
-                        let (height, db) = {
+                        let (height, mut db, fast_sync) = {
                             let guard = context_get.read().await;
-                            (guard.height, guard.db.clone())
+                            (guard.height, guard.db.clone(), guard.fast_sync)
                         };
 
                         match key_vec_result {
                             Ok(key_vec) => {
-                                // During indexing, get the state as it was at the *previous* block
-                                // to correctly build upon the previous state, especially during reorgs.
-                                // If height is 0, there is no parent, so we read at height 0 (which will be empty).
-                                let target_height = if height > 0 { height - 1 } else { 0 };
-                                // Use db directly to avoid additional lock in get_value_at_height
-                                let smt_helper = crate::smt::SMTHelper::new(db);
-                                let lookup = match smt_helper.get_at_height(&key_vec, target_height) {
-                                    Ok(Some(value)) => Ok(value),
-                                    Ok(None) => Ok(Vec::new()),
-                                    Err(e) => Err(anyhow::anyhow!("Append-only query error: {}", e)),
+                                let lookup = if fast_sync {
+                                    // Fast path: direct k/v read
+                                    match db.get(&key_vec) {
+                                        Ok(Some(v)) => Ok(v),
+                                        Ok(None) => Ok(Vec::new()),
+                                        Err(e) => Err(anyhow::anyhow!("DB read error: {:?}", e)),
+                                    }
+                                } else {
+                                    // Standard path: append-only historical read
+                                    let target_height = if height > 0 { height - 1 } else { 0 };
+                                    let smt_helper = crate::smt::SMTHelper::new(db);
+                                    match smt_helper.get_at_height(&key_vec, target_height) {
+                                        Ok(Some(value)) => Ok(value),
+                                        Ok(None) => Ok(Vec::new()),
+                                        Err(e) => Err(anyhow::anyhow!("Append-only query error: {}", e)),
+                                    }
                                 };
 
                                 match lookup {
                                     Ok(lookup) => {
-                                        // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
                                         mem.write(&mut caller, value as usize, lookup.as_slice())
-                                            .expect("FATAL: __get memory write failed - WASM memory bounds exceeded. This indicates insufficient memory allocation or memory corruption.");
+                                            .expect("FATAL: __get memory write failed");
                                     }
                                     Err(_) => {
-                                        // Key not found, return empty
-                                        // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
                                         mem.write(&mut caller, value as usize, &[])
-                                            .expect("FATAL: __get memory write failed for empty value - WASM memory bounds exceeded.");
+                                            .expect("FATAL: __get memory write failed for empty value");
                                     }
                                 }
                             }
                             Err(_) => {
                                 let error_bits = u32_to_vec(i32::MAX.try_into().unwrap())
                                     .expect("FATAL: Failed to convert error code to bytes");
-                                // CRITICAL: Memory write failures are FATAL to prevent silent state corruption
                                 mem.write(
                                     &mut caller,
                                     (value - 4) as usize,
                                     error_bits.as_slice(),
                                 )
-                                .expect("FATAL: __get memory write failed for error bits - WASM memory bounds exceeded.");
+                                .expect("FATAL: __get memory write failed for error bits");
                             }
                         }
                     })
@@ -2091,20 +2085,25 @@ pub async fn setup_linker_view(
                         let key_vec_result = try_read_arraybuffer_as_vec(data, key);
 
                         let context_clone = context_get_len.clone();
-                        let (_db, height) = {
+                        let (mut db, height, fast_sync) = {
                             let ctx = context_clone.read().await;
-                            (ctx.db.clone(), ctx.height)
+                            (ctx.db.clone(), ctx.height, ctx.fast_sync)
                         };
 
                         match key_vec_result {
                             Ok(key_vec) => {
-                                // During indexing, get the state as it was at the *previous* block.
-                                let target_height = if height > 0 { height - 1 } else { 0 };
-                                let lookup = Self::get_value_at_height(context_clone, &key_vec, target_height).await;
-
-                                match lookup {
-                                    Ok(value) => value.len() as i32,
-                                    Err(_) => 0,
+                                if fast_sync {
+                                    match db.get(&key_vec) {
+                                        Ok(Some(v)) => v.len() as i32,
+                                        _ => 0,
+                                    }
+                                } else {
+                                    let target_height = if height > 0 { height - 1 } else { 0 };
+                                    let lookup = Self::get_value_at_height(context_clone, &key_vec, target_height).await;
+                                    match lookup {
+                                        Ok(value) => value.len() as i32,
+                                        Err(_) => 0,
+                                    }
                                 }
                             }
                             Err(_) => i32::MAX,

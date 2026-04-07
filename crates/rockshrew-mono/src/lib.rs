@@ -80,7 +80,8 @@ use rockshrew_runtime::{
     query_height, RocksDBStorageAdapter,
 };
 use tokio::sync::mpsc;
-use num_cpus;
+
+const DEFAULT_PREFETCH_SIZE: usize = 64;
 
 #[derive(Debug)]
 struct BlockData {
@@ -135,6 +136,12 @@ pub struct Args {
     pub max_reorg_depth: u32,
     #[arg(long, default_value_t = 6)]
     pub reorg_check_threshold: u32,
+    #[arg(long)]
+    pub prefetch_size: Option<usize>,
+    /// Enable fast sync mode: writes raw k/v pairs directly without append-only
+    /// historical format. Much faster initial sync but no historical state queries.
+    #[arg(long, default_value_t = false)]
+    pub fast_sync: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -321,19 +328,14 @@ where
         sync_engine: sync_engine_arc.clone(),
     });
 
-    // Pipeline size is no longer used - we enforce serial processing with channel size 1
-    let _pipeline_size = args.pipeline_size.unwrap_or_else(|| {
-        let available_cpus = num_cpus::get();
-        let auto_size = std::cmp::min(std::cmp::max(5, available_cpus / 2), 16);
-        info!("Note: Pipeline size configuration ({}) is ignored - using serial processing", auto_size);
-        auto_size
-    });
+    let prefetch_size = args.prefetch_size.unwrap_or(DEFAULT_PREFETCH_SIZE);
+    info!("Block prefetch buffer size: {}", prefetch_size);
 
-    // CRITICAL: Use channel size of 1 to enforce strict serial processing
-    // This ensures block N+1 cannot be fetched until block N is fully processed and committed
-    // Prevents out-of-order processing and duplicate block indexing
-    let (block_sender, mut block_receiver) = mpsc::channel::<BlockData>(1);
-    let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(1);
+    // Prefetch channel: fetcher fills this buffer with blocks fetched concurrently,
+    // processor pulls them out sequentially. The channel enforces backpressure —
+    // when full, the fetcher waits until the processor consumes blocks.
+    let (block_sender, mut block_receiver) = mpsc::channel::<BlockData>(prefetch_size);
+    let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(prefetch_size);
 
     let fetcher_handle = tokio::spawn({
         let sync_engine_clone = sync_engine_arc.clone();
@@ -341,58 +343,120 @@ where
         let exit_at = args.exit_at;
 
         async move {
-            info!("Block fetcher task started.");
+            info!("Block fetcher task started (prefetch_size={}).", prefetch_size);
             loop {
+                // Get current state
                 let engine = sync_engine_clone.read().await;
+
                 if let Some(exit_at) = exit_at {
                     let current_indexed_height = match engine.get_height().await {
-                    Ok(h) => h,
-                    Err(e) => {
-                        error!("Failed to get current indexed height: {}", e);
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                        continue;
-                    }
-                };
-                if current_indexed_height >= exit_at {
+                        Ok(h) => h,
+                        Err(e) => {
+                            error!("Failed to get current indexed height: {}", e);
+                            drop(engine);
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                            continue;
+                        }
+                    };
+                    if current_indexed_height >= exit_at {
                         info!("Fetcher reached exit-at block {}, shutting down", exit_at);
                         break;
                     }
                 }
 
-                let current_height = engine.current_height();
-                {
-                    let processing_heights = engine.processing_heights.lock().await;
-                    if processing_heights.contains(&current_height) {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let fetch_start = engine.current_height();
+                let remote_tip = match engine.node().get_tip_height().await {
+                    Ok(tip) => tip,
+                    Err(e) => {
+                        error!("Failed to get tip height: {}", e);
+                        drop(engine);
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         continue;
+                    }
+                };
+
+                // Check for reorgs when close to tip
+                if remote_tip.saturating_sub(fetch_start) <= engine.config.reorg_check_threshold {
+                    // Fall back to single-block fetch near tip (reorg-safe)
+                    match engine.get_next_block_data().await {
+                        Ok(Some((height, block_data, block_hash))) => {
+                            drop(engine);
+                            if block_sender_clone.send(BlockData { height, block_data, block_hash }).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => {
+                            drop(engine);
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        Err(e) => {
+                            error!("Failed to fetch block: {}", e);
+                            drop(engine);
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                    }
+                    continue;
+                }
+
+                // Batch prefetch: fetch up to prefetch_size blocks concurrently
+                let fetch_end = std::cmp::min(
+                    fetch_start + prefetch_size as u32,
+                    remote_tip + 1,
+                );
+                if fetch_start >= fetch_end {
+                    drop(engine);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+
+                let batch_size = (fetch_end - fetch_start) as usize;
+                let node = engine.node().clone();
+                drop(engine); // Release engine lock before concurrent fetches
+
+                debug!("FETCHER: Prefetching blocks {}..{} ({} blocks)", fetch_start, fetch_end - 1, batch_size);
+
+                // Spawn concurrent fetch tasks
+                let mut fetch_handles = Vec::with_capacity(batch_size);
+                for h in fetch_start..fetch_end {
+                    let node_clone = node.clone();
+                    fetch_handles.push(tokio::spawn(async move {
+                        let info = node_clone.get_block_info(h).await?;
+                        Ok::<BlockData, metashrew_sync::SyncError>(BlockData {
+                            height: h,
+                            block_data: info.data,
+                            block_hash: info.hash,
+                        })
+                    }));
+                }
+
+                // Collect results in order and send to processor
+                let mut abort_remaining = false;
+                for (i, handle) in fetch_handles.into_iter().enumerate() {
+                    if abort_remaining {
+                        handle.abort();
+                        continue;
+                    }
+                    match handle.await {
+                        Ok(Ok(block)) => {
+                            debug!("FETCHER: Fetched block {} ({} bytes)", block.height, block.block_data.len());
+                            if block_sender_clone.send(block).await.is_err() {
+                                abort_remaining = true;
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            error!("FETCHER: Failed to fetch block {}: {}", fetch_start + i as u32, e);
+                            abort_remaining = true;
+                        }
+                        Err(e) => {
+                            error!("FETCHER: Fetch task panicked for block {}: {}", fetch_start + i as u32, e);
+                            abort_remaining = true;
+                        }
                     }
                 }
 
-                match engine.get_next_block_data().await {
-                    Ok(Some((height, block_data, block_hash))) => {
-                        info!("FETCHER: Fetched block {} ({} bytes), adding to processing queue", height, block_data.len());
-                        {
-                            let mut processing_heights = engine.processing_heights.lock().await;
-                            if !processing_heights.insert(height) {
-                                error!("FETCHER: Block {} was already in processing_heights! Duplicate fetch detected!", height);
-                            }
-                        }
-                        // This send will block if channel is full (size=1), ensuring serial processing
-                        info!("FETCHER: Sending block {} to processor", height);
-                        if block_sender_clone.send(BlockData { height, block_data, block_hash }).await.is_err() {
-                            break;
-                        }
-                        info!("FETCHER: Block {} sent to processor", height);
-                    }
-                    Ok(None) => {
-                        debug!("No new blocks available, waiting...");
-                        drop(engine);
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
-                    Err(e) => {
-                        error!("Failed to fetch block: {}", e);
-                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    }
+                if abort_remaining {
+                    // On error, the processor will handle retry via the result channel
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }
             debug!("Block fetcher task completed.");
@@ -410,7 +474,7 @@ where
 
             move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(8)
+                    .worker_threads(4)
                     .thread_name("processor-worker")
                     .enable_all()
                     .build()
@@ -420,12 +484,14 @@ where
                     info!("Block processor task started (dedicated runtime).");
                     while let Some(block_data) = block_receiver.recv().await {
                         let block_start = Instant::now();
-                        info!("PROCESSOR: Starting block {} ({} bytes)", block_data.height, block_data.block_data.len());
 
                         let engine = sync_engine_clone.read().await;
                         let result = match engine.process_block(block_data.height, block_data.block_data, block_data.block_hash).await {
                             Ok(_) => {
-                                info!("PROCESSOR: Completed block {} in {:?}", block_data.height, block_start.elapsed());
+                                let elapsed = block_start.elapsed();
+                                if elapsed > std::time::Duration::from_secs(1) {
+                                    warn!("Slow block {} took {:?}", block_data.height, elapsed);
+                                }
                                 BlockResult::Success(block_data.height)
                             },
                             Err(e) => {
@@ -450,55 +516,30 @@ where
         async move {
         info!("Starting block indexing process...");
         let mut block_count = 0u64;
-        let mut total_processing_time = std::time::Duration::ZERO;
         let start_time = Instant::now();
 
         while let Some(result) = result_receiver.recv().await {
             match result {
                 BlockResult::Success(height) => {
-                    info!("INDEXER: Received success for block {}, updating state", height);
-                    let engine = sync_engine_clone.read().await;
-                    let mut processing_heights = engine.processing_heights.lock().await;
-                    let was_processing = processing_heights.remove(&height);
-                    if !was_processing {
-                        error!("INDEXER: Block {} was not in processing_heights! Possible duplicate processing!", height);
-                    }
-                    drop(processing_heights);
-                    drop(engine);
-                    
-                    let block_duration = start_time.elapsed(); // This is not block duration, but time since start
                     block_count += 1;
-                    total_processing_time += block_duration;
-
-                    if block_duration > std::time::Duration::from_millis(500) {
-                        warn!("Slow block processing at height {}: {:?}", height, block_duration);
-                    }
 
                     if block_count % 100 == 0 {
-                        let avg_time = total_processing_time / block_count as u32;
                         let elapsed = start_time.elapsed();
                         let blocks_per_sec = block_count as f64 / elapsed.as_secs_f64();
                         info!(
-                            "Performance: {} blocks processed, avg: {:?}/block, rate: {:.2} blocks/sec",
-                            block_count, avg_time, blocks_per_sec
+                            "Sync: height={}, {} blocks, {:.1} blocks/sec",
+                            height, block_count, blocks_per_sec
                         );
                     }
-                    info!("INDEXER: Block {} fully committed, ready for next block", height);
                 }
                 BlockResult::Error(height, error) => {
-                    error!("INDEXER: Received error for block {}: {}", height, error);
-                    let engine = sync_engine_clone.read().await;
-                    let mut processing_heights = engine.processing_heights.lock().await;
-                    processing_heights.remove(&height);
-                    drop(processing_heights);
-
                     let error_str = error.to_string();
 
                     // Check if this is a chain validation error - trigger reorg handling
                     if error_str.contains("does not connect to previous block") || error_str.contains("CHAIN DISCONTINUITY") {
-                        warn!("Chain discontinuity detected at height {}. Triggering reorg handling.", height);
+                        warn!("Chain discontinuity at height {}. Triggering reorg.", height);
 
-                        // Trigger reorg handling to find common ancestor and rollback
+                        let engine = sync_engine_clone.read().await;
                         match metashrew_sync::sync::handle_reorg(
                             height,
                             engine.node().clone(),
@@ -510,17 +551,16 @@ where
                         {
                             Ok(rollback_height) => {
                                 info!("Rolled back to height {}. Resuming sync.", rollback_height);
-                                // The sync engine will pick up from the new height
                             }
                             Err(e) => {
                                 error!("Failed to handle reorg: {}", e);
                             }
                         }
+                        drop(engine);
                     }
 
-                    drop(engine);
                     error!("Failed to process block {}: {}", height, error_str);
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
             }
             if let Some(exit_at) = args.exit_at {
@@ -665,6 +705,10 @@ pub async fn run_prod(args: Args) -> Result<()> {
         config_engine.async_support(true);
         let engine = wasmtime::Engine::new(&config_engine)?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
+        if args.fast_sync {
+            info!("Fast sync mode enabled — direct k/v writes, no historical format");
+            runtime.context.write().await.fast_sync = true;
+        }
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =
             MetashrewRuntimeAdapter::new(Arc::new(runtime));

@@ -687,7 +687,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
         config_engine.async_support(true);
         let engine = wasmtime::Engine::new(&config_engine)?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter, engine).await?;
-        let storage_adapter = match runtime.context.read().await.db {
+        let storage_adapter = match runtime.context.read().unwrap().db {
             ForkAdapter::Modern(ref modern_adapter) => {
                 RocksDBStorageAdapter::new(modern_adapter.db.clone())
             }
@@ -707,7 +707,7 @@ pub async fn run_prod(args: Args) -> Result<()> {
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
         if args.fast_sync {
             info!("Fast sync mode enabled — direct k/v writes, no historical format");
-            runtime.context.write().await.fast_sync = true;
+            runtime.context.write().unwrap().fast_sync = true;
         }
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =

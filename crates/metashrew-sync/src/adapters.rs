@@ -135,7 +135,7 @@ where
     async fn process_block(&self, height: u32, block_data: &[u8]) -> SyncResult<()> {
         // Set block data and height in context
         {
-            let mut context = self.runtime.context.write().await;
+            let mut context = self.runtime.context.write().unwrap();
             context.block = block_data.to_vec();
             context.height = height;
             context.db.set_height(height);
@@ -218,7 +218,7 @@ where
     async fn get_stats(&self) -> SyncResult<RuntimeStats> {
         let memory_usage_bytes = 0;
         let blocks_processed = {
-            let context = self.runtime.context.read().await;
+            let context = self.runtime.context.read().unwrap();
             context.height
         };
         Ok(RuntimeStats {

@@ -365,11 +365,19 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         }
     }
 
-    /// Optimized batch calculation of state root for multiple keys with minimal storage
+    /// Optimized batch calculation of state root for multiple keys with minimal storage.
+    ///
+    /// All writes — SMT updates, length counters, state-root marker, manifest,
+    /// runtime tip-height, sync-framework indexed-height, and block-hash record —
+    /// are bundled into a single atomic RocksDB batch so a process crash, OOM kill,
+    /// or ENOSPC anywhere in the path leaves the database at either height N-1 or
+    /// height N, never a partial mix. `block_hash` may be empty for callers that
+    /// don't track it (tests, legacy fast paths).
     pub fn calculate_and_store_state_root_batched(
         &mut self,
         height: u32,
         key_values: &[(Vec<u8>, Vec<u8>)],
+        block_hash: &[u8],
     ) -> Result<[u8; 32]> {
         // Clear caches at start of block processing
         self.clear_caches();
@@ -383,18 +391,8 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             EMPTY_NODE_HASH
         };
 
-        if key_values.is_empty() {
-            let mut batch = self.storage.create_batch();
-            let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-            batch.put(root_key, prev_root.to_vec());
-            self.storage.write(batch)
-                .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-            return Ok(prev_root);
-        }
-
-        // Create a batch for all operations
         let mut batch = self.storage.create_batch();
-        
+
         // Use a map to track key lengths within this batch to handle multiple
         // updates to the same key correctly.
         let mut key_lengths: HashMap<Vec<u8>, u32> = HashMap::new();
@@ -428,17 +426,17 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             batch.put(&length_key, new_length.to_string().as_bytes());
             key_lengths.insert(key.clone(), new_length);
         }
-        
+
         // SKIP SMT root computation — it's O(n * tree_depth) with storage reads
         // per key and is the primary bottleneck for large blocks. The state root
         // is not used for reorg detection (block hashes are used instead) and is
         // only stored as metadata. Store a placeholder to maintain schema compat.
-        let new_root = prev_root; // Use previous root as placeholder
+        let new_root = prev_root;
         let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-        batch.put(root_key, new_root.to_vec());
+        batch.put(&root_key, new_root.to_vec());
 
         // Write per-height manifest of modified keys for fast rollback
-        {
+        if !key_values.is_empty() {
             let mut unique_keys: Vec<&[u8]> = key_values.iter().map(|(k, _)| k.as_slice()).collect();
             unique_keys.sort_unstable();
             unique_keys.dedup();
@@ -447,11 +445,24 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             batch.put(&manifest_key, &manifest_value);
         }
 
-        // Update tip height
+        // Runtime-side tip pointer (used by view/preview lookups).
         batch.put(
             &crate::runtime::TIP_HEIGHT_KEY.as_bytes().to_vec(),
             &height.to_le_bytes(),
         );
+
+        // Sync-framework indexed-height pointer. Must move in lockstep with
+        // TIP_HEIGHT_KEY or the indexer can re-apply an already-committed block
+        // on restart, producing duplicate append-only entries and a divergent
+        // database. Same key as `RocksDBStorageAdapter::get_indexed_height`.
+        batch.put(b"__INTERNAL/height".as_ref(), &height.to_le_bytes());
+
+        // Sync-framework block-hash record. Same key as
+        // `RocksDBStorageAdapter::store_block_hash`.
+        if !block_hash.is_empty() {
+            let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
+            batch.put(&blockhash_key, block_hash);
+        }
 
         // Write entire batch at once
         self.storage.write(batch)

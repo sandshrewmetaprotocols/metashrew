@@ -115,6 +115,13 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// instead of doing historical binary search. This makes initial sync
     /// significantly faster at the cost of no historical state queries.
     pub fast_sync: bool,
+
+    /// Block hash for the current block, set by the sync framework before
+    /// WASM execution. Bundled into the same atomic batch as SMT writes so
+    /// that the indexer's height pointer, state-root marker, manifest, and
+    /// block-hash record either all commit or all abort. See
+    /// `BatchedSMTHelper::calculate_and_store_state_root_batched`.
+    pub current_block_hash: Vec<u8>,
 }
 
 impl<T: KeyValueStoreLike> Clone for MetashrewRuntimeContext<T>
@@ -128,6 +135,7 @@ where
             block: self.block.clone(),
             state: std::sync::atomic::AtomicU32::new(self.state.load(std::sync::atomic::Ordering::SeqCst)),
             fast_sync: self.fast_sync,
+            current_block_hash: self.current_block_hash.clone(),
         }
     }
 }
@@ -184,6 +192,7 @@ impl<T: KeyValueStoreLike> MetashrewRuntimeContext<T> {
             block,
             state: std::sync::atomic::AtomicU32::new(0),
             fast_sync: false,
+            current_block_hash: Vec::new(),
         }
     }
 

@@ -116,13 +116,18 @@ pub struct State {
     /// Set to maximum values to ensure deterministic behavior by avoiding
     /// dynamic resource allocation during execution.
     limits: StoreLimits,
-    
+
     /// Tracks execution failures in host functions
     ///
     /// When a host function encounters an error (e.g., database failure,
     /// memory access error), it sets this flag to signal the runtime
     /// that execution should be aborted.
-    had_failure: bool,
+    pub(crate) had_failure: bool,
+
+    /// Captures the last error from a __flush atomic write so the runtime
+    /// can surface ENOSPC / I/O errors instead of a generic "had failure"
+    /// message. Read by `process_block_atomic` after WASM execution returns.
+    pub(crate) last_flush_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl State {
@@ -150,6 +155,7 @@ impl State {
                 .instances(usize::MAX)
                 .build(),
             had_failure: false,
+            last_flush_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -1084,6 +1090,8 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let execution_result = {
             let mut instance_guard = self.instance.lock().await;
             let WasmInstance { ref mut store, instance } = &mut *instance_guard;
+            // Clear any error captured by a previous block before this run.
+            *store.data().last_flush_error.lock().unwrap() = None;
             let start = instance
                 .get_typed_func::<(), ()>(&mut *store, "_start")
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to get _start function")?;
@@ -1094,11 +1102,18 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             // Use call_async since we're using an async store
             match start.call_async(&mut *store, ()).await {
                 Ok(_) => {
-                    if self.context.read().unwrap().state.load(std::sync::atomic::Ordering::SeqCst) != 1
+                    let captured_err = store.data().last_flush_error.lock().unwrap().clone();
+                    if let Some(msg) = captured_err {
+                        log::error!("Block {} __flush atomic write failed: {}", height, msg);
+                        Err(anyhow!("__flush atomic write failed: {}", msg))
+                    } else if self.context.read().unwrap().state.load(std::sync::atomic::Ordering::SeqCst) != 1
                         && !store.data().had_failure
                     {
                         log::error!("Block {} indexer exited unexpectedly (state != 1 and no failure)", height);
                         Err(anyhow!("indexer exited unexpectedly"))
+                    } else if store.data().had_failure {
+                        log::error!("Block {} indexer host function reported failure", height);
+                        Err(anyhow!("indexer host function reported failure"))
                     } else {
                         log::info!("Block {} WASM execution completed successfully", height);
                         Ok(())
@@ -1846,9 +1861,14 @@ pub async fn setup_linker_view(
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
-                    let (height, mut db, fast_sync) = {
+                    let (height, mut db, fast_sync, block_hash) = {
                         let guard = context_ref.read().unwrap();
-                        (guard.height, guard.db.clone(), guard.fast_sync)
+                        (
+                            guard.height,
+                            guard.db.clone(),
+                            guard.fast_sync,
+                            guard.current_block_hash.clone(),
+                        )
                     };
 
                     let mem = match caller.get_export("memory") {
@@ -1890,6 +1910,9 @@ pub async fn setup_linker_view(
                         .collect();
 
                     if fast_sync {
+                        // Bundle everything (raw k/v + tip pointers + block-hash record)
+                        // into a single atomic batch. See the comment block on
+                        // `BatchedSMTHelper::calculate_and_store_state_root_batched`.
                         let mut batch = db.create_batch();
                         for (k, v) in &key_values {
                             batch.put(k, v);
@@ -1898,8 +1921,22 @@ pub async fn setup_linker_view(
                             &TIP_HEIGHT_KEY.as_bytes().to_vec(),
                             &height.to_le_bytes(),
                         );
+                        batch.put(b"__INTERNAL/height".as_ref(), &height.to_le_bytes());
+                        if !block_hash.is_empty() {
+                            let blockhash_key = format!(
+                                "/__INTERNAL/height-to-hash/{}", height
+                            ).into_bytes();
+                            batch.put(&blockhash_key, &block_hash);
+                        }
                         if let Err(e) = db.write(batch) {
-                            log::error!("fast flush failed at height {}: {:?}", height, e);
+                            log::error!(
+                                "fast flush atomic write failed at height {}: {:?} \
+                                 (likely ENOSPC or I/O error — block NOT committed, \
+                                 indexer will retry on next pass)",
+                                height, e
+                            );
+                            *caller.data_mut().last_flush_error.lock().unwrap() =
+                                Some(format!("{:?}", e));
                             caller.data_mut().had_failure = true;
                             return;
                         }
@@ -1908,10 +1945,21 @@ pub async fn setup_linker_view(
                         for (k, v) in &key_values {
                             db.track_kv_update(k.clone(), v.clone());
                         }
-                        match batched_smt.calculate_and_store_state_root_batched(height, &key_values) {
+                        match batched_smt.calculate_and_store_state_root_batched(
+                            height,
+                            &key_values,
+                            &block_hash,
+                        ) {
                             Ok(_) => {},
                             Err(e) => {
-                                log::error!("flush failed at height {}: {:?}", height, e);
+                                log::error!(
+                                    "flush atomic write failed at height {}: {:?} \
+                                     (likely ENOSPC or I/O error — block NOT committed, \
+                                     indexer will retry on next pass)",
+                                    height, e
+                                );
+                                *caller.data_mut().last_flush_error.lock().unwrap() =
+                                    Some(format!("{:?}", e));
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
@@ -2149,11 +2197,15 @@ pub async fn setup_linker_view(
         block_data: &[u8],
         block_hash: &[u8],
     ) -> Result<crate::traits::AtomicBlockResult> {
-        // Set the block data and height in context
+        // Set the block data and height in context. `current_block_hash` is
+        // bundled into the same atomic batch as the SMT writes inside __flush —
+        // see the comment block on
+        // `BatchedSMTHelper::calculate_and_store_state_root_batched`.
         {
             let mut guard = self.context.write().unwrap();
             guard.block = block_data.to_vec();
             guard.height = height;
+            guard.current_block_hash = block_hash.to_vec();
             guard.state.store(0, std::sync::atomic::Ordering::SeqCst);
         }
 
@@ -2164,6 +2216,8 @@ pub async fn setup_linker_view(
         let execution_result = {
             let mut instance_guard = self.instance.lock().await;
             let WasmInstance { store, instance } = &mut *instance_guard;
+            // Reset any error captured from a previous block before this run.
+            *store.data().last_flush_error.lock().unwrap() = None;
             let start = instance
                 .get_typed_func::<(), ()>(&mut *store, "_start")
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to get _start function")?;
@@ -2176,9 +2230,16 @@ pub async fn setup_linker_view(
                         guard.state.load(std::sync::atomic::Ordering::SeqCst)
                     };
 
-                    if context_state != 1 && !store.data().had_failure {
+                    let captured_err = store.data().last_flush_error.lock().unwrap().clone();
+                    if let Some(msg) = captured_err {
+                        Err(anyhow!("__flush atomic write failed: {}", msg))
+                    } else if context_state != 1 && !store.data().had_failure {
                         Err(anyhow!(
                             "indexer exited unexpectedly during atomic processing"
+                        ))
+                    } else if store.data().had_failure {
+                        Err(anyhow!(
+                            "indexer host function reported failure during atomic processing"
                         ))
                     } else {
                         Ok(())
@@ -2233,11 +2294,18 @@ pub async fn setup_linker_view(
 
     /// Process a block normally (non-atomic)
     pub async fn process_block(&self, height: u32, block_data: &[u8]) -> Result<()> {
-        // Set the block data and height in context
+        // Set the block data and height in context. The block_hash field is
+        // cleared here because callers of the non-atomic path don't supply one;
+        // __flush therefore skips the block-hash record write and the sync
+        // framework's `store_block_hash` is what makes that record durable. The
+        // height pointers are still bundled into __flush's atomic batch, so a
+        // crash before `store_block_hash` runs leaves only the block-hash
+        // record missing — recoverable via the same idempotent retry path.
         {
             let mut guard = self.context.write().unwrap();
             guard.block = block_data.to_vec();
             guard.height = height;
+            guard.current_block_hash = Vec::new();
             guard.state.store(0, std::sync::atomic::Ordering::SeqCst);
         }
 

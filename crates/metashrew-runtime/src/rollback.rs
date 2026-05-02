@@ -8,6 +8,16 @@ use anyhow::Result;
 use log::{debug, info, warn};
 use crate::smt::{MANIFEST_PREFIX, SMT_ROOT_PREFIX, deserialize_key_manifest};
 
+/// One write operation queued during rollback. Used by [`SmtRollback::apply_atomic`]
+/// so a backend that supports batching (e.g. RocksDB) can commit an entire height's
+/// rollback in a single atomic write — preventing partial state if the process is
+/// killed (OOM, SIGKILL) or the disk fills up mid-rollback.
+#[derive(Clone)]
+pub enum RollbackOp {
+    Put(Vec<u8>, Vec<u8>),
+    Delete(Vec<u8>),
+}
+
 /// Trait for rolling back SMT data during blockchain reorganizations
 pub trait SmtRollback {
     /// Iterate over all keys in storage (streaming, memory-efficient)
@@ -23,6 +33,19 @@ pub trait SmtRollback {
 
     /// Get value for a key
     fn get_value(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Apply a list of ops as a single atomic write. The default falls through
+    /// to individual `put_key` / `delete_key` calls and is therefore NOT atomic;
+    /// RocksDB and other backends with native batching MUST override this.
+    fn apply_atomic(&mut self, ops: &[RollbackOp]) -> Result<()> {
+        for op in ops {
+            match op {
+                RollbackOp::Put(k, v) => self.put_key(k, v)?,
+                RollbackOp::Delete(k) => self.delete_key(k)?,
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Parse height from an SMT update key
@@ -49,6 +72,14 @@ fn parse_height_from_smt_value(value: &[u8]) -> Option<u32> {
 /// 1. Delete metadata keys (block_hash_*, state_root_*, smt:root:*) for heights > rollback_height
 /// 2. Roll back append-only SMT data structures (keys with /length suffix)
 /// 3. This ensures all WASM-indexed data is properly cleaned up during reorgs
+///
+/// Memory profile: collects all `/length` base-key paths in memory before
+/// processing. The previous implementation silently truncated this list at
+/// 100k entries, which produced an incomplete (and therefore divergent)
+/// rollback on any database with more than 100k tracked keys. The cap is
+/// removed; on extremely large databases the operator may briefly see high
+/// RSS during reorg, but the database stays consistent. The fast manifest
+/// path (`rollback_with_manifests`) is preferred for any non-genesis reorg.
 pub fn rollback_smt_data<S: SmtRollback>(
     storage: &mut S,
     rollback_height: u32,
@@ -61,12 +92,14 @@ pub fn rollback_smt_data<S: SmtRollback>(
         return Ok(());
     }
 
-    // --- Step 1: Collect metadata keys to delete (streaming) ---
+    // --- Step 1: Single scan — collect metadata keys to delete and SMT base keys.
+    let length_suffix = b"/length";
     let mut metadata_keys_to_delete = Vec::new();
+    let mut base_keys: Vec<Vec<u8>> = Vec::new();
+
     storage.iter_keys(|key| {
         let key_str = String::from_utf8_lossy(key);
 
-        // Check for metadata keys and parse their height
         let metadata_height = if let Some(stripped) = key_str.strip_prefix("block_hash_") {
             stripped.parse::<u32>().ok()
         } else if let Some(stripped) = key_str.strip_prefix("state_root_") {
@@ -81,124 +114,115 @@ pub fn rollback_smt_data<S: SmtRollback>(
             if h > rollback_height {
                 metadata_keys_to_delete.push(key.to_vec());
             }
-        }
-        Ok(())
-    })?;
-
-    // Delete metadata keys
-    for key in &metadata_keys_to_delete {
-        storage.delete_key(key)?;
-    }
-    info!("Deleted {} metadata keys", metadata_keys_to_delete.len());
-
-    // --- Step 2: Collect base keys for SMT structures (streaming) ---
-    let length_suffix = b"/length";
-    let mut base_keys = Vec::new(); // Use Vec instead of HashSet to save memory
-    let max_keys_to_collect = 100_000; // Safety limit to prevent OOM
-
-    info!("Scanning for SMT structures to roll back...");
-    let mut total_length_keys_found = 0;
-    storage.iter_keys(|key| {
-        if key.ends_with(length_suffix) {
-            total_length_keys_found += 1;
+        } else if key.ends_with(length_suffix) {
             let base_key = &key[..key.len() - length_suffix.len()];
-
-            // Only collect up to max limit to prevent OOM
-            if base_keys.len() < max_keys_to_collect {
-                base_keys.push(base_key.to_vec());
-            }
-
-            // Log progress every 10000 keys
-            if total_length_keys_found % 10000 == 0 {
-                info!("Found {} SMT /length keys so far...", total_length_keys_found);
-            }
+            base_keys.push(base_key.to_vec());
         }
+
         Ok(())
     })?;
 
-    if total_length_keys_found > max_keys_to_collect {
-        warn!("WARNING: Found {} SMT structures, but can only process {} at a time due to memory limits.",
-              total_length_keys_found, max_keys_to_collect);
-        warn!("Consider implementing multi-pass rollback for very large databases.");
+    // Atomic delete of stale metadata records.
+    {
+        let ops: Vec<RollbackOp> = metadata_keys_to_delete
+            .iter()
+            .map(|k| RollbackOp::Delete(k.clone()))
+            .collect();
+        storage.apply_atomic(&ops)?;
+        info!("Deleted {} metadata keys atomically", metadata_keys_to_delete.len());
     }
 
-    // Deduplicate and sort for consistent processing
     base_keys.sort_unstable();
     base_keys.dedup();
+    info!(
+        "Collected {} unique SMT structures to process",
+        base_keys.len()
+    );
 
-    info!("Collected {} unique SMT structures to process (found {} total /length keys)",
-          base_keys.len(), total_length_keys_found);
-
-    // Process structures in batches to limit memory usage
-    let batch_size = 100; // Process 100 structures at a time
+    // Each SMT structure's read/modify/write ops commit atomically per
+    // structure. A crash between structures leaves earlier ones rolled back,
+    // later ones intact — all idempotent on retry.
     let mut smt_structures_rolled_back = 0;
 
-    for (batch_idx, batch) in base_keys.chunks(batch_size).enumerate() {
-        info!("Processing batch {} ({} structures)...", batch_idx + 1, batch.len());
+    for base_key in &base_keys {
+        let mut length_key = base_key.clone();
+        length_key.extend_from_slice(length_suffix);
 
-        for base_key in batch {
-            let mut length_key = base_key.clone();
-            length_key.extend_from_slice(length_suffix);
+        let old_length = if let Some(length_bytes) = storage.get_value(&length_key)? {
+            String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+        } else {
+            continue;
+        };
 
-            // Read the current length
-            let old_length = if let Some(length_bytes) = storage.get_value(&length_key)? {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            } else {
-                continue;
-            };
+        // Collect surviving updates (those at or below rollback_height).
+        let mut valid_updates = Vec::new();
+        for i in 0..old_length {
+            let update_key_suffix = format!("/{}", i);
+            let mut update_key = base_key.clone();
+            update_key.extend_from_slice(update_key_suffix.as_bytes());
 
-            // Collect valid updates (height <= rollback_height)
-            let mut valid_updates = Vec::new();
-            for i in 0..old_length {
-                let update_key_suffix = format!("/{}", i);
-                let mut update_key = base_key.clone();
-                update_key.extend_from_slice(update_key_suffix.as_bytes());
-
-                if let Some(update_data) = storage.get_value(&update_key)? {
-                    if let Some(update_height) = parse_height_from_smt_value(&update_data) {
-                        if update_height <= rollback_height {
-                            valid_updates.push((i, update_data));
-                        } else {
-                            debug!("Removing SMT update at height {} (> {})", update_height, rollback_height);
-                        }
+            if let Some(update_data) = storage.get_value(&update_key)? {
+                if let Some(update_height) = parse_height_from_smt_value(&update_data) {
+                    if update_height <= rollback_height {
+                        valid_updates.push((i, update_data));
+                    } else {
+                        debug!("Removing SMT update at height {} (> {})", update_height, rollback_height);
                     }
                 }
             }
+        }
 
-            // Remove all old entries
-            for i in 0..old_length {
-                let update_key_suffix = format!("/{}", i);
-                let mut update_key = base_key.clone();
-                update_key.extend_from_slice(update_key_suffix.as_bytes());
-                storage.delete_key(&update_key)?;
-            }
+        // Build a single atomic batch per structure: delete every old slot,
+        // re-insert the survivors at compacted indices, update or remove the
+        // /length entry.
+        let mut ops: Vec<RollbackOp> = Vec::with_capacity(old_length as usize + 1);
+        for i in 0..old_length {
+            let update_key_suffix = format!("/{}", i);
+            let mut update_key = base_key.clone();
+            update_key.extend_from_slice(update_key_suffix.as_bytes());
+            ops.push(RollbackOp::Delete(update_key));
+        }
+        for (new_index, (_, update_data)) in valid_updates.iter().enumerate() {
+            let update_key_suffix = format!("/{}", new_index);
+            let mut update_key = base_key.clone();
+            update_key.extend_from_slice(update_key_suffix.as_bytes());
+            ops.push(RollbackOp::Put(update_key, update_data.clone()));
+        }
+        let new_length = valid_updates.len() as u32;
+        if new_length > 0 {
+            ops.push(RollbackOp::Put(
+                length_key.clone(),
+                new_length.to_string().into_bytes(),
+            ));
+            debug!(
+                "SMT structure {} compacted from {} to {} entries",
+                String::from_utf8_lossy(base_key),
+                old_length,
+                new_length
+            );
+        } else {
+            ops.push(RollbackOp::Delete(length_key.clone()));
+            debug!(
+                "SMT structure {} completely removed (no valid entries)",
+                String::from_utf8_lossy(base_key)
+            );
+        }
 
-            // Re-insert valid entries with compacted indices
-            for (new_index, (_, update_data)) in valid_updates.iter().enumerate() {
-                let update_key_suffix = format!("/{}", new_index);
-                let mut update_key = base_key.clone();
-                update_key.extend_from_slice(update_key_suffix.as_bytes());
-                storage.put_key(&update_key, update_data)?;
-            }
+        storage.apply_atomic(&ops)?;
+        smt_structures_rolled_back += 1;
 
-            // Update or remove the length key
-            let new_length = valid_updates.len() as u32;
-            if new_length > 0 {
-                storage.put_key(&length_key, new_length.to_string().as_bytes())?;
-                debug!("SMT structure {} compacted from {} to {} entries", String::from_utf8_lossy(&base_key), old_length, new_length);
-            } else {
-                storage.delete_key(&length_key)?;
-                debug!("SMT structure {} completely removed (no valid entries)", String::from_utf8_lossy(&base_key));
-            }
-            smt_structures_rolled_back += 1;
-
-            if smt_structures_rolled_back % 1000 == 0 {
-                info!("Rolled back {} SMT structures so far...", smt_structures_rolled_back);
-            }
+        if smt_structures_rolled_back % 1000 == 0 {
+            info!(
+                "Rolled back {} SMT structures so far...",
+                smt_structures_rolled_back
+            );
         }
     }
 
-    info!("Successfully rolled back {} SMT data structures to height {}", smt_structures_rolled_back, rollback_height);
+    info!(
+        "Successfully rolled back {} SMT data structures to height {}",
+        smt_structures_rolled_back, rollback_height
+    );
     Ok(())
 }
 
@@ -236,13 +260,18 @@ pub fn rollback_with_manifests<S: SmtRollback>(
         }
     }
 
-    // All manifests exist — do the fast rollback
+    // All manifests exist — do the fast rollback. Each height's rollback is
+    // committed as a single atomic batch (`apply_atomic`) so an OOM kill or
+    // ENOSPC interrupting the loop leaves the database at a clean
+    // intermediate height — never with a half-trimmed append-only chain.
     let mut total_keys_rolled_back = 0;
 
     for h in ((rollback_height + 1)..=current_height).rev() {
         let manifest_key = format!("{}{}", MANIFEST_PREFIX, h).into_bytes();
         let manifest_data = storage.get_value(&manifest_key)?.unwrap();
         let keys = deserialize_key_manifest(&manifest_data);
+
+        let mut ops: Vec<RollbackOp> = Vec::new();
 
         for key in &keys {
             // For each key modified at this height, trim append-only entries
@@ -261,7 +290,7 @@ pub fn rollback_with_manifests<S: SmtRollback>(
                     if let Some(update_data) = storage.get_value(&update_key)? {
                         if let Some(entry_height) = parse_height_from_smt_value(&update_data) {
                             if entry_height > rollback_height {
-                                storage.delete_key(&update_key)?;
+                                ops.push(RollbackOp::Delete(update_key));
                                 new_length = i;
                             } else {
                                 break; // entries are ordered by height, stop early
@@ -272,26 +301,34 @@ pub fn rollback_with_manifests<S: SmtRollback>(
 
                 if new_length != length {
                     if new_length > 0 {
-                        storage.put_key(&length_key, new_length.to_string().as_bytes())?;
+                        ops.push(RollbackOp::Put(
+                            length_key.clone(),
+                            new_length.to_string().into_bytes(),
+                        ));
                     } else {
-                        storage.delete_key(&length_key)?;
+                        ops.push(RollbackOp::Delete(length_key.clone()));
                     }
                 }
             }
             total_keys_rolled_back += 1;
         }
 
-        // Delete manifest and metadata for this height
-        storage.delete_key(&manifest_key)?;
+        // Manifest and metadata records for this height go into the same
+        // atomic batch — so the manifest is never gone until the trims are
+        // also committed.
+        ops.push(RollbackOp::Delete(manifest_key));
+        ops.push(RollbackOp::Delete(
+            format!("{}{}", SMT_ROOT_PREFIX, h).into_bytes(),
+        ));
+        ops.push(RollbackOp::Delete(format!("block_hash_{}", h).into_bytes()));
+        ops.push(RollbackOp::Delete(format!("state_root_{}", h).into_bytes()));
+        // Sync-framework records written by `__flush` (atomic block-commit
+        // path) live under different key names — clear them too.
+        ops.push(RollbackOp::Delete(
+            format!("/__INTERNAL/height-to-hash/{}", h).into_bytes(),
+        ));
 
-        let root_key = format!("{}{}",SMT_ROOT_PREFIX, h).into_bytes();
-        storage.delete_key(&root_key)?;
-
-        let hash_key = format!("block_hash_{}", h).into_bytes();
-        storage.delete_key(&hash_key)?;
-
-        let state_key = format!("state_root_{}", h).into_bytes();
-        storage.delete_key(&state_key)?;
+        storage.apply_atomic(&ops)?;
     }
 
     info!(

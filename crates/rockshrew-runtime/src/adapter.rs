@@ -286,9 +286,12 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
     fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        Ok(Box::new(iter.map(|item| {
-            let (key, _) = item.unwrap();
-            key.to_vec()
+        Ok(Box::new(iter.filter_map(|item| match item {
+            Ok((key, _)) => Some(key.to_vec()),
+            Err(e) => {
+                log::error!("RocksDB iteration error in keys(): {}", e);
+                None
+            }
         })))
     }
 

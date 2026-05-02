@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-runtime"
-version = "9.0.1"
+version = "9.0.4-alpha.2"
 edition = "2021"
 
 [dependencies]

@@ -2,9 +2,12 @@
 
 use async_trait::async_trait;
 use log::{info, warn};
-use metashrew_runtime::{rollback::SmtRollback, KeyValueStoreLike};
+use metashrew_runtime::{
+    rollback::{RollbackOp, SmtRollback},
+    KeyValueStoreLike,
+};
 use metashrew_sync::{StorageAdapter, StorageStats, SyncError, SyncResult};
-use rocksdb::DB;
+use rocksdb::{WriteBatch, DB};
 use std::sync::Arc;
 
 use crate::adapter::RocksDBRuntimeAdapter;
@@ -50,6 +53,22 @@ impl SmtRollback for RocksDBStorageAdapter {
     fn get_value(&self, key: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.db.get(key)
             .map_err(|e| anyhow::anyhow!("Failed to get value: {}", e))
+    }
+
+    fn apply_atomic(&mut self, ops: &[RollbackOp]) -> anyhow::Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let mut batch = WriteBatch::default();
+        for op in ops {
+            match op {
+                RollbackOp::Put(k, v) => batch.put(k, v),
+                RollbackOp::Delete(k) => batch.delete(k),
+            }
+        }
+        self.db
+            .write(batch)
+            .map_err(|e| anyhow::anyhow!("Atomic rollback batch write failed: {}", e))
     }
 }
 

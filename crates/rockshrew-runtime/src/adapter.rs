@@ -5,7 +5,17 @@ use metashrew_runtime::{
     BatchLike, KVTrackerFn, KeyValueStoreLike, TIP_HEIGHT_KEY,
 };
 use rocksdb::{Options, WriteBatch, WriteBatchIterator, DB};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, RwLock};
+
+/// In-memory shadow used by the preview path. Maps labeled-key bytes to
+/// `Some(value)` for an override and `None` for a tombstone (delete). When
+/// an adapter holds a shadow, all writes (put/delete/write_batch) land in
+/// the shadow only — the underlying RocksDB is never touched. Reads check
+/// the shadow first and fall through to the underlying DB on miss. The
+/// shadow is dropped together with the adapter, which is exactly what
+/// `MetashrewRuntime::preview` needs to be side-effect free.
+type WriteShadow = Arc<RwLock<HashMap<Vec<u8>, Option<Vec<u8>>>>>;
 
 /// Optimized labeled key creation that avoids unnecessary allocations
 #[inline]
@@ -28,6 +38,13 @@ pub struct RocksDBRuntimeAdapter {
     pub fork_db: Option<Arc<DB>>,
     pub height: u32,
     pub kv_tracker: Arc<Mutex<Option<KVTrackerFn>>>,
+    /// `None` = production write-through: every put/delete/write hits the
+    /// underlying RocksDB. `Some(_)` = overlay/preview mode set up by
+    /// `create_isolated_copy()`: writes go to this in-memory map only,
+    /// reads check the map first then fall back to the DB. The shadow is
+    /// per-adapter-instance and dropped with it, so preview state never
+    /// outlives the call.
+    write_shadow: Option<WriteShadow>,
 }
 
 impl RocksDBRuntimeAdapter {
@@ -38,6 +55,7 @@ impl RocksDBRuntimeAdapter {
             fork_db: None,
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
+            write_shadow: None,
         }
     }
 
@@ -53,6 +71,7 @@ impl RocksDBRuntimeAdapter {
             fork_db: Some(Arc::new(fork_db)),
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
+            write_shadow: None,
         })
     }
 
@@ -63,6 +82,7 @@ impl RocksDBRuntimeAdapter {
             fork_db: None,
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
+            write_shadow: None,
         })
     }
 
@@ -91,6 +111,7 @@ impl RocksDBRuntimeAdapter {
             fork_db: None,
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
+            write_shadow: None,
         }
     }
 
@@ -185,24 +206,55 @@ impl<'a> WriteBatchIterator for BatchTracker<'a> {
     }
 }
 
+/// Apply a `WriteBatch` into the in-memory shadow map. Each `put` becomes
+/// `Some(value)`, each `delete` becomes `None` (a tombstone). Used by
+/// `KeyValueStoreLike::write` when the adapter is in overlay/preview mode.
+struct ShadowApplier<'a> {
+    shadow: std::sync::RwLockWriteGuard<'a, HashMap<Vec<u8>, Option<Vec<u8>>>>,
+}
+
+impl<'a> WriteBatchIterator for ShadowApplier<'a> {
+    fn put(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
+        self.shadow.insert(key.to_vec(), Some(value.to_vec()));
+    }
+    fn delete(&mut self, key: Box<[u8]>) {
+        self.shadow.insert(key.to_vec(), None);
+    }
+}
+
 impl KeyValueStoreLike for RocksDBRuntimeAdapter {
     type Batch = RocksDBBatch;
     type Error = rocksdb::Error;
 
     fn track_kv_update(&mut self, key: Vec<u8>, value: Vec<u8>) {
+        // Side-effect-free in overlay/preview mode: trackers exist for
+        // production observability (snapshots, audit), they should not
+        // observe transient preview mutations.
+        if self.write_shadow.is_some() {
+            return;
+        }
         self.track_kv_update_internal(key, value);
     }
 
     fn write(&mut self, batch: RocksDBBatch) -> Result<(), Self::Error> {
-        // Create atomic batch with height update
+        if let Some(shadow) = self.write_shadow.clone() {
+            let mut applier = ShadowApplier { shadow: shadow.write().unwrap() };
+            batch.0.iterate(&mut applier);
+            return Ok(());
+        }
+        // Production: create atomic batch with height update + write atomically
         let atomic_batch = self.create_atomic_batch(batch);
-
-        // Write atomically
         self.write_atomic_batch(atomic_batch)
     }
 
     fn get<K: AsRef<[u8]>>(&mut self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         let labeled_key = make_labeled_key_fast(key.as_ref());
+        if let Some(shadow) = &self.write_shadow {
+            if let Some(opt) = shadow.read().unwrap().get(&labeled_key) {
+                // shadow entry: Some(v) = override, None = tombstone
+                return Ok(opt.clone());
+            }
+        }
         match self.db.get(&labeled_key)? {
             Some(value) => Ok(Some(value.to_vec())),
             None => {
@@ -217,6 +269,11 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
     fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error> {
         let labeled_key = make_labeled_key_fast(key.as_ref());
+        if let Some(shadow) = &self.write_shadow {
+            if let Some(opt) = shadow.read().unwrap().get(&labeled_key) {
+                return Ok(opt.clone());
+            }
+        }
         match self.db.get(&labeled_key)? {
             Some(value) => Ok(Some(value.to_vec())),
             None => {
@@ -231,27 +288,35 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
         let labeled_key = make_labeled_key_fast(key.as_ref());
+        if let Some(shadow) = &self.write_shadow {
+            shadow.write().unwrap().insert(labeled_key, None);
+            return Ok(());
+        }
         self.db.delete(labeled_key)
     }
 
     fn put<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, key: K, value: V) -> Result<(), Self::Error> {
         let key_slice = key.as_ref();
         let value_slice = value.as_ref();
+        let labeled_key = make_labeled_key_fast(key_slice);
 
-        // Track the key-value update if a tracker is registered
-        // Only clone if we actually have a tracker to avoid unnecessary allocations
+        if let Some(shadow) = &self.write_shadow {
+            shadow
+                .write()
+                .unwrap()
+                .insert(labeled_key, Some(value_slice.to_vec()));
+            return Ok(());
+        }
+
+        // Production path — track if requested, then commit.
         let should_track = if let Ok(guard) = self.kv_tracker.lock() {
             guard.is_some()
         } else {
             false
         };
-        
         if should_track {
             self.track_kv_update(key_slice.to_vec(), value_slice.to_vec());
         }
-
-        // Perform the actual database update
-        let labeled_key = make_labeled_key_fast(key_slice);
         self.db.put(labeled_key, value_slice)
     }
 
@@ -259,12 +324,12 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         &self,
         prefix: K,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Self::Error> {
-        let mut results = Vec::new();
         let prefix_bytes = make_labeled_key_fast(prefix.as_ref());
 
+        // Collect underlying-DB matches first.
+        let mut results: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
         let mut iter = self.db.raw_iterator();
         iter.seek(&prefix_bytes);
-
         while iter.valid() {
             if let Some(key) = iter.key() {
                 if !key.starts_with(&prefix_bytes) {
@@ -277,6 +342,21 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
             iter.next();
         }
 
+        // Apply overlay: shadow entries override DB entries; tombstones remove them.
+        if let Some(shadow) = &self.write_shadow {
+            let shadow = shadow.read().unwrap();
+            // Drop any DB entry that is shadowed (override or tombstone).
+            results.retain(|(k, _)| !shadow.contains_key(k));
+            // Add overrides (Some(v)); tombstones (None) are excluded by construction.
+            for (k, v_opt) in shadow.iter() {
+                if k.starts_with(&prefix_bytes) {
+                    if let Some(v) = v_opt {
+                        results.push((k.clone(), v.clone()));
+                    }
+                }
+            }
+        }
+
         Ok(results)
     }
 
@@ -286,13 +366,30 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
     fn keys<'a>(&'a self) -> Result<Box<dyn Iterator<Item = Vec<u8>> + 'a>, Self::Error> {
         let iter = self.db.iterator(rocksdb::IteratorMode::Start);
-        Ok(Box::new(iter.filter_map(|item| match item {
+        let db_keys: Box<dyn Iterator<Item = Vec<u8>> + 'a> = Box::new(iter.filter_map(|item| match item {
             Ok((key, _)) => Some(key.to_vec()),
             Err(e) => {
                 log::error!("RocksDB iteration error in keys(): {}", e);
                 None
             }
-        })))
+        }));
+
+        if let Some(shadow) = &self.write_shadow {
+            // Snapshot the overlay so the iterator doesn't hold the lock.
+            let snapshot: HashMap<Vec<u8>, Option<Vec<u8>>> =
+                shadow.read().unwrap().clone();
+            let merged = db_keys
+                .filter(move |k| !snapshot.contains_key(k))
+                .chain({
+                    let snap2 = shadow.read().unwrap().clone();
+                    snap2
+                        .into_iter()
+                        .filter_map(|(k, v)| if v.is_some() { Some(k) } else { None })
+                });
+            Ok(Box::new(merged))
+        } else {
+            Ok(db_keys)
+        }
     }
 
     fn is_open(&self) -> bool {
@@ -305,6 +402,24 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
 
     fn get_height(&self) -> u32 {
         self.height
+    }
+
+    /// Override the trait default so the preview path actually gets an
+    /// isolated handle. The default impl is `self.clone()`, and since
+    /// `db: Arc<DB>` is shared, the "copy" wrote straight through to
+    /// production state. Here we instead clone the read-side handles
+    /// (Arc<DB>, Arc<DB> fork) but install a fresh in-memory shadow that
+    /// captures all writes; when this adapter is dropped the shadow is
+    /// gone and no production state has been touched.
+    fn create_isolated_copy(&self) -> Self {
+        RocksDBRuntimeAdapter {
+            db: self.db.clone(),
+            fork_db: self.fork_db.clone(),
+            height: self.height,
+            // Detach the kv_tracker — preview should not feed observability.
+            kv_tracker: Arc::new(Mutex::new(None)),
+            write_shadow: Some(Arc::new(RwLock::new(HashMap::new()))),
+        }
     }
 }
 

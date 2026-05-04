@@ -1861,12 +1861,11 @@ pub async fn setup_linker_view(
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
-                    let (height, mut db, fast_sync, block_hash) = {
+                    let (height, mut db, block_hash) = {
                         let guard = context_ref.read().unwrap();
                         (
                             guard.height,
                             guard.db.clone(),
-                            guard.fast_sync,
                             guard.current_block_hash.clone(),
                         )
                     };
@@ -1909,28 +1908,19 @@ pub async fn setup_linker_view(
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
 
-                    if fast_sync {
-                        // Bundle everything (raw k/v + tip pointers + block-hash record)
-                        // into a single atomic batch. See the comment block on
-                        // `BatchedSMTHelper::calculate_and_store_state_root_batched`.
-                        let mut batch = db.create_batch();
-                        for (k, v) in &key_values {
-                            batch.put(k, v);
-                        }
-                        batch.put(
-                            &TIP_HEIGHT_KEY.as_bytes().to_vec(),
-                            &height.to_le_bytes(),
-                        );
-                        batch.put(b"__INTERNAL/height".as_ref(), &height.to_le_bytes());
-                        if !block_hash.is_empty() {
-                            let blockhash_key = format!(
-                                "/__INTERNAL/height-to-hash/{}", height
-                            ).into_bytes();
-                            batch.put(&blockhash_key, &block_hash);
-                        }
-                        if let Err(e) = db.write(batch) {
+                    let mut batched_smt = crate::smt::BatchedSMTHelper::new(db.clone());
+                    for (k, v) in &key_values {
+                        db.track_kv_update(k.clone(), v.clone());
+                    }
+                    match batched_smt.calculate_and_store_state_root_batched(
+                        height,
+                        &key_values,
+                        &block_hash,
+                    ) {
+                        Ok(_) => {},
+                        Err(e) => {
                             log::error!(
-                                "fast flush atomic write failed at height {}: {:?} \
+                                "flush atomic write failed at height {}: {:?} \
                                  (likely ENOSPC or I/O error — block NOT committed, \
                                  indexer will retry on next pass)",
                                 height, e
@@ -1939,30 +1929,6 @@ pub async fn setup_linker_view(
                                 Some(format!("{:?}", e));
                             caller.data_mut().had_failure = true;
                             return;
-                        }
-                    } else {
-                        let mut batched_smt = crate::smt::BatchedSMTHelper::new(db.clone());
-                        for (k, v) in &key_values {
-                            db.track_kv_update(k.clone(), v.clone());
-                        }
-                        match batched_smt.calculate_and_store_state_root_batched(
-                            height,
-                            &key_values,
-                            &block_hash,
-                        ) {
-                            Ok(_) => {},
-                            Err(e) => {
-                                log::error!(
-                                    "flush atomic write failed at height {}: {:?} \
-                                     (likely ENOSPC or I/O error — block NOT committed, \
-                                     indexer will retry on next pass)",
-                                    height, e
-                                );
-                                *caller.data_mut().last_flush_error.lock().unwrap() =
-                                    Some(format!("{:?}", e));
-                                caller.data_mut().had_failure = true;
-                                return;
-                            }
                         }
                     }
 
@@ -1995,20 +1961,14 @@ pub async fn setup_linker_view(
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
 
-                    let (height, mut db, fast_sync) = {
+                    let (height, db) = {
                         let guard = context_get.read().unwrap();
-                        (guard.height, guard.db.clone(), guard.fast_sync)
+                        (guard.height, guard.db.clone())
                     };
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            let lookup = if fast_sync {
-                                match db.get(&key_vec) {
-                                    Ok(Some(v)) => Ok(v),
-                                    Ok(None) => Ok(Vec::new()),
-                                    Err(e) => Err(anyhow::anyhow!("DB read error: {:?}", e)),
-                                }
-                            } else {
+                            let lookup = {
                                 let target_height = if height > 0 { height - 1 } else { 0 };
                                 let smt_helper = crate::smt::SMTHelper::new(db);
                                 match smt_helper.get_at_height(&key_vec, target_height) {
@@ -2056,25 +2016,18 @@ pub async fn setup_linker_view(
                     let data = mem.data(&caller);
                     let key_vec_result = try_read_arraybuffer_as_vec(data, key);
 
-                    let (mut db, height, fast_sync) = {
+                    let (db, height) = {
                         let ctx = context_get_len.read().unwrap();
-                        (ctx.db.clone(), ctx.height, ctx.fast_sync)
+                        (ctx.db.clone(), ctx.height)
                     };
 
                     match key_vec_result {
                         Ok(key_vec) => {
-                            if fast_sync {
-                                match db.get(&key_vec) {
-                                    Ok(Some(v)) => v.len() as i32,
-                                    _ => 0,
-                                }
-                            } else {
-                                let target_height = if height > 0 { height - 1 } else { 0 };
-                                let smt_helper = crate::smt::SMTHelper::new(db);
-                                match smt_helper.get_at_height(&key_vec, target_height) {
-                                    Ok(Some(v)) => v.len() as i32,
-                                    _ => 0,
-                                }
+                            let target_height = if height > 0 { height - 1 } else { 0 };
+                            let smt_helper = crate::smt::SMTHelper::new(db);
+                            match smt_helper.get_at_height(&key_vec, target_height) {
+                                Ok(Some(v)) => v.len() as i32,
+                                _ => 0,
                             }
                         }
                         Err(_) => i32::MAX,

@@ -138,10 +138,6 @@ pub struct Args {
     pub reorg_check_threshold: u32,
     #[arg(long)]
     pub prefetch_size: Option<usize>,
-    /// Enable fast sync mode: writes raw k/v pairs directly without append-only
-    /// historical format. Much faster initial sync but no historical state queries.
-    #[arg(long, default_value_t = false)]
-    pub fast_sync: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -328,8 +324,23 @@ where
         sync_engine: sync_engine_arc.clone(),
     });
 
-    let prefetch_size = args.prefetch_size.unwrap_or(DEFAULT_PREFETCH_SIZE);
-    info!("Block prefetch buffer size: {}", prefetch_size);
+    // Cap the prefetch buffer at reorg_check_threshold so the fetcher can
+    // never have more in-flight blocks than the chain-validator's safety
+    // window. Without this cap (channel size up to 64 in v9.0.4-alpha.x),
+    // a reorg can land while N>threshold prefetched blocks are queued from
+    // the discarded fork, then committed before the chain-link discontinuity
+    // is detected — leaving rollback-invisible state behind. Capping makes
+    // strict-serial-near-tip enforcement automatic.
+    let requested = args.prefetch_size.unwrap_or(DEFAULT_PREFETCH_SIZE);
+    let prefetch_size = requested.min(args.reorg_check_threshold as usize).max(1);
+    if prefetch_size != requested {
+        info!(
+            "Block prefetch buffer requested={} capped={} (reorg_check_threshold={})",
+            requested, prefetch_size, args.reorg_check_threshold,
+        );
+    } else {
+        info!("Block prefetch buffer size: {}", prefetch_size);
+    }
 
     // Prefetch channel: fetcher fills this buffer with blocks fetched concurrently,
     // processor pulls them out sequentially. The channel enforces backpressure —
@@ -705,10 +716,6 @@ pub async fn run_prod(args: Args) -> Result<()> {
         config_engine.async_support(true);
         let engine = wasmtime::Engine::new(&config_engine)?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
-        if args.fast_sync {
-            info!("Fast sync mode enabled — direct k/v writes, no historical format");
-            runtime.context.write().unwrap().fast_sync = true;
-        }
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =
             MetashrewRuntimeAdapter::new(Arc::new(runtime));

@@ -110,12 +110,6 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     /// concurrent view function read locks.
     pub state: std::sync::atomic::AtomicU32,
 
-    /// When true, __flush writes raw k/v pairs directly to RocksDB without
-    /// append-only historical format or SMT overhead. __get reads raw values
-    /// instead of doing historical binary search. This makes initial sync
-    /// significantly faster at the cost of no historical state queries.
-    pub fast_sync: bool,
-
     /// Block hash for the current block, set by the sync framework before
     /// WASM execution. Bundled into the same atomic batch as SMT writes so
     /// that the indexer's height pointer, state-root marker, manifest, and
@@ -134,7 +128,6 @@ where
             height: self.height,
             block: self.block.clone(),
             state: std::sync::atomic::AtomicU32::new(self.state.load(std::sync::atomic::Ordering::SeqCst)),
-            fast_sync: self.fast_sync,
             current_block_hash: self.current_block_hash.clone(),
         }
     }
@@ -191,13 +184,7 @@ impl<T: KeyValueStoreLike> MetashrewRuntimeContext<T> {
             height,
             block,
             state: std::sync::atomic::AtomicU32::new(0),
-            fast_sync: false,
             current_block_hash: Vec::new(),
         }
-    }
-
-    pub fn with_fast_sync(mut self, fast_sync: bool) -> Self {
-        self.fast_sync = fast_sync;
-        self
     }
 }

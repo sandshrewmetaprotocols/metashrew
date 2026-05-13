@@ -257,6 +257,77 @@ pub fn create_test_block(height: u32, prev_hash: BlockHash, extra_data: &[u8]) -
         .build()
 }
 
+/// Magic prefix bytes the metashrew-minimal WASM looks for in an OP_RETURN
+/// payload. Must match `PROTOSTONE_MAGIC` in crates/metashrew-minimal/src/lib.rs.
+pub const PROTOSTONE_MAGIC: &[u8] = b"PRTO";
+
+/// Opcode constants understood by the test WASM's protostone VM.
+pub const PROTOSTONE_OP_MINT: u8 = 0x01;
+pub const PROTOSTONE_OP_BURN: u8 = 0x02;
+pub const PROTOSTONE_OP_TRANSFER: u8 = 0x03;
+
+/// Build a protostone OP_RETURN script for a given opcode + alkane id.
+///
+/// Script format:
+///   OP_RETURN (0x6a) <push N> <PRTO> <opcode> <alkane_id (8 bytes)>
+///
+/// The push opcode is whatever number the push-data length resolves to
+/// (between 1 and 75), so the WASM's parser can find the payload boundary.
+pub fn protostone_op_return(opcode: u8, alkane_id: u64) -> ScriptBuf {
+    let mut payload: Vec<u8> = Vec::with_capacity(PROTOSTONE_MAGIC.len() + 1 + 8);
+    payload.extend_from_slice(PROTOSTONE_MAGIC);
+    payload.push(opcode);
+    payload.extend_from_slice(&alkane_id.to_le_bytes());
+
+    let mut script: Vec<u8> = Vec::with_capacity(2 + payload.len());
+    script.push(0x6a); // OP_RETURN
+    script.push(payload.len() as u8);
+    script.extend_from_slice(&payload);
+    ScriptBuf::from_bytes(script)
+}
+
+/// Build a non-coinbase test transaction with:
+///   - vin[0] spending `(parent_txid, parent_vout)` with the given (optionally
+///     non-default) sequence — sequence variations let the caller produce two
+///     different txids that share inputs (used to model "same tx, different
+///     effect" semantics)
+///   - vout[0] = protostone OP_RETURN (zero value)
+///   - vout[1] = 1 sat dust to a junk P2PKH (this is the alkane-bearing output
+///     the test WASM writes per-outpoint state for)
+pub fn build_protostone_tx(
+    parent_txid: Txid,
+    parent_vout: u32,
+    sequence_nonce: u32,
+    opcode: u8,
+    alkane_id: u64,
+) -> Transaction {
+    let dust_script =
+        ScriptBuf::from_hex("76a914389ffce9cd9ae88dcc0631e88a821ffdbe9bfe2688ac").unwrap();
+    Transaction {
+        version: bitcoin::transaction::Version::ONE,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint {
+                txid: parent_txid,
+                vout: parent_vout,
+            },
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence(sequence_nonce),
+            witness: bitcoin::Witness::new(),
+        }],
+        output: vec![
+            TxOut {
+                value: bitcoin::Amount::from_sat(0),
+                script_pubkey: protostone_op_return(opcode, alkane_id),
+            },
+            TxOut {
+                value: bitcoin::Amount::from_sat(1),
+                script_pubkey: dust_script,
+            },
+        ],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

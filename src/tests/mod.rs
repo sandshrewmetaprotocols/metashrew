@@ -8,6 +8,7 @@ pub mod memory_determinism_test;
 pub mod memory_preallocate_test;
 pub mod preview_e2e_test;
 pub mod prove_reorg_bug_test;
+pub mod reorg_exhaustive_test;
 pub mod reorg_focused_test;
 pub mod reorg_rollback_bug_test;
 pub mod start_block_test;

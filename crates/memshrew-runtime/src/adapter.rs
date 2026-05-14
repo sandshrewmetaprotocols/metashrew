@@ -239,9 +239,40 @@ impl SmtRollback for MemStoreAdapter {
 #[async_trait]
 impl StorageAdapter for MemStoreAdapter {
     async fn get_indexed_height(&self) -> SyncResult<u32> {
-        Ok(self.get_height())
+        // Use the durable height stored under `TIP_HEIGHT_KEY` in the shared
+        // (Arc'd) db — *not* the per-instance `self.height` field, which a
+        // fresh clone resets to zero and would cause `init()` to think the
+        // database is empty after a previous syncer already wrote blocks.
+        // This makes the in-memory adapter behave like the RocksDB adapter:
+        // any clone of the same backing data sees the same indexed height,
+        // and the reorg detector in `handle_reorg` therefore fires when a
+        // second syncer is created on top of an already-indexed store.
+        let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
+        let db = self.db.lock().unwrap();
+        let bytes = db.get(&to_labeled_key(&key_bytes)).cloned();
+        drop(db);
+        match bytes {
+            Some(v) if v.len() >= 4 => {
+                let arr: [u8; 4] = v[..4].try_into().unwrap();
+                // The runtime stores `height + 1` (next-to-process) under
+                // `TIP_HEIGHT_KEY`. The sync layer wants the last-fully-indexed
+                // height — so subtract 1.
+                Ok(u32::from_le_bytes(arr).saturating_sub(1))
+            }
+            _ => Ok(self.get_height()),
+        }
     }
     async fn set_indexed_height(&mut self, height: u32) -> SyncResult<()> {
+        // Persist into the shared db so any clone of this adapter sees it.
+        // This is the StorageAdapter-trait counterpart of the WASM-driven
+        // tip update at the bottom of `KeyValueStoreLike::write`.
+        let key_bytes: Vec<u8> = TIP_HEIGHT_KEY.as_bytes().to_vec();
+        // Store `height + 1` to match the convention used by `write()`.
+        let height_bytes: Vec<u8> = (height + 1).to_le_bytes().to_vec();
+        self.db
+            .lock()
+            .unwrap()
+            .insert(to_labeled_key(&key_bytes), height_bytes);
         self.set_height(height);
         Ok(())
     }
@@ -262,12 +293,20 @@ impl StorageAdapter for MemStoreAdapter {
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         use metashrew_runtime::rollback::rollback_smt_data;
 
-        let current_height = self.get_height();
+        // Use the durable height from the shared db so we roll back the right
+        // range when a freshly-cloned adapter calls into this method (the
+        // per-instance `self.height` field would be zero on a fresh clone).
+        let current_height = match self.get_indexed_height().await {
+            Ok(h) => h,
+            Err(_) => self.get_height(),
+        };
 
         // Use the shared SMT rollback implementation
         rollback_smt_data(self, height, current_height)
             .map_err(|e| metashrew_sync::SyncError::Storage(format!("SMT rollback failed: {}", e)))?;
 
+        // Persist the rolled-back tip in the shared db too.
+        let _ = self.set_indexed_height(height).await;
         self.set_height(height);
         Ok(())
     }

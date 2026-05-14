@@ -871,7 +871,7 @@ where
 
 }
 
-fn parse_height_string(height_str: &str) -> SyncResult<u32> {
+pub fn parse_height_string(height_str: &str) -> SyncResult<u32> {
     let height_part = height_str.split(':').next().unwrap_or(height_str);
     height_part
         .parse::<u32>()

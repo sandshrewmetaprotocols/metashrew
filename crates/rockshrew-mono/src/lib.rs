@@ -62,8 +62,9 @@ use log::{error, info, warn};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
 use crate::adapters::BitcoinRpcAdapter;
@@ -151,7 +152,51 @@ where
     pub sync_engine: Arc<tokio::sync::RwLock<SnapshotMetashrewSync<N, S, R>>>,
 }
 
-/// Handles JSON-RPC requests.
+/// Per-method server-side timeout. Bounds how long a single JSON-RPC request
+/// can occupy the view layer before being cancelled, even if the upstream
+/// HTTP proxy has already given up on the response. Without this guard,
+/// disconnected requests run to completion (`async/await` does not propagate
+/// client disconnect by default) and the worker pool fills with orphaned WASM
+/// executions until the whole process halts. v9.0.4-rc.2.
+///
+/// `metashrew_view` and `metashrew_preview` can legitimately take seconds on
+/// expensive contracts — give them headroom. Everything else hits storage
+/// directly and should return in milliseconds; a tight cap there frees worker
+/// slots fast when RocksDB itself is stuck.
+fn rpc_method_timeout(method: &str) -> Duration {
+    match method {
+        "metashrew_view" => Duration::from_secs(60),
+        "metashrew_preview" => Duration::from_secs(120),
+        // Pure storage reads — height, blockhash, stateroot, snapshot.
+        _ => Duration::from_secs(10),
+    }
+}
+
+/// Handles JSON-RPC requests with per-method timeouts and cancellation
+/// propagation. The actual per-method work is spawned as a child task tied
+/// to a `CancellationToken`. The handler races three outcomes:
+///
+/// 1. **Work completes**     — return the JSON-RPC response.
+/// 2. **Timeout fires**      — cancel the work, return JSON-RPC error -32000
+///                             "timed out".
+/// 3. **Handler dropped**    — actix-web drops this future when the response
+///                             writer detects a closed socket on its next
+///                             write attempt. The `DropGuard` held by this
+///                             future then cancels the spawned work, which
+///                             unwinds the WASM at its next yield point
+///                             (≤10k fuel units, configured in
+///                             `MetashrewRuntime::view`).
+///
+/// Cancellation works because `wasmtime` async support + the
+/// `fuel_async_yield_interval(Some(10000))` set in `runtime.rs` make the
+/// `call_async` future cancel-aware. Dropping it terminates WASM execution
+/// at the next yield. The `RwLockReadGuard` returned by
+/// `state.sync_engine.read().await` is also dropped via RAII, releasing the
+/// read lock immediately so block ingestion (writer) is not held off any
+/// longer than necessary.
+///
+/// This patch only affects the read-only view layer — the indexer block
+/// processing loop runs through a separate code path on the sync engine.
 #[instrument(skip(body, state))]
 async fn handle_jsonrpc<N, S, R>(
     body: web::Json<serde_json::Value>,
@@ -163,79 +208,178 @@ where
     R: RuntimeAdapter + 'static,
 {
     let request: serde_json::Value = body.into_inner();
-    let method = request["method"].as_str().unwrap_or_default();
+    let method = request["method"].as_str().unwrap_or_default().to_string();
     let empty_params = vec![];
-    let params = request["params"].as_array().unwrap_or(&empty_params);
+    let params_owned = request["params"].as_array().cloned().unwrap_or(empty_params);
     let id = request["id"].clone();
 
+    let timeout = rpc_method_timeout(&method);
+    let cancel = CancellationToken::new();
+    // Held by this handler future. When the handler is dropped (client
+    // disconnect, or `tokio::select!` arm wins), this guard drops and
+    // triggers `cancel.cancel()` on every clone — propagating the abort to
+    // the spawned task below.
+    let _drop_guard = cancel.clone().drop_guard();
+
+    let state_clone = state.clone();
+    let method_for_work = method.clone();
+    let cancel_for_work = cancel.clone();
+
+    // Spawn the actual per-method work as a child task. Spawning is
+    // necessary because actix's handler future is bound to the request
+    // lifecycle; the spawned task observes cancellation via the shared token
+    // and exits at the next WASM yield point.
+    let work = tokio::spawn(async move {
+        let work_fut = async move {
+            match method_for_work.as_str() {
+                "metashrew_view" => {
+                    // Acquire the outer read lock just long enough to clone
+                    // the runtime Arc and capture current_height; drop the
+                    // guard BEFORE running the WASM. This is the same data
+                    // the in-trait metashrew_view would have read, but the
+                    // ~seconds-long WASM execution that follows no longer
+                    // blocks any reconfiguration/write that needs the outer
+                    // lock. Snapshot isolation in execute_view (v9.0.4-rc.1)
+                    // makes early release safe.
+                    let function_name = params_owned.get(0).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let input_hex = params_owned.get(1).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let height_str = match params_owned.get(2) {
+                        Some(v) if v.is_string() => v.as_str().unwrap().to_string(),
+                        Some(v) if v.is_number() => v.to_string(),
+                        _ => "latest".to_string(),
+                    };
+
+                    let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
+                        Ok(b) => b,
+                        Err(e) => return Err(metashrew_sync::error::SyncError::Serialization(format!("Invalid hex input: {}", e))),
+                    };
+
+                    let (runtime, current) = {
+                        let g = state_clone.sync_engine.read().await;
+                        (Arc::clone(g.runtime()), g.current_height())
+                    };
+
+                    let height = if height_str == "latest" {
+                        current.saturating_sub(1)
+                    } else {
+                        metashrew_sync::snapshot_sync::parse_height_string(&height_str)?
+                    };
+
+                    let call = metashrew_sync::ViewCall { function_name, input_data, height };
+                    let result = runtime.execute_view(call).await?;
+                    Ok(format!("0x{}", hex::encode(result.data)))
+                }
+                "metashrew_preview" => {
+                    // Same early-release pattern as metashrew_view —
+                    // preview also runs WASM via runtime.execute_preview
+                    // and snapshot isolation means we don't need the outer
+                    // lock held across the WASM call.
+                    let block_hex = params_owned.get(0).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let function_name = params_owned.get(1).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let input_hex = params_owned.get(2).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+                    let height_str = match params_owned.get(3) {
+                        Some(v) if v.is_string() => v.as_str().unwrap().to_string(),
+                        Some(v) if v.is_number() => v.to_string(),
+                        _ => "latest".to_string(),
+                    };
+
+                    let block_data = match hex::decode(block_hex.trim_start_matches("0x")) {
+                        Ok(b) => b,
+                        Err(e) => return Err(metashrew_sync::error::SyncError::Serialization(format!("Invalid hex block data: {}", e))),
+                    };
+                    let input_data = match hex::decode(input_hex.trim_start_matches("0x")) {
+                        Ok(b) => b,
+                        Err(e) => return Err(metashrew_sync::error::SyncError::Serialization(format!("Invalid hex input: {}", e))),
+                    };
+
+                    let (runtime, current) = {
+                        let g = state_clone.sync_engine.read().await;
+                        (Arc::clone(g.runtime()), g.current_height())
+                    };
+
+                    let height = if height_str == "latest" {
+                        current.saturating_sub(1)
+                    } else {
+                        metashrew_sync::snapshot_sync::parse_height_string(&height_str)?
+                    };
+
+                    let call = metashrew_sync::PreviewCall { block_data, function_name, input_data, height };
+                    let result = runtime.execute_preview(call).await?;
+                    Ok(format!("0x{}", hex::encode(result.data)))
+                }
+                // Storage-read methods stay on the trait API (sub-ms work;
+                // the read lock is briefly contended but never held across
+                // anything long-running).
+                "metashrew_height" => state_clone.sync_engine.read().await.metashrew_height().await.map(|h| h.to_string()),
+                "metashrew_getblockhash" => {
+                    let height = params_owned.get(0).and_then(|v| v.as_u64()).unwrap_or_default() as u32;
+                    state_clone.sync_engine.read().await.metashrew_getblockhash(height).await
+                }
+                "metashrew_stateroot" => {
+                    let height = params_owned.get(0).and_then(|v| v.as_str()).unwrap_or("latest").to_string();
+                    state_clone.sync_engine.read().await.metashrew_stateroot(height).await
+                }
+                "metashrew_snapshot" => state_clone.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
+                _ => Err(anyhow::anyhow!("Method not found").into()),
+            }
+        };
+
+        // Inner race: cancellation vs work-complete. On cancel, the work
+        // future is dropped at the next `.await` point inside it — including
+        // any active WASM execution (wasmtime async yield).
+        tokio::select! {
+            biased;
+            _ = cancel_for_work.cancelled() => Err(
+                metashrew_sync::error::SyncError::Generic(anyhow::anyhow!("cancelled"))
+            ),
+            r = work_fut => r,
+        }
+    });
+
     let start_time = Instant::now();
-    let result = match method {
-        "metashrew_view" => {
-            let function_name = params[0].as_str().unwrap_or_default().to_string();
-            let input_hex = params[1].as_str().unwrap_or_default().to_string();
-            let height = match params.get(2) {
-                Some(v) if v.is_string() => v.as_str().unwrap().to_string(),
-                Some(v) if v.is_number() => v.to_string(),
-                _ => "latest".to_string(),
-            };
-            state
-                .sync_engine
-                .read()
-                .await
-                .metashrew_view(function_name, input_hex, height)
-                .await
+
+    // Outer race: server-side timeout vs work-complete. On timeout, we
+    // signal cancel and let the spawned task unwind on its own — no
+    // need to abort, the cancellation token does it cleanly.
+    let outcome = tokio::select! {
+        biased;
+        _ = tokio::time::sleep(timeout) => {
+            cancel.cancel();
+            warn!(
+                "RPC method {} exceeded {}s timeout — cancelled",
+                method,
+                timeout.as_secs()
+            );
+            Err(format!("Request timed out after {}s", timeout.as_secs()))
         }
-        "metashrew_preview" => {
-            let block_hex = params[0].as_str().unwrap_or_default().to_string();
-            let function_name = params[1].as_str().unwrap_or_default().to_string();
-            let input_hex = params[2].as_str().unwrap_or_default().to_string();
-            let height = match params.get(3) {
-                Some(v) if v.is_string() => v.as_str().unwrap().to_string(),
-                Some(v) if v.is_number() => v.to_string(),
-                _ => "latest".to_string(),
-            };
-            state
-                .sync_engine
-                .read()
-                .await
-                .metashrew_preview(block_hex, function_name, input_hex, height)
-                .await
-        }
-        "metashrew_height" => state.sync_engine.read().await.metashrew_height().await.map(|h| h.to_string()),
-        "metashrew_getblockhash" => {
-            let height = params[0].as_u64().unwrap_or_default() as u32;
-            state.sync_engine.read().await.metashrew_getblockhash(height).await
-        }
-        "metashrew_stateroot" => {
-            let height = params[0].as_str().unwrap_or("latest").to_string();
-            state.sync_engine.read().await.metashrew_stateroot(height).await
-        }
-        "metashrew_snapshot" => state.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
-        _ => Err(anyhow::anyhow!("Method not found").into()),
+        joined = work => match joined {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(join_err) => Err(format!("Worker task panicked: {}", join_err)),
+        },
     };
 
     let duration = start_time.elapsed();
-    
+
     // Log slow RPC calls
-    if duration > std::time::Duration::from_millis(100) {
+    if duration > Duration::from_millis(100) {
         warn!("Slow RPC call: {} took {:?}", method, duration);
     } else {
         debug!("RPC call: {} completed in {:?}", method, duration);
     }
 
-    let response = match result {
+    let response = match outcome {
         Ok(res) => serde_json::json!({
             "jsonrpc": "2.0",
             "result": res,
             "id": id
         }),
-        Err(e) => {
-            error!("RPC error for method {}: {}", method, e);
+        Err(msg) => {
+            error!("RPC error for method {}: {}", method, msg);
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "error": {
                     "code": -32000,
-                    "message": e.to_string()
+                    "message": msg
                 },
                 "id": id
             })

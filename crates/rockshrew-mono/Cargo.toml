@@ -31,6 +31,9 @@ env_logger = "0.11.6"
 hex = "0.4.3"
 rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
 tokio = { version = "1.43.0", features = ["full", "tracing"] }
+# CancellationToken + DropGuard wire the actix handler future drop into the
+# spawned view task so a client disconnect propagates to the WASM engine.
+tokio-util = { version = "0.7", features = ["rt"] }
 clap = { version = "4.5", features = ["unstable-doc", "derive"] }
 actix-cors = "0.7.0"
 itertools = "0.14.0"

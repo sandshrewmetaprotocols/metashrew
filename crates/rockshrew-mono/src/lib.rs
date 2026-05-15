@@ -139,6 +139,20 @@ pub struct Args {
     pub reorg_check_threshold: u32,
     #[arg(long)]
     pub prefetch_size: Option<usize>,
+    /// Enable the `metashrew_preview` JSON-RPC method.
+    ///
+    /// Default: disabled. With the flag absent (production indexer
+    /// pods), `metashrew_preview` returns `Method not enabled`. We
+    /// observed state divergence on every pod that took sustained
+    /// view/preview LB traffic for several hours under v9.0.4-rc.2,
+    /// despite the `create_isolated_copy()` fix that closed the
+    /// original write-through leak (commit 535679c). Disabling
+    /// preview entirely on production pods is a load-bearing
+    /// diagnostic: if drift stops in v9.0.4-rc.4 with preview off,
+    /// the residual leak is in the preview path; if drift persists,
+    /// the leak is elsewhere (view path, snapshot path, etc.).
+    #[arg(long, default_value_t = false)]
+    pub enable_preview: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -150,6 +164,10 @@ where
     R: RuntimeAdapter + 'static,
 {
     pub sync_engine: Arc<tokio::sync::RwLock<SnapshotMetashrewSync<N, S, R>>>,
+    /// Mirror of `Args::enable_preview`. Set once at startup, never
+    /// changed at runtime; checked in `handle_jsonrpc` before
+    /// dispatching `metashrew_preview`.
+    pub enable_preview: bool,
 }
 
 /// Per-method server-side timeout. Bounds how long a single JSON-RPC request
@@ -270,6 +288,21 @@ where
                     Ok(format!("0x{}", hex::encode(result.data)))
                 }
                 "metashrew_preview" => {
+                    // Gated behind --enable-preview. Production pods leave
+                    // this off so the WASM host functions that historically
+                    // leaked hypothetical writes into prod state never run.
+                    // v9.0.4-rc.2 fixed `create_isolated_copy()` but we
+                    // still observed drift under sustained preview load;
+                    // disabling preview entirely on indexer pods narrows
+                    // the leak hunt.
+                    if !state_clone.enable_preview {
+                        return Err(metashrew_sync::error::SyncError::Generic(
+                            anyhow::anyhow!(
+                                "metashrew_preview is not enabled on this node \
+                                 (start rockshrew-mono with --enable-preview to allow it)"
+                            )
+                        ));
+                    }
                     // Same early-release pattern as metashrew_view —
                     // preview also runs WASM via runtime.execute_preview
                     // and snapshot isolation means we don't need the outer
@@ -464,8 +497,22 @@ where
     }
 
     let sync_engine_arc = Arc::new(tokio::sync::RwLock::new(sync_engine));
+    if args.enable_preview {
+        warn!(
+            "metashrew_preview is ENABLED on this node — only safe on a \
+             dedicated preview tier, NOT on indexer pods serving production \
+             LB traffic (preview path historically leaks hypothetical writes \
+             into prod state under sustained load)"
+        );
+    } else {
+        info!(
+            "metashrew_preview disabled (default); pass --enable-preview to \
+             allow it"
+        );
+    }
     let app_state = web::Data::new(AppState {
         sync_engine: sync_engine_arc.clone(),
+        enable_preview: args.enable_preview,
     });
 
     // Cap the prefetch buffer at reorg_check_threshold so the fetcher can

@@ -344,11 +344,16 @@ where
 
                 Ok(())
             }
-            Err(_) => {
-                // Fallback to non-atomic processing
+            Err(atomic_err) => {
+                // Fallback to non-atomic processing. Surface the actual
+                // failure reason — silently swallowing it (the prior
+                // `Err(_)` form) made it impossible to tell apart a
+                // backend fence-CAS mismatch from a real WASM failure
+                // from a transient transport blip, and every one of
+                // those drops us into the slow fallback path.
                 warn!(
-                    "Atomic processing failed for height {} in pipeline, falling back",
-                    height
+                    "Atomic processing failed for height {} in pipeline, falling back: {}",
+                    height, atomic_err
                 );
 
                 // Process with runtime (non-atomic fallback)

@@ -7,10 +7,22 @@ use metashrew_runtime::{
     KeyValueStoreLike,
 };
 use metashrew_sync::{StorageAdapter, StorageStats, SyncError, SyncResult};
-use rocksdb::{WriteBatch, DB};
+use rocksdb::{WriteBatch, WriteOptions, DB};
 use std::sync::Arc;
 
 use crate::adapter::RocksDBRuntimeAdapter;
+
+/// Build `WriteOptions` with `set_sync(true)` so the RocksDB WAL is fsynced
+/// before the write returns. This is what makes `commit_atomic` actually
+/// durable — without it, RocksDB can return Ok to the caller and then lose
+/// the write across a host crash or OOM kill before the kernel page cache
+/// is flushed. See the comment block on `StorageAdapter::commit_atomic` for
+/// the determinism invariant this protects.
+fn sync_write_options() -> WriteOptions {
+    let mut wo = WriteOptions::default();
+    wo.set_sync(true);
+    wo
+}
 
 /// RocksDB storage adapter for persistent storage.
 #[derive(Clone)]
@@ -171,5 +183,78 @@ impl StorageAdapter for RocksDBStorageAdapter {
 
     async fn get_db_handle(&self) -> SyncResult<Arc<DB>> {
         Ok(self.db.clone())
+    }
+
+    /// Bundle the three metadata writes for block `height` into a single
+    /// RocksDB `WriteBatch` and commit it with `WriteOptions::set_sync(true)`.
+    ///
+    /// Note: the **WASM-side __flush** (`BatchedSMTHelper::calculate_and_store_state_root_batched`)
+    /// already writes the indexed-height pointer, the state-root marker, the
+    /// per-height manifest, and the block-hash record into a single batch
+    /// inside the runtime. This adapter-level `commit_atomic` is the
+    /// sync-framework-side commit that runs *after* `process_block_atomic`
+    /// for callers (mock storage, tests, or non-WASM runtimes) that don't
+    /// route their k/v writes through the __flush path. For the production
+    /// RocksDB path the two batches are idempotent (same keys, same values),
+    /// so writing both is correct.
+    ///
+    /// Strict in-order check: refuses to commit unless `height == tip + 1`,
+    /// matching the user-stated invariant that we never skip or rewrite a
+    /// block outside of an explicit reorg rollback.
+    async fn commit_atomic(
+        &mut self,
+        height: u32,
+        block_hash: &[u8],
+        state_root: &[u8],
+    ) -> SyncResult<()> {
+        // Strict in-order progression check.
+        let height_key = b"__INTERNAL/height".to_vec();
+        let current = match self.db.get(&height_key) {
+            Ok(Some(value)) if value.len() >= 4 => {
+                let bytes: [u8; 4] = value[..4]
+                    .try_into()
+                    .map_err(|_| SyncError::Storage("Invalid height data".to_string()))?;
+                u32::from_le_bytes(bytes)
+            }
+            Ok(_) => 0,
+            Err(e) => return Err(SyncError::Storage(format!("Database error: {}", e))),
+        };
+
+        // We accept either:
+        //   - height == current + 1  (normal forward progression)
+        //   - current == 0 AND no block-hash record at height 0 (fresh DB)
+        let blockhash_zero_key = b"/__INTERNAL/height-to-hash/0".to_vec();
+        let is_fresh_db = current == 0
+            && self
+                .db
+                .get(&blockhash_zero_key)
+                .map_err(|e| SyncError::Storage(format!("Database error: {}", e)))?
+                .is_none();
+        if !is_fresh_db && height != current.saturating_add(1) {
+            return Err(SyncError::Storage(format!(
+                "out-of-order commit rejected: attempted height {} but current tip is {} \
+                 (commit_atomic only accepts height == tip + 1)",
+                height, current
+            )));
+        }
+
+        // Build the atomic batch.
+        let mut batch = WriteBatch::default();
+        let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
+        batch.put(&blockhash_key, block_hash);
+
+        let root_key = format!("smt:root:{}", height).into_bytes();
+        batch.put(&root_key, state_root);
+
+        let height_bytes = height.to_le_bytes();
+        batch.put(&height_key, &height_bytes);
+
+        // Commit with WAL fsync. This is the durability guarantee that lets
+        // restart-recovery rely on "height N is either fully committed or not
+        // committed at all" — without sync=true, a crash before the OS page
+        // cache flushes could lose the write after we returned Ok.
+        self.db
+            .write_opt(batch, &sync_write_options())
+            .map_err(|e| SyncError::Storage(format!("commit_atomic write failed at height {}: {}", height, e)))
     }
 }

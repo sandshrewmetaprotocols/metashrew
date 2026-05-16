@@ -225,6 +225,49 @@ pub trait StorageAdapter: Send + Sync {
     async fn get_db_handle(&self) -> SyncResult<std::sync::Arc<rocksdb::DB>> {
         Err(crate::SyncError::Storage("Database handle not available for this storage adapter".to_string()))
     }
+
+    /// Atomically commit a block's metadata (indexed-height pointer, block-hash record,
+    /// and state-root record) in a single durable write.
+    ///
+    /// # Invariants enforced by the implementation
+    ///
+    /// - **Strict in-order progression**: the call MUST fail (and write nothing) when
+    ///   `height != current_indexed_height + 1`. This matches the user-stated invariant
+    ///   that `tip_height` advances exactly 0 → 1 → 2 → … with no gaps, no skips, and
+    ///   no rewrites outside of an explicit `rollback_to_height` call.
+    /// - **All-or-nothing**: the three writes are bundled into one underlying batch and
+    ///   submitted with sync/fsync enabled, so a crash either leaves the DB at
+    ///   `tip = height - 1` (nothing committed) or `tip = height` (everything committed).
+    ///   A "partial commit" is not a representable state.
+    ///
+    /// The default implementation here is a *non-atomic* shim that calls the three
+    /// individual mutators in sequence. It exists only so that legacy / mock storage
+    /// adapters keep compiling — RocksDB-backed adapters MUST override it to get the
+    /// atomicity + durability guarantees described above.
+    async fn commit_atomic(
+        &mut self,
+        height: u32,
+        block_hash: &[u8],
+        state_root: &[u8],
+    ) -> SyncResult<()> {
+        // Strict in-order check (default impl): refuse to commit out of sequence.
+        let current = self.get_indexed_height().await?;
+        // If current is 0 and we have no stored hash for height 0, we accept any first
+        // commit (genesis or configured start_block). Otherwise the new height must be
+        // exactly current + 1.
+        let allow_first = current == 0 && self.get_block_hash(0).await?.is_none();
+        if !allow_first && height != current.saturating_add(1) {
+            return Err(crate::SyncError::Storage(format!(
+                "out-of-order commit rejected: attempted height {} but current tip is {} \
+                 (commit_atomic only accepts height == tip + 1)",
+                height, current
+            )));
+        }
+        self.store_block_hash(height, block_hash).await?;
+        self.store_state_root(height, state_root).await?;
+        self.set_indexed_height(height).await?;
+        Ok(())
+    }
 }
 
 /// Storage statistics

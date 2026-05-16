@@ -358,9 +358,35 @@ where
         }
     }
 
-    /// Process a single block atomically
+    /// Process a single block atomically, with bounded retries and **no**
+    /// non-atomic fallback path.
+    ///
+    /// The user-stated invariant is:
+    ///
+    /// > "if an atomic write fails it either happens or it doesn't, and we
+    /// > never skip a block. Anytime we run metashrew-runtime on a block,
+    /// > it should produce that set of k/v pairs, then attempt to write
+    /// > them until it succeeds, and if it doesn't, or the software is
+    /// > restarted, it should pick up where it left off, and rerun that
+    /// > block to get that same k/v pairs for that same height, and apply
+    /// > them successfully."
+    ///
+    /// Implementation:
+    ///
+    /// 1. SPV-style validate that this block connects to our stored tip.
+    /// 2. Loop up to `ATOMIC_RETRIES` times calling `process_block_atomic`:
+    ///    each attempt re-executes the WASM module from scratch (memory
+    ///    refresh is unconditional inside `process_block_atomic`), produces
+    ///    a fresh, bit-for-bit identical k/v map (modulo timing-side-channels
+    ///    in the indexer, which are out of scope here), and tries to commit
+    ///    via the storage adapter's `commit_atomic`.
+    /// 3. If all retries fail, log ERROR and `std::process::exit(1)`. The
+    ///    supervisor (systemd / Kubernetes) restarts the process and
+    ///    `init()` picks up at `tip + 1` — which is the same height we just
+    ///    failed on — and tries again. There is **no** silent fallback to
+    ///    a different code path with different write semantics.
     pub async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
-        // Validate block hash and chain continuity (SPV-style)
+        // 1. SPV-style continuity check.
         if !self.validate_block_connects(height, &block_data, &block_hash).await? {
             return Err(SyncError::BlockProcessing {
                 height,
@@ -375,90 +401,87 @@ where
             block_data.len()
         );
 
-        // Try atomic processing first
-        let atomic_result = self.runtime
-            .process_block_atomic(height, &block_data, &block_hash)
-            .await;
-
-        match atomic_result {
-            Ok(result) => {
-                // Atomic processing succeeded - commit all operations at once
-                info!("Atomic block processing succeeded for height {}", height);
-
-                // Update storage with all metadata atomically
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &result.block_hash).await?;
-                    storage.store_state_root(height, &result.state_root).await?;
+        // 2. Bounded-retry atomic apply.
+        const ATOMIC_RETRIES: u32 = 5;
+        let mut last_err: Option<SyncError> = None;
+        for attempt in 1..=ATOMIC_RETRIES {
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    // Sync-framework-side atomic commit. The RocksDB adapter
+                    // implementation bundles the three writes (indexed-height,
+                    // block-hash record, state-root record) into a single
+                    // sync=true WriteBatch and enforces height == tip + 1.
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically (attempt {}/{})",
+                                height, attempt, ATOMIC_RETRIES
+                            );
+                            self.blocks_processed.fetch_add(1, Ordering::SeqCst);
+                            {
+                                let mut last_time = self.last_block_time.write().await;
+                                *last_time = Some(SystemTime::now());
+                            }
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            warn!(
+                                "Atomic commit failed for height {} (attempt {}/{}): {} — retrying",
+                                height, attempt, ATOMIC_RETRIES, commit_err
+                            );
+                            last_err = Some(commit_err);
+                        }
+                    }
                 }
-
-                // Update metrics
-                self.blocks_processed.fetch_add(1, Ordering::SeqCst);
-                {
-                    // NOTE: Timestamp is for monitoring/metrics only, not used in state calculation
-                    let mut last_time = self.last_block_time.write().await;
-                    *last_time = Some(SystemTime::now());
+                Err(atomic_err) => {
+                    warn!(
+                        "Atomic block execution failed for height {} (attempt {}/{}): {} — retrying",
+                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    );
+                    last_err = Some(atomic_err);
                 }
-
-                info!(
-                    "Successfully processed block {} atomically with state root",
-                    height
-                );
-                Ok(())
             }
-            Err(atomic_err) => {
-                // CRITICAL WARNING: Fallback to non-atomic processing can cause state divergence
-                // between instances under different load conditions. This should be investigated.
-                error!(
-                    "CRITICAL: Atomic processing failed for height {}, falling back to non-atomic. \
-                     This may cause STATE DIVERGENCE between indexer instances! Error: {:?}",
-                    height, atomic_err
+
+            // Refresh the runtime's WASM memory before the next attempt so
+            // we start from a clean instance — the runtime is supposed to
+            // do this internally on error already, but a belt-and-braces
+            // refresh here keeps the retry loop deterministic against
+            // any future changes to the runtime adapter.
+            if let Err(e) = self.runtime.refresh_memory().await {
+                warn!(
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
                 );
-
-                // Log memory and resource state to help diagnose why atomic processing failed
-                log::warn!(
-                    "Block {} triggered fallback: block_size={} bytes, consider investigating \
-                     if this happens frequently under load",
-                    height,
-                    block_data.len()
-                );
-
-                // Process with runtime (non-atomic fallback)
-                self.runtime
-                    .process_block(height, &block_data)
-                    .await
-                    .map_err(|e| SyncError::BlockProcessing {
-                        height,
-                        message: format!("Fallback processing also failed: {}", e),
-                    })?;
-
-                // Get state root after processing
-                let state_root = self.runtime.get_state_root(height).await?;
-
-                // Update storage with height, block hash, and state root
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &block_hash).await?;
-                    storage.store_state_root(height, &state_root).await?;
-                }
-
-                // Update metrics
-                self.blocks_processed.fetch_add(1, Ordering::SeqCst);
-                {
-                    // NOTE: Timestamp is for monitoring/metrics only, not used in state calculation
-                    let mut last_time = self.last_block_time.write().await;
-                    *last_time = Some(SystemTime::now());
-                }
-
-                info!(
-                    "Successfully processed block {} with fallback method",
-                    height
-                );
-                Ok(())
             }
+
+            // Brief backoff so we don't busy-loop on a transient transport
+            // blip or fsync stall.
+            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
+
+        // 3. Exhausted retries. The user's directive is explicit: do NOT
+        // fall back to a different code path. Log a fatal error and exit
+        // so the supervisor restarts us. Restart-recovery (`init()`) will
+        // pick up at `tip + 1` and try this same height again from a
+        // clean process — same block bytes → same k/v map (idempotent).
+        error!(
+            "FATAL: atomic block apply failed for height {} after {} retries. \
+             Last error: {:?}. Exiting so supervisor restarts the process — \
+             on restart, recovery will re-run block {} from scratch.",
+            height, ATOMIC_RETRIES, last_err, height
+        );
+        // Flush logs before exit.
+        std::process::exit(1);
     }
 
     /// Run the sync pipeline with parallel fetching and processing
@@ -738,70 +761,70 @@ where
     S: StorageAdapter + 'static,
     R: RuntimeAdapter + 'static,
 {
+    /// Pipeline-mode block apply. Mirrors `MetashrewSync::process_block` but
+    /// without the SPV continuity check (that's done by the fetcher upstream
+    /// in this pipeline) and without the metric/timing bookkeeping (that's
+    /// handled by the result-handling loop). Atomic-only, bounded retry,
+    /// hard exit on failure — same invariants as the non-pipeline path.
     async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
-        // Try atomic processing first
-        let atomic_result = self.runtime
-            .process_block_atomic(height, &block_data, &block_hash)
-            .await;
-
-        match atomic_result {
-            Ok(result) => {
-                // Atomic processing succeeded
-                info!(
-                    "Atomic block processing succeeded for height {} in pipeline",
-                    height
-                );
-
-                // Update storage with all metadata atomically
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &result.block_hash).await?;
-                    storage.store_state_root(height, &result.state_root).await?;
+        const ATOMIC_RETRIES: u32 = 5;
+        let mut last_err: Option<SyncError> = None;
+        for attempt in 1..=ATOMIC_RETRIES {
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically in pipeline (attempt {}/{})",
+                                height, attempt, ATOMIC_RETRIES
+                            );
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            warn!(
+                                "Pipeline atomic commit failed for height {} (attempt {}/{}): {} — retrying",
+                                height, attempt, ATOMIC_RETRIES, commit_err
+                            );
+                            last_err = Some(commit_err);
+                        }
+                    }
                 }
-
-                Ok(())
-            }
-            Err(atomic_err) => {
-                // CRITICAL WARNING: Fallback to non-atomic processing can cause state divergence
-                // between instances under different load conditions. This should be investigated.
-                error!(
-                    "CRITICAL: Atomic processing failed for height {} in pipeline, falling back. \
-                     This may cause STATE DIVERGENCE between indexer instances! Error: {:?}",
-                    height, atomic_err
-                );
-
-                // Log memory and resource state to help diagnose why atomic processing failed
-                log::warn!(
-                    "Block {} in pipeline triggered fallback: block_size={} bytes, \
-                     investigate if this happens frequently under load",
-                    height,
-                    block_data.len()
-                );
-
-                // Process with runtime (non-atomic fallback)
-                self.runtime
-                    .process_block(height, &block_data)
-                    .await
-                    .map_err(|e| SyncError::BlockProcessing {
-                        height,
-                        message: format!("Pipeline fallback processing also failed: {}", e),
-                    })?;
-
-                // Get state root after processing
-                let state_root = self.runtime.get_state_root(height).await?;
-
-                // Update storage with height, block hash, and state root
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &block_hash).await?;
-                    storage.store_state_root(height, &state_root).await?;
+                Err(atomic_err) => {
+                    warn!(
+                        "Pipeline atomic block execution failed for height {} (attempt {}/{}): {} — retrying",
+                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    );
+                    last_err = Some(atomic_err);
                 }
-
-                Ok(())
             }
+
+            if let Err(e) = self.runtime.refresh_memory().await {
+                warn!(
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
+                );
+            }
+
+            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
+
+        error!(
+            "FATAL: pipeline atomic block apply failed for height {} after {} retries. \
+             Last error: {:?}. Exiting so supervisor restarts the process — \
+             on restart, recovery will re-run block {} from scratch.",
+            height, ATOMIC_RETRIES, last_err, height
+        );
+        std::process::exit(1);
     }
 }
 

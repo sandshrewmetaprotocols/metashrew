@@ -301,13 +301,17 @@ where
         }
     }
 
+    /// Process a single block atomically. See `MetashrewSync::process_block`
+    /// for the full invariants — this is the snapshot-enabled engine's
+    /// equivalent and follows the same retry-and-exit policy: no silent
+    /// fallback to a non-atomic write path.
     pub async fn process_block(
         &self,
         height: u32,
         block_data: Vec<u8>,
         block_hash: Vec<u8>,
     ) -> SyncResult<()> {
-        // Validate block hash and chain continuity (SPV-style)
+        // SPV-style continuity check.
         if !self.validate_block_connects(height, &block_data, &block_hash).await? {
             return Err(SyncError::BlockProcessing {
                 height,
@@ -317,72 +321,66 @@ where
             });
         }
 
-        // Try atomic processing first
-        let atomic_result = self.runtime
-            .process_block_atomic(height, &block_data, &block_hash)
-            .await;
-
-        match atomic_result {
-            Ok(result) => {
-                // Atomic processing succeeded
-                info!(
-                    "Atomic block processing succeeded for height {} in pipeline",
-                    height
-                );
-
-                // Update storage with all metadata atomically
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &result.block_hash).await?;
-                    storage.store_state_root(height, &result.state_root).await?;
+        const ATOMIC_RETRIES: u32 = 5;
+        let mut last_err: Option<SyncError> = None;
+        for attempt in 1..=ATOMIC_RETRIES {
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically (snapshot path, attempt {}/{})",
+                                height, attempt, ATOMIC_RETRIES
+                            );
+                            self.current_height.store(height + 1, Ordering::SeqCst);
+                            self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            warn!(
+                                "Snapshot-path atomic commit failed for height {} (attempt {}/{}): {} — retrying",
+                                height, attempt, ATOMIC_RETRIES, commit_err
+                            );
+                            last_err = Some(commit_err);
+                        }
+                    }
                 }
-
-                // Update current height atomic
-                self.current_height.store(height + 1, Ordering::SeqCst);
-                self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
-
-                Ok(())
+                Err(atomic_err) => {
+                    warn!(
+                        "Snapshot-path atomic block execution failed for height {} (attempt {}/{}): {} — retrying",
+                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    );
+                    last_err = Some(atomic_err);
+                }
             }
-            Err(atomic_err) => {
-                // Fallback to non-atomic processing. Surface the actual
-                // failure reason — silently swallowing it (the prior
-                // `Err(_)` form) made it impossible to tell apart a
-                // backend fence-CAS mismatch from a real WASM failure
-                // from a transient transport blip, and every one of
-                // those drops us into the slow fallback path.
+
+            if let Err(e) = self.runtime.refresh_memory().await {
                 warn!(
-                    "Atomic processing failed for height {} in pipeline, falling back: {}",
-                    height, atomic_err
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
                 );
-
-                // Process with runtime (non-atomic fallback)
-                self.runtime
-                    .process_block(height, &block_data)
-                    .await
-                    .map_err(|e| SyncError::BlockProcessing {
-                        height,
-                        message: e.to_string(),
-                    })?;
-
-                // Get state root after processing
-                let state_root = self.runtime.get_state_root(height).await?;
-
-                // Update storage with height, block hash, and state root
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &block_hash).await?;
-                    storage.store_state_root(height, &state_root).await?;
-                }
-
-                // Update current height atomic
-                self.current_height.store(height + 1, Ordering::SeqCst);
-                self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
-
-                Ok(())
             }
+
+            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
+
+        error!(
+            "FATAL: snapshot-path atomic block apply failed for height {} after {} retries. \
+             Last error: {:?}. Exiting so supervisor restarts the process — \
+             on restart, recovery will re-run block {} from scratch.",
+            height, ATOMIC_RETRIES, last_err, height
+        );
+        std::process::exit(1);
     }
 
     /// Set the snapshot provider
@@ -481,51 +479,101 @@ where
         height: u32,
         block_data: Vec<u8>,
     ) -> SyncResult<()> {
-        // Normal block processing
-        self.runtime.process_block(height, &block_data).await?;
-
-        // Get state root and block hash
-        let state_root = self.runtime.get_state_root(height).await?;
-
+        // Atomic path: same retry+exit policy as `process_block`. The block
+        // hash comes from the node here because this entry point doesn't
+        // receive it from a caller; it's the snapshot-sync-loop's own
+        // fetcher boundary. The SPV continuity check still happens inside
+        // the runtime's `validate_block_connects` path when callers route
+        // through `process_block`, but this convenience method on the
+        // snapshot loop skips it because the loop has already done reorg
+        // handling and chain-continuity inspection upstream.
         let block_hash = self.node.get_block_hash(height).await?;
 
-        // Update storage
-        {
-            let mut storage = self.storage.write().await;
-            storage.set_indexed_height(height).await?;
-            storage.store_block_hash(height, &block_hash).await?;
-            storage.store_state_root(height, &state_root).await?;
-        }
-
-        // CRITICAL FIX: Only update current_height AFTER all operations succeed
-        // This prevents the height from advancing when there are failures
-        self.current_height.store(height + 1, Ordering::SeqCst);
-        self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
-
-        {
-            let mut last_time = self.last_block_time.write().await;
-            *last_time = Some(SystemTime::now());
-        }
-
-        // Check if we should create a snapshot
-        if let Err(e) = self.create_snapshot_if_needed(height).await {
-            warn!("Failed to create snapshot at height {}: {}", height, e);
-        }
-
-        // Register snapshot with server if running
-        let mode = self.sync_mode.read().await;
-        if matches!(*mode, SyncMode::SnapshotServer(_)) {
-            if let Some(provider) = self.snapshot_provider.read().await.as_ref() {
-                if provider.should_create_snapshot(height) {
-                    if let Some(_server) = self.snapshot_server.write().await.as_mut() {
-                        // This would be implemented to register the snapshot with the server
-                        debug!("Would register snapshot at height {} with server", height);
+        const ATOMIC_RETRIES: u32 = 5;
+        let mut last_err: Option<SyncError> = None;
+        for attempt in 1..=ATOMIC_RETRIES {
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically (snapshot loop, attempt {}/{})",
+                                height, attempt, ATOMIC_RETRIES
+                            );
+                            self.current_height.store(height + 1, Ordering::SeqCst);
+                            self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
+                            {
+                                let mut last_time = self.last_block_time.write().await;
+                                *last_time = Some(SystemTime::now());
+                            }
+                            // Snapshot creation hooks (best-effort, non-atomic).
+                            if let Err(e) = self.create_snapshot_if_needed(height).await {
+                                warn!("Failed to create snapshot at height {}: {}", height, e);
+                            }
+                            let mode = self.sync_mode.read().await;
+                            if matches!(*mode, SyncMode::SnapshotServer(_)) {
+                                if let Some(provider) =
+                                    self.snapshot_provider.read().await.as_ref()
+                                {
+                                    if provider.should_create_snapshot(height) {
+                                        if let Some(_server) =
+                                            self.snapshot_server.write().await.as_mut()
+                                        {
+                                            debug!(
+                                                "Would register snapshot at height {} with server",
+                                                height
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            warn!(
+                                "Snapshot-loop atomic commit failed for height {} (attempt {}/{}): {} — retrying",
+                                height, attempt, ATOMIC_RETRIES, commit_err
+                            );
+                            last_err = Some(commit_err);
+                        }
                     }
                 }
+                Err(atomic_err) => {
+                    warn!(
+                        "Snapshot-loop atomic execution failed for height {} (attempt {}/{}): {} — retrying",
+                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    );
+                    last_err = Some(atomic_err);
+                }
             }
+
+            if let Err(e) = self.runtime.refresh_memory().await {
+                warn!(
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
+                );
+            }
+
+            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
 
-        Ok(())
+        error!(
+            "FATAL: snapshot-loop atomic block apply failed for height {} after {} retries. \
+             Last error: {:?}. Exiting so supervisor restarts the process — \
+             on restart, recovery will re-run block {} from scratch.",
+            height, ATOMIC_RETRIES, last_err, height
+        );
+        std::process::exit(1);
     }
 
     /// Run the main sync loop with snapshot support

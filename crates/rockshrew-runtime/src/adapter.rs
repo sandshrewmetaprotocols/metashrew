@@ -4,9 +4,21 @@ use anyhow::Result;
 use metashrew_runtime::{
     BatchLike, KVTrackerFn, KeyValueStoreLike, TIP_HEIGHT_KEY,
 };
-use rocksdb::{Options, WriteBatch, WriteBatchIterator, DB};
+use rocksdb::{Options, WriteBatch, WriteBatchIterator, WriteOptions, DB};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
+
+/// `WriteOptions` for the block-commit atomic batch: forces a WAL fsync
+/// before the call returns. The user explicitly accepted the throughput
+/// cost in exchange for the determinism guarantee that "if `write` returns
+/// Ok, the block is durable; if it returns Err or the process dies, the
+/// block is *not* committed and will be re-run on restart". Without sync,
+/// RocksDB can return Ok and then lose the write across host crash / OOM.
+fn block_commit_write_options() -> WriteOptions {
+    let mut wo = WriteOptions::default();
+    wo.set_sync(true);
+    wo
+}
 
 /// In-memory shadow used by the preview path. Maps labeled-key bytes to
 /// `Some(value)` for an override and `None` for a tombstone (delete). When
@@ -155,9 +167,16 @@ impl RocksDBRuntimeAdapter {
         atomic_batch
     }
 
-    /// Write an atomic batch to the database
+    /// Write an atomic batch to the database with WAL fsync enabled.
+    ///
+    /// This is the production block-commit path: it issues the entire batch
+    /// (SMT updates, length counters, state-root marker, manifest, tip
+    /// pointers, block-hash record) as a single durable transaction. If
+    /// the call returns Ok, the block is committed and will survive a
+    /// host crash. If it returns Err, nothing was committed and the block
+    /// will be re-executed on the next pass.
     pub fn write_atomic_batch(&self, batch: WriteBatch) -> Result<(), rocksdb::Error> {
-        self.db.write(batch)
+        self.db.write_opt(batch, &block_commit_write_options())
     }
 }
 

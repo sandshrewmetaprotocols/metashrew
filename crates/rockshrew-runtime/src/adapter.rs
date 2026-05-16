@@ -196,6 +196,16 @@ impl BatchLike for RocksDBBatch {
         let labeled_key = make_labeled_key_fast(k.as_ref());
         self.0.delete(labeled_key);
     }
+
+    /// Return the raw RocksDB write-batch bytes so the higher-level
+    /// `commit_atomic` can reconstruct this batch via `WriteBatch::from_data`
+    /// and append the per-block metadata writes (block-hash, state-root,
+    /// indexed-height) into the SAME batch — committed in exactly ONE
+    /// `db.write_opt(batch, sync=true)` call. This is the wire format that
+    /// makes single-batch atomic block-apply work end-to-end.
+    fn to_bytes(&self) -> Vec<u8> {
+        self.0.data().to_vec()
+    }
 }
 
 // BatchTracker captures key-value pairs during batch operations for tracking

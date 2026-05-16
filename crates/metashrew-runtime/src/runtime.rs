@@ -1914,12 +1914,13 @@ pub async fn setup_linker_view(
                 "env",
                 "__flush",
                 move |mut caller: Caller<'_, State>, encoded: i32| {
-                    let (height, mut db, block_hash) = {
+                    let (height, mut db, block_hash, pending_slot) = {
                         let guard = context_ref.read().unwrap();
                         (
                             guard.height,
                             guard.db.clone(),
                             guard.current_block_hash.clone(),
+                            guard.pending_atomic_batch.clone(),
                         )
                     };
 
@@ -1965,23 +1966,62 @@ pub async fn setup_linker_view(
                     for (k, v) in &key_values {
                         db.track_kv_update(k.clone(), v.clone());
                     }
-                    match batched_smt.calculate_and_store_state_root_batched(
-                        height,
-                        &key_values,
-                        &block_hash,
-                    ) {
-                        Ok(_) => {},
-                        Err(e) => {
-                            log::error!(
-                                "flush atomic write failed at height {}: {:?} \
-                                 (likely ENOSPC or I/O error — block NOT committed, \
-                                 indexer will retry on next pass)",
-                                height, e
-                            );
-                            *caller.data_mut().last_flush_error.lock().unwrap() =
-                                Some(format!("{:?}", e));
-                            caller.data_mut().had_failure = true;
-                            return;
+
+                    // ATOMIC PATH (production block-apply, single-batch all-or-nothing):
+                    // when `pending_atomic_batch` slot is armed by `process_block_atomic`,
+                    // we BUILD the WASM batch but DON'T commit it — instead we serialize
+                    // the batch bytes and stash them in the slot. `commit_atomic` will
+                    // reconstruct, append metadata writes, and submit one
+                    // `db.write_opt(batch, sync=true)`. ONE write, ONE fsync, true
+                    // all-or-nothing.
+                    //
+                    // LEGACY PATH (`process_block()` no-block-hash, tests): when the slot
+                    // is `None`, fall through to the old "build and write immediately"
+                    // helper. Preserves behavior for non-atomic callers.
+                    let armed_for_atomic = pending_slot.lock().unwrap().is_some();
+                    if armed_for_atomic {
+                        match batched_smt.build_state_root_batch_unwritten(
+                            height,
+                            &key_values,
+                            &block_hash,
+                        ) {
+                            Ok((_state_root, batch)) => {
+                                use crate::traits::BatchLike;
+                                let bytes = batch.to_bytes();
+                                *pending_slot.lock().unwrap() = Some(bytes);
+                            }
+                            Err(e) => {
+                                log::error!(
+                                    "flush batch build failed at height {}: {:?} \
+                                     (block NOT committed, indexer will retry on next pass)",
+                                    height, e
+                                );
+                                *caller.data_mut().last_flush_error.lock().unwrap() =
+                                    Some(format!("{:?}", e));
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        }
+                        batched_smt.clear_caches();
+                    } else {
+                        match batched_smt.calculate_and_store_state_root_batched(
+                            height,
+                            &key_values,
+                            &block_hash,
+                        ) {
+                            Ok(_) => {},
+                            Err(e) => {
+                                log::error!(
+                                    "flush atomic write failed at height {}: {:?} \
+                                     (likely ENOSPC or I/O error — block NOT committed, \
+                                     indexer will retry on next pass)",
+                                    height, e
+                                );
+                                *caller.data_mut().last_flush_error.lock().unwrap() =
+                                    Some(format!("{:?}", e));
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
                         }
                     }
 
@@ -2196,17 +2236,31 @@ pub async fn setup_linker_view(
     }
 
     /// Process a block atomically and return all operations in a batch
-    /// This is the atomic version that collects all operations without committing them
+    /// This is the atomic version that collects all operations without committing them.
+    ///
+    /// Critical invariant: this method DOES NOT commit anything to the database.
+    /// It arms a single-batch slot on the context, runs the WASM module, and the
+    /// WASM `__flush` handler builds-but-does-not-write the per-block batch into
+    /// that slot. The serialized batch bytes are returned via
+    /// `AtomicBlockResult::batch_data` for `StorageAdapter::commit_atomic` to
+    /// reconstruct, append metadata writes, and commit in exactly one
+    /// `db.write_opt(batch, sync=true)` call. ONE write, ONE fsync, all-or-nothing.
     pub async fn process_block_atomic(
         &self,
         height: u32,
         block_data: &[u8],
         block_hash: &[u8],
     ) -> Result<crate::traits::AtomicBlockResult> {
-        // Set the block data and height in context. `current_block_hash` is
-        // bundled into the same atomic batch as the SMT writes inside __flush —
-        // see the comment block on
-        // `BatchedSMTHelper::calculate_and_store_state_root_batched`.
+        // Arm the single-batch slot BEFORE setting context height/block, then
+        // populate context. The WASM `__flush` host function checks this slot:
+        // when armed (Some), it builds the batch and stashes bytes here instead
+        // of committing — so `commit_atomic` can append metadata and commit
+        // atomically.
+        let pending_slot = {
+            let guard = self.context.read().unwrap();
+            guard.pending_atomic_batch.clone()
+        };
+        *pending_slot.lock().unwrap() = Some(Vec::new()); // armed; will be replaced by __flush
         {
             let mut guard = self.context.write().unwrap();
             guard.block = block_data.to_vec();
@@ -2255,22 +2309,34 @@ pub async fn setup_linker_view(
             }
         };
 
-        // Calculate the state root and batch data before memory refresh
+        // Calculate the state root and batch data before memory refresh.
+        // The batch_data is the SERIALIZED RocksDB-WriteBatch bytes that
+        // __flush built and stashed in `pending_atomic_batch`. We DISARM
+        // the slot here (set to None) regardless of success/failure so the
+        // retry loop in `Sync::process_block` starts each attempt from a
+        // clean slate — process_block_atomic re-arms it on the next call.
         let (state_root, batch_data) = match execution_result {
             Ok(_) => {
                 let state_root = self.calculate_state_root().await?;
-                let batch_data = self.get_accumulated_batch().await?;
-                
+                // Extract and disarm the pending atomic batch slot.
+                let batch_data = {
+                    let mut slot = pending_slot.lock().unwrap();
+                    slot.take().unwrap_or_default()
+                };
+
                 // Log the state root for atomic block processing
                 log::info!(
-                    "processed block {} atomically, state root: {}",
+                    "processed block {} atomically, state root: {} ({} batch bytes)",
                     height,
-                    hex::encode(&state_root)
+                    hex::encode(&state_root),
+                    batch_data.len()
                 );
-                
+
                 (state_root, batch_data)
             }
             Err(e) => {
+                // Disarm slot on failure so the next retry starts clean.
+                *pending_slot.lock().unwrap() = None;
                 // ALWAYS refresh memory even on execution failure for deterministic behavior
                 if let Err(refresh_err) = self.refresh_memory().await {
                     log::error!("Failed to refresh memory after failed atomic block execution: {}", refresh_err);

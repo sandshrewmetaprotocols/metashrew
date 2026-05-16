@@ -251,6 +251,7 @@ impl StorageAdapter for MockStorage {
         height: u32,
         block_hash: &[u8],
         state_root: &[u8],
+        _batch_data: &[u8],
     ) -> SyncResult<()> {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));

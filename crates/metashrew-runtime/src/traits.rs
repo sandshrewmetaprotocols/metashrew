@@ -71,6 +71,24 @@ pub trait BatchLike {
     ///
     /// This is used to create a fresh batch for collecting operations.
     fn default() -> Self;
+
+    /// Serialize the batch to an opaque byte representation suitable for
+    /// shipping through `AtomicBlockResult::batch_data` and rebuilding on
+    /// the storage-adapter side.
+    ///
+    /// The wire format is implementation-defined: for the production RocksDB
+    /// backend it is `rocksdb::WriteBatch::data()` bytes (which `WriteBatch::from_data`
+    /// can reconstruct). For in-memory / mock backends a default empty
+    /// representation is fine — those backends never round-trip through the
+    /// single-batch atomic-commit path used in production.
+    ///
+    /// Default impl returns an empty Vec, which is correct for adapters that
+    /// commit synchronously via `write()` and don't participate in the
+    /// "build-once-commit-once" atomicity contract enforced by
+    /// `StorageAdapter::commit_atomic`.
+    fn to_bytes(&self) -> Vec<u8> {
+        Vec::new()
+    }
 }
 
 /// Generic trait for key-value storage backends

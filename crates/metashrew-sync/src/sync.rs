@@ -549,7 +549,7 @@ where
                     let commit_res = {
                         let mut storage = self.storage.write().await;
                         storage
-                            .commit_atomic(height, &result.block_hash, &result.state_root)
+                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
                             .await
                     };
                     match commit_res {
@@ -904,7 +904,7 @@ where
                     let commit_res = {
                         let mut storage = self.storage.write().await;
                         storage
-                            .commit_atomic(height, &result.block_hash, &result.state_root)
+                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
                             .await
                     };
                     match commit_res {

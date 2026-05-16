@@ -226,8 +226,12 @@ pub trait StorageAdapter: Send + Sync {
         Err(crate::SyncError::Storage("Database handle not available for this storage adapter".to_string()))
     }
 
-    /// Atomically commit a block's metadata (indexed-height pointer, block-hash record,
-    /// and state-root record) in a single durable write.
+    /// Atomically commit a block in a SINGLE underlying write: the WASM-side
+    /// per-block batch (`batch_data`, produced by `process_block_atomic` and
+    /// shipped through `AtomicBlockResult::batch_data`) AND the sync-framework
+    /// metadata writes (indexed-height pointer, block-hash record, state-root
+    /// record) are submitted together — one `db.write_opt(batch, sync=true)`,
+    /// one fsync.
     ///
     /// # Invariants enforced by the implementation
     ///
@@ -235,20 +239,24 @@ pub trait StorageAdapter: Send + Sync {
     ///   `height != current_indexed_height + 1`. This matches the user-stated invariant
     ///   that `tip_height` advances exactly 0 → 1 → 2 → … with no gaps, no skips, and
     ///   no rewrites outside of an explicit `rollback_to_height` call.
-    /// - **All-or-nothing**: the three writes are bundled into one underlying batch and
-    ///   submitted with sync/fsync enabled, so a crash either leaves the DB at
-    ///   `tip = height - 1` (nothing committed) or `tip = height` (everything committed).
-    ///   A "partial commit" is not a representable state.
+    /// - **True all-or-nothing**: WASM writes + metadata writes land in one
+    ///   underlying batch with sync/fsync, so a crash leaves the DB at either
+    ///   `tip = height - 1` (nothing committed) or `tip = height` (everything
+    ///   committed). There is no intermediate state where the WASM writes
+    ///   landed but the metadata didn't, or vice versa. This closes the
+    ///   two-fsync window present in pre-rc.4 builds, which is the class of
+    ///   bug consistent with the supply-drift observed on mainnet g/h pods.
     ///
     /// The default implementation here is a *non-atomic* shim that calls the three
-    /// individual mutators in sequence. It exists only so that legacy / mock storage
-    /// adapters keep compiling — RocksDB-backed adapters MUST override it to get the
-    /// atomicity + durability guarantees described above.
+    /// individual mutators in sequence and ignores `batch_data`. It exists only so
+    /// that legacy / mock storage adapters keep compiling — RocksDB-backed adapters
+    /// MUST override it to get the atomicity + durability guarantees described above.
     async fn commit_atomic(
         &mut self,
         height: u32,
         block_hash: &[u8],
         state_root: &[u8],
+        _batch_data: &[u8],
     ) -> SyncResult<()> {
         // Strict in-order check (default impl): refuse to commit out of sequence.
         let current = self.get_indexed_height().await?;

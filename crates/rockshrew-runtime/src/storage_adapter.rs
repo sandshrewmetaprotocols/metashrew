@@ -185,29 +185,45 @@ impl StorageAdapter for RocksDBStorageAdapter {
         Ok(self.db.clone())
     }
 
-    /// Bundle the three metadata writes for block `height` into a single
-    /// RocksDB `WriteBatch` and commit it with `WriteOptions::set_sync(true)`.
+    /// Commit block `height` atomically: reconstruct the WASM-side `WriteBatch`
+    /// from `batch_data` (serialized by `BatchLike::to_bytes()` inside
+    /// `process_block_atomic`'s __flush hook), APPEND the sync-framework metadata
+    /// writes (block-hash record, state-root record, indexed-height pointer)
+    /// into the SAME batch, and submit exactly ONE
+    /// `db.write_opt(batch, WriteOptions::set_sync(true))` call.
     ///
-    /// Note: the **WASM-side __flush** (`BatchedSMTHelper::calculate_and_store_state_root_batched`)
-    /// already writes the indexed-height pointer, the state-root marker, the
-    /// per-height manifest, and the block-hash record into a single batch
-    /// inside the runtime. This adapter-level `commit_atomic` is the
-    /// sync-framework-side commit that runs *after* `process_block_atomic`
-    /// for callers (mock storage, tests, or non-WASM runtimes) that don't
-    /// route their k/v writes through the __flush path. For the production
-    /// RocksDB path the two batches are idempotent (same keys, same values),
-    /// so writing both is correct.
+    /// This is the single point of database commit for block-apply. Pre-rc.4 had
+    /// two writes — `RocksDBRuntimeAdapter::write` for the WASM batch and this
+    /// `commit_atomic` for the three metadata writes — which meant a process
+    /// crash between the two fsyncs could leave the DB in a partial state:
+    /// WASM-side state for block N committed (alkanes balances, totalsupply, etc.)
+    /// but the indexed-height pointer / block-hash / state-root metadata missing
+    /// or stale, so on restart the indexer would re-apply block N on top of
+    /// already-applied state, double-counting append-only updates and producing
+    /// the supply drift we saw on g/h. With this single-batch design, RocksDB's
+    /// `WriteBatch` atomicity primitive guarantees that's not a representable
+    /// outcome.
     ///
     /// Strict in-order check: refuses to commit unless `height == tip + 1`,
     /// matching the user-stated invariant that we never skip or rewrite a
-    /// block outside of an explicit reorg rollback.
+    /// block outside of an explicit reorg rollback. The check reads tip
+    /// from the on-disk snapshot of `__INTERNAL/height` — NOT from any keys
+    /// staged in the in-flight batch — so the WASM-side batch can no longer
+    /// self-reject the commit it produced (the rc.4 Option-A failure mode is
+    /// also closed because the height pointer is now owned exclusively by
+    /// `commit_atomic` and lands in the same batch as the tip-advancement).
     async fn commit_atomic(
         &mut self,
         height: u32,
         block_hash: &[u8],
         state_root: &[u8],
+        batch_data: &[u8],
     ) -> SyncResult<()> {
-        // Strict in-order progression check.
+        // Strict in-order progression check. Reads the on-disk tip — the
+        // in-flight `batch_data` bytes are NOT applied yet, so this check
+        // cannot self-reject the in-flight commit. This was the failure mode
+        // closed by rc.4 Option A; we preserve the closure structurally here
+        // by owning the height-pointer write inside commit_atomic.
         let height_key = b"__INTERNAL/height".to_vec();
         let current = match self.db.get(&height_key) {
             Ok(Some(value)) if value.len() >= 4 => {
@@ -238,8 +254,21 @@ impl StorageAdapter for RocksDBStorageAdapter {
             )));
         }
 
-        // Build the atomic batch.
-        let mut batch = WriteBatch::default();
+        // Reconstruct the WASM-side batch from its serialized form. Empty
+        // `batch_data` is acceptable for callers (legacy tests, mock paths)
+        // that don't ship a WASM batch through this entrypoint — in that
+        // case we just write the three metadata records, which matches the
+        // pre-rc.4 behavior.
+        let mut batch = if batch_data.is_empty() {
+            WriteBatch::default()
+        } else {
+            WriteBatch::from_data(batch_data)
+        };
+
+        // APPEND the three metadata records into the SAME batch. After this
+        // step, the batch holds every write for block `height` — WASM
+        // state changes AND sync-framework metadata — ready to commit as
+        // a single RocksDB transaction.
         let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
         batch.put(&blockhash_key, block_hash);
 
@@ -249,10 +278,12 @@ impl StorageAdapter for RocksDBStorageAdapter {
         let height_bytes = height.to_le_bytes();
         batch.put(&height_key, &height_bytes);
 
-        // Commit with WAL fsync. This is the durability guarantee that lets
-        // restart-recovery rely on "height N is either fully committed or not
-        // committed at all" — without sync=true, a crash before the OS page
-        // cache flushes could lose the write after we returned Ok.
+        // ONE write_opt with sync=true. RocksDB's WriteBatch primitive
+        // guarantees atomicity within a single batch: every put is visible
+        // post-commit, or none of them is. WAL fsync is the durability
+        // guarantee that lets restart-recovery rely on the all-or-nothing
+        // invariant — without sync=true, a crash before the OS page cache
+        // flushes could lose the write after we returned Ok.
         self.db
             .write_opt(batch, &sync_write_options())
             .map_err(|e| SyncError::Storage(format!("commit_atomic write failed at height {}: {}", height, e)))

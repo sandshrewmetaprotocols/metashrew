@@ -368,17 +368,62 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
     /// Optimized batch calculation of state root for multiple keys with minimal storage.
     ///
     /// All writes — SMT updates, length counters, state-root marker, manifest,
-    /// runtime tip-height, sync-framework indexed-height, and block-hash record —
-    /// are bundled into a single atomic RocksDB batch so a process crash, OOM kill,
-    /// or ENOSPC anywhere in the path leaves the database at either height N-1 or
-    /// height N, never a partial mix. `block_hash` may be empty for callers that
-    /// don't track it (tests, legacy fast paths).
+    /// runtime tip-height, sync-framework indexed-height-tracking, and block-hash
+    /// record — are bundled into a single atomic RocksDB batch so a process crash,
+    /// OOM kill, or ENOSPC anywhere in the path leaves the database at either
+    /// height N-1 or height N, never a partial mix. `block_hash` may be empty
+    /// for callers that don't track it (tests, legacy fast paths).
+    ///
+    /// This is the LEGACY "build-and-commit-inline" entry point, kept for the
+    /// non-atomic `process_block()` path and for non-RocksDB backends that
+    /// can't ship `WriteBatch` bytes across the runtime/storage-adapter boundary.
+    /// For the production atomic path (`process_block_atomic` →
+    /// `StorageAdapter::commit_atomic`), use
+    /// `build_state_root_batch_unwritten()` and ship the batch bytes to
+    /// `commit_atomic` so the WASM-side writes and the sync-framework metadata
+    /// writes (indexed-height pointer + block-hash + state-root) all land in
+    /// ONE `db.write_opt(batch, sync=true)` call. That eliminates the
+    /// two-fsync window where a crash between TX1 and TX2 leaves the database
+    /// in a partial state — the structural fix that closes the supply-drift
+    /// class of bug observed on g/h.
     pub fn calculate_and_store_state_root_batched(
         &mut self,
         height: u32,
         key_values: &[(Vec<u8>, Vec<u8>)],
         block_hash: &[u8],
     ) -> Result<[u8; 32]> {
+        let (new_root, batch) = self.build_state_root_batch_unwritten(height, key_values, block_hash)?;
+        // Write entire batch at once
+        self.storage.write(batch)
+            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
+        // Clear caches after block processing
+        self.clear_caches();
+        Ok(new_root)
+    }
+
+    /// Build the per-block atomic batch WITHOUT writing it. Returns the new
+    /// state root and the populated batch so a higher layer can:
+    ///   1. Append additional writes (e.g. sync-framework metadata) into the
+    ///      SAME batch, and
+    ///   2. Submit the whole thing in exactly ONE `storage.write(batch)` /
+    ///      `db.write_opt(batch, sync=true)` call.
+    ///
+    /// This is the primitive `process_block_atomic` uses to build a batch
+    /// it can ship through `AtomicBlockResult::batch_data` for
+    /// `StorageAdapter::commit_atomic` to commit atomically together with
+    /// the indexed-height pointer, block-hash record, and state-root marker.
+    ///
+    /// IMPORTANT: this method INTENTIONALLY skips writing the sync-framework
+    /// `__INTERNAL/height` pointer and `/__INTERNAL/height-to-hash/{height}`
+    /// record — those are owned by `commit_atomic` so they land in the same
+    /// batch as the strict-in-order check's tip-advancement write. Adding them
+    /// here would re-introduce the self-rejection bug fixed in rc.4 (Option A).
+    pub fn build_state_root_batch_unwritten(
+        &mut self,
+        height: u32,
+        key_values: &[(Vec<u8>, Vec<u8>)],
+        _block_hash: &[u8],
+    ) -> Result<([u8; 32], T::Batch)> {
         // Clear caches at start of block processing
         self.clear_caches();
 
@@ -445,33 +490,22 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             batch.put(&manifest_key, &manifest_value);
         }
 
-        // Runtime-side tip pointer (used by view/preview lookups).
+        // Runtime-side tip pointer (used by view/preview lookups). This stays
+        // here because it's a runtime-side concern that view-paths read; it's
+        // the SAME value the metadata write in `commit_atomic` lands on, so
+        // co-resident in the same batch is fine.
         batch.put(
             &crate::runtime::TIP_HEIGHT_KEY.as_bytes().to_vec(),
             &height.to_le_bytes(),
         );
 
-        // Sync-framework indexed-height pointer. Must move in lockstep with
-        // TIP_HEIGHT_KEY or the indexer can re-apply an already-committed block
-        // on restart, producing duplicate append-only entries and a divergent
-        // database. Same key as `RocksDBStorageAdapter::get_indexed_height`.
-        batch.put(b"__INTERNAL/height".as_ref(), &height.to_le_bytes());
+        // NOTE: __INTERNAL/height and /__INTERNAL/height-to-hash/{N} are
+        // INTENTIONALLY OMITTED here — owned by `commit_atomic` to keep the
+        // strict-in-order check simple. They will be appended to this batch
+        // by `commit_atomic` after deserialization, then the whole thing
+        // committed in one `db.write_opt(batch, sync=true)` call.
 
-        // Sync-framework block-hash record. Same key as
-        // `RocksDBStorageAdapter::store_block_hash`.
-        if !block_hash.is_empty() {
-            let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
-            batch.put(&blockhash_key, block_hash);
-        }
-
-        // Write entire batch at once
-        self.storage.write(batch)
-            .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))?;
-
-        // Clear caches after block processing
-        self.clear_caches();
-
-        Ok(new_root)
+        Ok((new_root, batch))
     }
 
     /// Fast lookup using the new append-only approach with binary search

@@ -15,6 +15,30 @@ use tokio::sync::RwLock;
 
 use crate::ssh_tunnel::{make_request_with_tunnel, SshTunnel, SshTunnelConfig};
 
+/// Map a view-runtime error into the SyncError taxonomy.
+///
+/// `wasmtime` surfaces a memory-cap trap with the substring
+/// "memory growth has been disallowed" (StoreLimits trap_on_grow_failure)
+/// or "out of memory" depending on the trap source. We sniff the chain and
+/// promote those to [`SyncError::ResourceExhausted`] so the JSON-RPC layer
+/// can return a -32002 error instead of a generic ViewFunction failure.
+fn classify_view_error(err: anyhow::Error) -> SyncError {
+    let chain = format!("{err:#}");
+    let lower = chain.to_lowercase();
+    if lower.contains("memory growth")
+        || lower.contains("memory.grow")
+        || lower.contains("out of memory")
+        || lower.contains("memory size")
+        || lower.contains("cannotgrow")
+    {
+        SyncError::ResourceExhausted(format!(
+            "view function exceeded memory budget: {chain}"
+        ))
+    } else {
+        SyncError::ViewFunction(format!("View function failed: {chain}"))
+    }
+}
+
 // JSON-RPC request/response structs for BitcoinRpcAdapter
 #[derive(Serialize, Deserialize)]
 pub struct JsonRpcRequest {
@@ -209,16 +233,24 @@ impl BitcoinNodeAdapter for BitcoinRpcAdapter {
 }
 
 /// MetashrewRuntime adapter that wraps the actual MetashrewRuntime and is snapshot-aware.
-/// 
+///
 /// No external locking is needed for the runtime because:
 /// - View/preview calls create independent WASM runtime instances
 /// - Block processing is sequential (one block at a time)
 /// - Database is append-only with height-based reads (concurrent reads are safe)
 /// - MetashrewRuntime handles internal synchronization for context/instance access
+///
+/// v9.0.5-rc.2 view-runtime isolation: the adapter also holds an optional
+/// per-view [`metashrew_runtime::ViewLimitsConfig`]. When set, `execute_view`
+/// builds a fresh `StoreLimits` from the config and threads it through
+/// `view_with_limits` so every view store is memory-capped. The indexer
+/// path (`process_block` / `process_block_atomic`) does NOT consult the
+/// config — block-application stays unbounded.
 #[derive(Clone)]
 pub struct MetashrewRuntimeAdapter<T: KeyValueStoreLike + Clone + Send + Sync + 'static> {
     runtime: Arc<MetashrewRuntime<T>>,
     snapshot_manager: Arc<RwLock<Option<Arc<RwLock<crate::snapshot::SnapshotManager>>>>>,
+    view_limits: Option<Arc<metashrew_runtime::ViewLimitsConfig>>,
 }
 
 impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapter<T> {
@@ -226,6 +258,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapt
         Self {
             runtime,
             snapshot_manager: Arc::new(RwLock::new(None)),
+            view_limits: None,
         }
     }
 
@@ -236,6 +269,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntimeAdapt
 
     pub async fn get_snapshot_manager(&self) -> Option<Arc<RwLock<crate::snapshot::SnapshotManager>>> {
         self.snapshot_manager.read().await.as_ref().cloned()
+    }
+
+    /// Install a view-runtime limits config. Every subsequent
+    /// `execute_view` call will be constrained by the per-view memory cap
+    /// in `cfg.view_store_limits()`. Pass `None` to disable.
+    pub fn with_view_limits(mut self, cfg: Arc<metashrew_runtime::ViewLimitsConfig>) -> Self {
+        self.view_limits = Some(cfg);
+        self
     }
 }
 
@@ -283,10 +324,18 @@ where
         // view() creates a completely independent WASM runtime instance
         // No external locking needed - the method handles internal coordination
         // Database reads are safe due to append-only structure and height-based queries
-        let result = self.runtime
-            .view(call.function_name, &call.input_data, call.height)
+        //
+        // v9.0.5-rc.2: if a ViewLimitsConfig is installed, thread its
+        // StoreLimits through so the view store is memory-capped. A WASM
+        // memory.grow that hits the cap traps; we map that to
+        // SyncError::ResourceExhausted so the JSON-RPC handler can surface
+        // it as a -32002 error.
+        let limits = self.view_limits.as_ref().map(|c| c.view_store_limits());
+        let result = self
+            .runtime
+            .view_with_limits(call.function_name, &call.input_data, call.height, limits)
             .await
-            .map_err(|e| SyncError::ViewFunction(format!("View function failed: {}", e)))?;
+            .map_err(|e| classify_view_error(e))?;
         Ok(ViewResult { data: result })
     }
 

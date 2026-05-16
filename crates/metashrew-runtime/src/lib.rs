@@ -11,12 +11,18 @@ pub mod rollback;
 pub mod runtime;
 pub mod smt;
 pub mod traits;
+pub mod view_limits;
 
 
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;
 pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
 pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
+pub use view_limits::{
+    MemoryFloor, ViewAcquireError, ViewLimiter, ViewLimitsConfig, ViewPermit,
+    DEFAULT_ACQUIRE_TIMEOUT, DEFAULT_MEMORY_FLOOR_REFRESH_MS, DEFAULT_VIEW_CONCURRENCY,
+    DEFAULT_VIEW_MEMORY_FLOOR_MB, DEFAULT_VIEW_MEMORY_MB,
+};
 
 // Re-export helper types
 pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};

@@ -820,23 +820,51 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     /// - WASM execution encounters an error
     /// - Memory access violations occur
         pub async fn view(&self, symbol: String, input: &Vec<u8>, height: u32) -> Result<Vec<u8>> {
+            self.view_with_limits(symbol, input, height, None).await
+        }
+
+        /// Same as [`view`] but allows the caller to thread per-view
+        /// [`wasmtime::StoreLimits`] (e.g. capping linear-memory growth at
+        /// `--view-memory-mb`).
+        ///
+        /// v9.0.5-rc.2: under heavy view-call load the view path was
+        /// previously the dominant memory-allocator in the indexer
+        /// process — sustained mallocs across N concurrent stores OOM-killed
+        /// the indexer thread. With a per-view memory cap, growths beyond
+        /// the budget trap the WASM cleanly and surface as a
+        /// `ResourceExhausted`-style error to the JSON-RPC caller instead
+        /// of bringing down the process.
+        ///
+        /// **Important**: this only affects the view path. The indexer
+        /// store (created by `new` / `new_with_db_indexer`) still uses
+        /// unbounded `StoreLimits` so block-application can grow memory as
+        /// needed for normal block processing.
+        pub async fn view_with_limits(
+            &self,
+            symbol: String,
+            input: &Vec<u8>,
+            height: u32,
+            store_limits: Option<StoreLimits>,
+        ) -> Result<Vec<u8>> {
             let db = {
                 let guard = self.context.read().unwrap();
                 guard.db.clone()
             };
-    
-            // Create a new async runtime for the view
-            let view_runtime = Self::new_with_db_async(
+
+            // Create a new async runtime for the view, optionally with a
+            // memory-capping StoreLimits.
+            let view_runtime = Self::new_with_db_async_limited(
                 db,
                 height,
                 self.async_engine.clone(),
                 self.async_module.clone(),
+                store_limits,
             )
             .await?;
-    
+
             // Set the input as the block data
             view_runtime.context.write().unwrap().block = input.clone();
-    
+
             // Set fuel for cooperative yielding
             let result = {
                 let mut instance_guard = view_runtime.instance.lock().await;
@@ -844,22 +872,22 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 store.set_fuel(u64::MAX)?;
                 store
                     .fuel_async_yield_interval(Some(10000))?;
-    
+
                 // Execute view function
                 let func = instance
                     .get_typed_func::<(), i32>(&mut *store, symbol.as_str())
                     .map_err(|e| anyhow::anyhow!("{}", e)).with_context(|| format!("Failed to get view function '{}'", symbol))?;
-    
+
                 // Use async call
                 let result = func
                     .call_async(&mut *store, ())
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e)).with_context(|| format!("Failed to execute view function '{}'", symbol))?;
-    
+
                 let memory = instance
                     .get_memory(&mut *store, "memory")
                     .ok_or_else(|| anyhow!("Failed to get memory for view result"))?;
-    
+
                 Ok(read_arraybuffer_as_vec(
                     memory.data(store),
                     result,
@@ -1620,8 +1648,33 @@ pub async fn setup_linker_view(
         engine: wasmtime::Engine,
         module: wasmtime::Module,
     ) -> Result<MetashrewRuntime<T>> {
+        Self::new_with_db_async_limited(db, height, engine, module, None).await
+    }
+
+    /// Build an async view runtime, optionally overriding the per-store
+    /// `StoreLimits`.
+    ///
+    /// When `store_limits` is `Some`, the supplied limits (typically a
+    /// memory-cap built from `ViewLimitsConfig::view_store_limits()`)
+    /// replace the default unbounded limits on `State`. This is the v9.0.5-rc.2
+    /// view-runtime memory isolation hook — see `view_limits.rs`.
+    ///
+    /// When `store_limits` is `None`, behaviour is identical to the
+    /// pre-v9.0.5-rc.2 view path: a fresh `State` with `StoreLimits` set to
+    /// `usize::MAX` everywhere.
+    async fn new_with_db_async_limited(
+        db: T,
+        height: u32,
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+        store_limits: Option<StoreLimits>,
+    ) -> Result<MetashrewRuntime<T>> {
         let mut linker = Linker::<State>::new(&engine);
-        let mut wasmstore = Store::<State>::new(&engine, State::new());
+        let mut state = State::new();
+        if let Some(limits) = store_limits {
+            state.limits = limits;
+        }
+        let mut wasmstore = Store::<State>::new(&engine, state);
         let context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::<
             MetashrewRuntimeContext<T>,
         >::new(

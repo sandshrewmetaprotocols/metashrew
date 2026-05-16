@@ -153,6 +153,38 @@ pub struct Args {
     /// the leak is elsewhere (view path, snapshot path, etc.).
     #[arg(long, default_value_t = false)]
     pub enable_preview: bool,
+
+    /// v9.0.5-rc.2 view-runtime isolation: maximum number of
+    /// concurrent `metashrew_view` calls. Excess calls wait for a
+    /// permit up to the per-method JSON-RPC timeout, then return
+    /// "view-runtime saturated" instead of OOM-killing the indexer.
+    /// Default: 16.
+    #[arg(long, default_value_t = metashrew_runtime::DEFAULT_VIEW_CONCURRENCY)]
+    pub view_concurrency: usize,
+
+    /// v9.0.5-rc.2 view-runtime isolation: per-view WASM linear-memory
+    /// cap, in MB. A `memory.grow` past this budget traps and the
+    /// JSON-RPC handler returns a `ResourceExhausted` error
+    /// (-32002) rather than letting the view runtime allocate
+    /// unboundedly. Default: 256 MB. Not applied to the indexer
+    /// runtime — block-application stays unbounded.
+    #[arg(long, default_value_t = metashrew_runtime::DEFAULT_VIEW_MEMORY_MB)]
+    pub view_memory_mb: usize,
+
+    /// v9.0.5-rc.2 view-runtime isolation: host-memory floor, in MB.
+    /// When the host's available memory falls below this threshold
+    /// the view-runtime refuses NEW calls (returning "system memory
+    /// pressure, view runtime backing off"). The indexer keeps
+    /// processing normally. Default: 8192 MB (8 GB).
+    #[arg(long, default_value_t = metashrew_runtime::DEFAULT_VIEW_MEMORY_FLOOR_MB)]
+    pub view_memory_floor_mb: u64,
+
+    /// v9.0.5-rc.2 view-runtime isolation: cadence at which the
+    /// cached host-memory state is refreshed, in milliseconds. Set
+    /// higher to reduce per-call overhead; lower to react faster to
+    /// memory pressure. Default: 1000 (1 second).
+    #[arg(long, default_value_t = metashrew_runtime::DEFAULT_MEMORY_FLOOR_REFRESH_MS)]
+    pub view_memory_floor_refresh_ms: u64,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -168,6 +200,12 @@ where
     /// changed at runtime; checked in `handle_jsonrpc` before
     /// dispatching `metashrew_preview`.
     pub enable_preview: bool,
+    /// v9.0.5-rc.2 view-runtime isolation: per-process limiter that
+    /// gates `metashrew_view` and `metashrew_preview` calls behind a
+    /// concurrency semaphore + host-memory floor. None disables both
+    /// (kept for tests). The per-view WASM memory cap is enforced
+    /// separately by the `RuntimeAdapter` via `view_with_limits`.
+    pub view_limiter: Option<Arc<metashrew_runtime::ViewLimiter>>,
 }
 
 /// Per-method server-side timeout. Bounds how long a single JSON-RPC request
@@ -247,10 +285,40 @@ where
     // necessary because actix's handler future is bound to the request
     // lifecycle; the spawned task observes cancellation via the shared token
     // and exits at the next WASM yield point.
+    let view_limiter = state.view_limiter.clone();
+    let acquire_timeout = timeout;
     let work = tokio::spawn(async move {
         let work_fut = async move {
             match method_for_work.as_str() {
                 "metashrew_view" => {
+                    // v9.0.5-rc.2: acquire a view-runtime permit (concurrency
+                    // bound + host-memory floor) BEFORE we touch the
+                    // sync_engine read lock or instantiate any WASM. Bound
+                    // the wait by the per-method timeout so the JSON-RPC
+                    // outer timeout still wins.
+                    let _permit = if let Some(limiter) = view_limiter.as_ref() {
+                        match limiter.acquire(Some(acquire_timeout)).await {
+                            Ok(p) => Some(p),
+                            Err(metashrew_runtime::ViewAcquireError::Saturated) => {
+                                return Err(metashrew_sync::error::SyncError::Unavailable(
+                                    "view-runtime saturated, retry later".to_string(),
+                                ));
+                            }
+                            Err(metashrew_runtime::ViewAcquireError::MemoryFloor) => {
+                                return Err(metashrew_sync::error::SyncError::Unavailable(
+                                    "system memory pressure, view runtime backing off"
+                                        .to_string(),
+                                ));
+                            }
+                            Err(metashrew_runtime::ViewAcquireError::Closed) => {
+                                return Err(metashrew_sync::error::SyncError::Unavailable(
+                                    "view runtime is shutting down".to_string(),
+                                ));
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     // Acquire the outer read lock just long enough to clone
                     // the runtime Arc and capture current_height; drop the
                     // guard BEFORE running the WASM. This is the same data
@@ -303,6 +371,33 @@ where
                             )
                         ));
                     }
+                    // v9.0.5-rc.2: preview also runs WASM with an
+                    // unbounded store — gate it behind the same limiter
+                    // as metashrew_view so a preview burst can't OOM the
+                    // indexer either.
+                    let _permit = if let Some(limiter) = view_limiter.as_ref() {
+                        match limiter.acquire(Some(acquire_timeout)).await {
+                            Ok(p) => Some(p),
+                            Err(metashrew_runtime::ViewAcquireError::Saturated) => {
+                                return Err(metashrew_sync::error::SyncError::Unavailable(
+                                    "view-runtime saturated, retry later".to_string(),
+                                ));
+                            }
+                            Err(metashrew_runtime::ViewAcquireError::MemoryFloor) => {
+                                return Err(metashrew_sync::error::SyncError::Unavailable(
+                                    "system memory pressure, view runtime backing off"
+                                        .to_string(),
+                                ));
+                            }
+                            Err(metashrew_runtime::ViewAcquireError::Closed) => {
+                                return Err(metashrew_sync::error::SyncError::Unavailable(
+                                    "view runtime is shutting down".to_string(),
+                                ));
+                            }
+                        }
+                    } else {
+                        None
+                    };
                     // Same early-release pattern as metashrew_view —
                     // preview also runs WASM via runtime.execute_preview
                     // and snapshot isolation means we don't need the outer
@@ -374,7 +469,17 @@ where
     // Outer race: server-side timeout vs work-complete. On timeout, we
     // signal cancel and let the spawned task unwind on its own — no
     // need to abort, the cancellation token does it cleanly.
-    let outcome = tokio::select! {
+    // Outcome carries a typed error code so we can map Unavailable /
+    // ResourceExhausted to dedicated JSON-RPC error codes for client
+    // back-off logic. Code -32000 stays the generic "everything else"
+    // bucket for backwards compatibility.
+    enum RpcErrorCode {
+        Generic,        // -32000
+        Unavailable,    // -32001  (view-runtime semaphore / memory-floor)
+        ResourceExhausted, // -32002  (per-view memory cap)
+    }
+
+    let outcome: Result<String, (RpcErrorCode, String)> = tokio::select! {
         biased;
         _ = tokio::time::sleep(timeout) => {
             cancel.cancel();
@@ -383,11 +488,19 @@ where
                 method,
                 timeout.as_secs()
             );
-            Err(format!("Request timed out after {}s", timeout.as_secs()))
+            Err((RpcErrorCode::Generic, format!("Request timed out after {}s", timeout.as_secs())))
         }
         joined = work => match joined {
-            Ok(r) => r.map_err(|e| e.to_string()),
-            Err(join_err) => Err(format!("Worker task panicked: {}", join_err)),
+            Ok(Ok(r)) => Ok(r),
+            Ok(Err(e)) => {
+                let code = match &e {
+                    metashrew_sync::error::SyncError::Unavailable(_) => RpcErrorCode::Unavailable,
+                    metashrew_sync::error::SyncError::ResourceExhausted(_) => RpcErrorCode::ResourceExhausted,
+                    _ => RpcErrorCode::Generic,
+                };
+                Err((code, e.to_string()))
+            }
+            Err(join_err) => Err((RpcErrorCode::Generic, format!("Worker task panicked: {}", join_err))),
         },
     };
 
@@ -406,12 +519,17 @@ where
             "result": res,
             "id": id
         }),
-        Err(msg) => {
-            error!("RPC error for method {}: {}", method, msg);
+        Err((code, msg)) => {
+            let json_code = match code {
+                RpcErrorCode::Generic => -32000,
+                RpcErrorCode::Unavailable => -32001,
+                RpcErrorCode::ResourceExhausted => -32002,
+            };
+            error!("RPC error for method {}: code={} {}", method, json_code, msg);
             serde_json::json!({
                 "jsonrpc": "2.0",
                 "error": {
-                    "code": -32000,
+                    "code": json_code,
                     "message": msg
                 },
                 "id": id
@@ -510,9 +628,30 @@ where
              allow it"
         );
     }
+    // v9.0.5-rc.2 view-runtime isolation: build the per-process ViewLimiter
+    // from CLI flags. The same config is also handed to the runtime adapter
+    // below (via run_prod) so that StoreLimits get applied to each view
+    // store.
+    let view_limits_cfg = metashrew_runtime::ViewLimitsConfig {
+        view_concurrency: args.view_concurrency,
+        view_memory_bytes: args.view_memory_mb.saturating_mul(1024 * 1024),
+        view_memory_floor_bytes: args.view_memory_floor_mb.saturating_mul(1024 * 1024),
+        memory_floor_refresh: Duration::from_millis(args.view_memory_floor_refresh_ms),
+        acquire_timeout: metashrew_runtime::DEFAULT_ACQUIRE_TIMEOUT,
+    };
+    info!(
+        "View-runtime isolation: concurrency={} memory_cap={}MB floor={}MB refresh={}ms",
+        view_limits_cfg.view_concurrency,
+        view_limits_cfg.view_memory_bytes / (1024 * 1024),
+        view_limits_cfg.view_memory_floor_bytes / (1024 * 1024),
+        view_limits_cfg.memory_floor_refresh.as_millis(),
+    );
+    let view_limiter = Arc::new(metashrew_runtime::ViewLimiter::new(view_limits_cfg));
+
     let app_state = web::Data::new(AppState {
         sync_engine: sync_engine_arc.clone(),
         enable_preview: args.enable_preview,
+        view_limiter: Some(view_limiter.clone()),
     });
 
     // Cap the prefetch buffer at reorg_check_threshold so the fetcher can
@@ -865,6 +1004,18 @@ pub async fn run_prod(args: Args) -> Result<()> {
     info!("Database path: {}", args.db_path.display());
     info!("Optimizations: bloom filter tuning, cache optimization, reduced I/O overhead");
 
+    // v9.0.5-rc.2: per-view memory cap config — Arc'd once and shared with
+    // both the runtime adapter (so each view store gets the StoreLimits)
+    // and the JSON-RPC handler (so the semaphore + memory-floor gate
+    // matches).
+    let view_limits_cfg = Arc::new(metashrew_runtime::ViewLimitsConfig {
+        view_concurrency: args.view_concurrency,
+        view_memory_bytes: args.view_memory_mb.saturating_mul(1024 * 1024),
+        view_memory_floor_bytes: args.view_memory_floor_mb.saturating_mul(1024 * 1024),
+        memory_floor_refresh: Duration::from_millis(args.view_memory_floor_refresh_ms),
+        acquire_timeout: metashrew_runtime::DEFAULT_ACQUIRE_TIMEOUT,
+    });
+
     if let Some(fork_path) = args.fork.clone() {
         info!("Fork mode enabled, forking from: {}", fork_path.display());
         let db_path = args.db_path.to_string_lossy().to_string();
@@ -898,7 +1049,8 @@ pub async fn run_prod(args: Args) -> Result<()> {
             }
         };
         let runtime_adapter =
-            MetashrewRuntimeAdapter::new(Arc::new(runtime));
+            MetashrewRuntimeAdapter::new(Arc::new(runtime))
+                .with_view_limits(view_limits_cfg.clone());
         run_generic(args, runtime_adapter, storage_adapter).await
     } else {
         let adapter =
@@ -909,7 +1061,8 @@ pub async fn run_prod(args: Args) -> Result<()> {
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =
-            MetashrewRuntimeAdapter::new(Arc::new(runtime));
+            MetashrewRuntimeAdapter::new(Arc::new(runtime))
+                .with_view_limits(view_limits_cfg.clone());
         run_generic(args, runtime_adapter, storage_adapter).await
     }
 }

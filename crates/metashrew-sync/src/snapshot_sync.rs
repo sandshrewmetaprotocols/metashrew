@@ -303,8 +303,9 @@ where
 
     /// Process a single block atomically. See `MetashrewSync::process_block`
     /// for the full invariants — this is the snapshot-enabled engine's
-    /// equivalent and follows the same retry-and-exit policy: no silent
-    /// fallback to a non-atomic write path.
+    /// equivalent and follows the same infinite-retry-with-exponential-backoff
+    /// policy: block until atomic commit succeeds, no silent fallback to a
+    /// non-atomic write path, no `process::exit`.
     pub async fn process_block(
         &self,
         height: u32,
@@ -321,9 +322,17 @@ where
             });
         }
 
-        const ATOMIC_RETRIES: u32 = 5;
-        let mut last_err: Option<SyncError> = None;
-        for attempt in 1..=ATOMIC_RETRIES {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
+
+            if attempt > 1 {
+                let backoff_ms = crate::sync::atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+
             match self
                 .runtime
                 .process_block_atomic(height, &block_data, &block_hash)
@@ -339,28 +348,30 @@ where
                     match commit_res {
                         Ok(()) => {
                             info!(
-                                "Block {} committed atomically (snapshot path, attempt {}/{})",
-                                height, attempt, ATOMIC_RETRIES
+                                "Block {} committed atomically (snapshot path, attempt {})",
+                                height, attempt
                             );
                             self.current_height.store(height + 1, Ordering::SeqCst);
                             self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
                             return Ok(());
                         }
                         Err(commit_err) => {
-                            warn!(
-                                "Snapshot-path atomic commit failed for height {} (attempt {}/{}): {} — retrying",
-                                height, attempt, ATOMIC_RETRIES, commit_err
+                            crate::sync::log_atomic_retry_failure(
+                                "snapshot-path atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
                             );
-                            last_err = Some(commit_err);
                         }
                     }
                 }
                 Err(atomic_err) => {
-                    warn!(
-                        "Snapshot-path atomic block execution failed for height {} (attempt {}/{}): {} — retrying",
-                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    crate::sync::log_atomic_retry_failure(
+                        "snapshot-path atomic block execution",
+                        height,
+                        attempt,
+                        &format!("{}", atomic_err),
                     );
-                    last_err = Some(atomic_err);
                 }
             }
 
@@ -370,17 +381,7 @@ where
                     height, e
                 );
             }
-
-            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
-
-        error!(
-            "FATAL: snapshot-path atomic block apply failed for height {} after {} retries. \
-             Last error: {:?}. Exiting so supervisor restarts the process — \
-             on restart, recovery will re-run block {} from scratch.",
-            height, ATOMIC_RETRIES, last_err, height
-        );
-        std::process::exit(1);
     }
 
     /// Set the snapshot provider
@@ -479,19 +480,27 @@ where
         height: u32,
         block_data: Vec<u8>,
     ) -> SyncResult<()> {
-        // Atomic path: same retry+exit policy as `process_block`. The block
-        // hash comes from the node here because this entry point doesn't
-        // receive it from a caller; it's the snapshot-sync-loop's own
-        // fetcher boundary. The SPV continuity check still happens inside
-        // the runtime's `validate_block_connects` path when callers route
-        // through `process_block`, but this convenience method on the
-        // snapshot loop skips it because the loop has already done reorg
-        // handling and chain-continuity inspection upstream.
+        // Atomic path: same infinite-retry-with-exponential-backoff policy as
+        // `process_block`. The block hash comes from the node here because
+        // this entry point doesn't receive it from a caller; it's the
+        // snapshot-sync-loop's own fetcher boundary. The SPV continuity check
+        // still happens inside the runtime's `validate_block_connects` path
+        // when callers route through `process_block`, but this convenience
+        // method on the snapshot loop skips it because the loop has already
+        // done reorg handling and chain-continuity inspection upstream.
         let block_hash = self.node.get_block_hash(height).await?;
 
-        const ATOMIC_RETRIES: u32 = 5;
-        let mut last_err: Option<SyncError> = None;
-        for attempt in 1..=ATOMIC_RETRIES {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
+
+            if attempt > 1 {
+                let backoff_ms = crate::sync::atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+
             match self
                 .runtime
                 .process_block_atomic(height, &block_data, &block_hash)
@@ -507,8 +516,8 @@ where
                     match commit_res {
                         Ok(()) => {
                             info!(
-                                "Block {} committed atomically (snapshot loop, attempt {}/{})",
-                                height, attempt, ATOMIC_RETRIES
+                                "Block {} committed atomically (snapshot loop, attempt {})",
+                                height, attempt
                             );
                             self.current_height.store(height + 1, Ordering::SeqCst);
                             self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
@@ -540,20 +549,22 @@ where
                             return Ok(());
                         }
                         Err(commit_err) => {
-                            warn!(
-                                "Snapshot-loop atomic commit failed for height {} (attempt {}/{}): {} — retrying",
-                                height, attempt, ATOMIC_RETRIES, commit_err
+                            crate::sync::log_atomic_retry_failure(
+                                "snapshot-loop atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
                             );
-                            last_err = Some(commit_err);
                         }
                     }
                 }
                 Err(atomic_err) => {
-                    warn!(
-                        "Snapshot-loop atomic execution failed for height {} (attempt {}/{}): {} — retrying",
-                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    crate::sync::log_atomic_retry_failure(
+                        "snapshot-loop atomic execution",
+                        height,
+                        attempt,
+                        &format!("{}", atomic_err),
                     );
-                    last_err = Some(atomic_err);
                 }
             }
 
@@ -563,17 +574,7 @@ where
                     height, e
                 );
             }
-
-            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
-
-        error!(
-            "FATAL: snapshot-loop atomic block apply failed for height {} after {} retries. \
-             Last error: {:?}. Exiting so supervisor restarts the process — \
-             on restart, recovery will re-run block {} from scratch.",
-            height, ATOMIC_RETRIES, last_err, height
-        );
-        std::process::exit(1);
     }
 
     /// Run the main sync loop with snapshot support

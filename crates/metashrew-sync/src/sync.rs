@@ -105,6 +105,126 @@ use crate::{
     SyncConfig, SyncEngine, SyncError, SyncResult, SyncStatus, ViewCall,
 };
 
+// ---------------------------------------------------------------------------
+// Atomic-retry backoff + escalating-log helpers (v9.0.5-rc.3).
+//
+// The block-apply paths in this crate retry the (process_block_atomic +
+// commit_atomic) pair *forever* on transient failure — the user's directive
+// is that we MUST NOT exit on atomic-write failure. To avoid a busy-loop on
+// long stalls (fsync wedged, disk full, IO timeout, etc.) we sleep between
+// attempts using exponential backoff with a 30 s cap, and we escalate the
+// log severity so operators see the stall.
+//
+// Backoff schedule (ms):
+//   attempt 1   -> 0
+//   attempt 2   -> 100
+//   attempt 3   -> 200
+//   attempt 4   -> 400
+//   attempt 5   -> 800
+//   attempt 6   -> 1_600
+//   attempt 7   -> 3_200
+//   attempt 8   -> 6_400
+//   attempt 9   -> 12_800
+//   attempt 10  -> 25_600
+//   attempt 11+ -> 30_000 (capped)
+//
+// Log severity:
+//   attempts 1..=ATOMIC_RETRY_WARN_THRESHOLD   -> warn!
+//   attempts thresh+1 ..= ATOMIC_RETRY_ERROR_THRESHOLD -> error! every time
+//   attempts > ATOMIC_RETRY_ERROR_THRESHOLD     -> error! only every
+//                                                  ATOMIC_RETRY_ERROR_SPAM_EVERY
+//                                                  iterations
+// ---------------------------------------------------------------------------
+
+/// Below (inclusive) this attempt count we log at WARN.
+pub const ATOMIC_RETRY_WARN_THRESHOLD: u32 = 5;
+/// Beyond this attempt count we drop to one-in-N error logs.
+pub const ATOMIC_RETRY_ERROR_THRESHOLD: u32 = 30;
+/// Past `ATOMIC_RETRY_ERROR_THRESHOLD`, log once every N iterations.
+pub const ATOMIC_RETRY_ERROR_SPAM_EVERY: u32 = 10;
+/// Cap on the per-attempt backoff (ms).
+pub const ATOMIC_RETRY_BACKOFF_CAP_MS: u64 = 30_000;
+
+/// Returns the milliseconds to sleep *before* `attempt` (1-indexed). Attempt 1
+/// returns 0 — no sleep before the first try.
+pub fn atomic_retry_backoff_ms(attempt: u32) -> u64 {
+    if attempt <= 1 {
+        0
+    } else {
+        // attempt 2  -> shift 0 -> 100 ms
+        // attempt 3  -> shift 1 -> 200 ms
+        // ...
+        // attempt 10 -> shift 8 -> 25_600 ms
+        // attempt 11 -> shift 9 -> 51_200 ms -> capped at 30_000 ms
+        // attempt 12+ -> shift 9 -> 30_000 ms (capped)
+        let shift = (attempt - 2).min(9) as u32;
+        (100u64.saturating_mul(1u64 << shift)).min(ATOMIC_RETRY_BACKOFF_CAP_MS)
+    }
+}
+
+/// Common logger for atomic-retry failures. Picks WARN / ERROR per the
+/// escalation policy and includes a hint about possible state corruption if
+/// the error looks like an out-of-order commit rejection (which should never
+/// happen in steady-state and indicates the storage tip advanced from under
+/// us — typically a sign that *something* is very wrong, but we still keep
+/// retrying because the operator can SIGKILL to escalate).
+pub fn log_atomic_retry_failure(
+    op_label: &str,
+    height: u32,
+    attempt: u32,
+    err_str: &str,
+) {
+    // "out-of-order commit rejected" is the signature emitted by
+    // `commit_atomic`'s strict-in-order check (see traits.rs and the
+    // RocksDB adapter). If we hit it during a retry loop, the tip has
+    // either advanced past us (impossible without another writer) or
+    // regressed below us. Either way it's a hard anomaly — but we keep
+    // retrying per the v9.0.5-rc.3 invariant. The operator can SIGKILL to
+    // escalate; we do NOT call std::process::exit here.
+    let out_of_order = err_str.contains("out-of-order commit rejected");
+
+    if attempt <= ATOMIC_RETRY_WARN_THRESHOLD {
+        warn!(
+            "{} failed for height {} (attempt {}): {} — retrying",
+            op_label, height, attempt, err_str
+        );
+    } else if attempt <= ATOMIC_RETRY_ERROR_THRESHOLD {
+        if out_of_order {
+            error!(
+                "{} failed for height {} (attempt {}, out-of-order commit rejected — \
+                 possible state corruption / unexpected tip advance; manual intervention \
+                 may be required): {} — block {} atomic apply has been retrying for {} attempts",
+                op_label, height, attempt, err_str, height, attempt
+            );
+        } else {
+            error!(
+                "{} failed for height {} (attempt {}): {} — block {} atomic apply has \
+                 been retrying for {} attempts",
+                op_label, height, attempt, err_str, height, attempt
+            );
+        }
+    } else {
+        // Past ATOMIC_RETRY_ERROR_THRESHOLD: only log every Nth attempt to
+        // keep stderr usable while the stall persists.
+        if (attempt - ATOMIC_RETRY_ERROR_THRESHOLD) % ATOMIC_RETRY_ERROR_SPAM_EVERY == 0 {
+            if out_of_order {
+                error!(
+                    "{} STILL failing for height {} (attempt {}, out-of-order commit rejected — \
+                     possible state corruption / unexpected tip advance; manual intervention \
+                     may be required): {} — block {} atomic apply has been retrying for {} attempts",
+                    op_label, height, attempt, err_str, height, attempt
+                );
+            } else {
+                error!(
+                    "{} STILL failing for height {} (attempt {}): {} — block {} atomic apply \
+                     has been retrying for {} attempts",
+                    op_label, height, attempt, err_str, height, attempt
+                );
+            }
+        }
+    }
+}
+
 /// Generic Bitcoin indexer synchronization engine
 pub struct MetashrewSync<N, S, R>
 where
@@ -374,17 +494,19 @@ where
     /// Implementation:
     ///
     /// 1. SPV-style validate that this block connects to our stored tip.
-    /// 2. Loop up to `ATOMIC_RETRIES` times calling `process_block_atomic`:
-    ///    each attempt re-executes the WASM module from scratch (memory
-    ///    refresh is unconditional inside `process_block_atomic`), produces
-    ///    a fresh, bit-for-bit identical k/v map (modulo timing-side-channels
-    ///    in the indexer, which are out of scope here), and tries to commit
-    ///    via the storage adapter's `commit_atomic`.
-    /// 3. If all retries fail, log ERROR and `std::process::exit(1)`. The
-    ///    supervisor (systemd / Kubernetes) restarts the process and
-    ///    `init()` picks up at `tip + 1` — which is the same height we just
-    ///    failed on — and tries again. There is **no** silent fallback to
-    ///    a different code path with different write semantics.
+    /// 2. Loop **forever** calling `process_block_atomic`: each attempt
+    ///    re-executes the WASM module from scratch (memory refresh is
+    ///    unconditional inside `process_block_atomic`), produces a fresh,
+    ///    bit-for-bit identical k/v map (modulo timing-side-channels in the
+    ///    indexer, which are out of scope here), and tries to commit via
+    ///    the storage adapter's `commit_atomic`.
+    /// 3. Backoff between attempts is exponential, capped at 30s. Log
+    ///    severity escalates: `warn!` for attempts 1-5, `error!` for
+    ///    attempts 6-30, `error!` every 10th iteration beyond 30. There
+    ///    is **no** `process::exit` — the block-apply blocks until the
+    ///    atomic commit succeeds. The operator can SIGKILL to escalate if
+    ///    needed. There is also no silent fallback to a different code
+    ///    path with different write semantics.
     pub async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
         // 1. SPV-style continuity check.
         if !self.validate_block_connects(height, &block_data, &block_hash).await? {
@@ -401,10 +523,19 @@ where
             block_data.len()
         );
 
-        // 2. Bounded-retry atomic apply.
-        const ATOMIC_RETRIES: u32 = 5;
-        let mut last_err: Option<SyncError> = None;
-        for attempt in 1..=ATOMIC_RETRIES {
+        // 2. Infinite-retry atomic apply. Block until commit succeeds.
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
+
+            // Backoff (no sleep before first attempt).
+            if attempt > 1 {
+                let backoff_ms = atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+
             match self
                 .runtime
                 .process_block_atomic(height, &block_data, &block_hash)
@@ -424,8 +555,8 @@ where
                     match commit_res {
                         Ok(()) => {
                             info!(
-                                "Block {} committed atomically (attempt {}/{})",
-                                height, attempt, ATOMIC_RETRIES
+                                "Block {} committed atomically (attempt {})",
+                                height, attempt
                             );
                             self.blocks_processed.fetch_add(1, Ordering::SeqCst);
                             {
@@ -435,53 +566,38 @@ where
                             return Ok(());
                         }
                         Err(commit_err) => {
-                            warn!(
-                                "Atomic commit failed for height {} (attempt {}/{}): {} — retrying",
-                                height, attempt, ATOMIC_RETRIES, commit_err
+                            log_atomic_retry_failure(
+                                "atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
                             );
-                            last_err = Some(commit_err);
                         }
                     }
                 }
                 Err(atomic_err) => {
-                    warn!(
-                        "Atomic block execution failed for height {} (attempt {}/{}): {} — retrying",
-                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    log_atomic_retry_failure(
+                        "atomic block execution",
+                        height,
+                        attempt,
+                        &format!("{}", atomic_err),
                     );
-                    last_err = Some(atomic_err);
                 }
             }
 
             // Refresh the runtime's WASM memory before the next attempt so
             // we start from a clean instance — the runtime is supposed to
             // do this internally on error already, but a belt-and-braces
-            // refresh here keeps the retry loop deterministic against
-            // any future changes to the runtime adapter.
+            // refresh here keeps the retry loop deterministic against any
+            // future changes to the runtime adapter. Re-executing the block
+            // from scratch is the whole point of the retry loop.
             if let Err(e) = self.runtime.refresh_memory().await {
                 warn!(
                     "refresh_memory() between retries failed at height {}: {} (continuing)",
                     height, e
                 );
             }
-
-            // Brief backoff so we don't busy-loop on a transient transport
-            // blip or fsync stall.
-            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
-
-        // 3. Exhausted retries. The user's directive is explicit: do NOT
-        // fall back to a different code path. Log a fatal error and exit
-        // so the supervisor restarts us. Restart-recovery (`init()`) will
-        // pick up at `tip + 1` and try this same height again from a
-        // clean process — same block bytes → same k/v map (idempotent).
-        error!(
-            "FATAL: atomic block apply failed for height {} after {} retries. \
-             Last error: {:?}. Exiting so supervisor restarts the process — \
-             on restart, recovery will re-run block {} from scratch.",
-            height, ATOMIC_RETRIES, last_err, height
-        );
-        // Flush logs before exit.
-        std::process::exit(1);
     }
 
     /// Run the sync pipeline with parallel fetching and processing
@@ -764,12 +880,21 @@ where
     /// Pipeline-mode block apply. Mirrors `MetashrewSync::process_block` but
     /// without the SPV continuity check (that's done by the fetcher upstream
     /// in this pipeline) and without the metric/timing bookkeeping (that's
-    /// handled by the result-handling loop). Atomic-only, bounded retry,
-    /// hard exit on failure — same invariants as the non-pipeline path.
+    /// handled by the result-handling loop). Atomic-only, infinite retry
+    /// with exponential backoff — block until the commit succeeds; same
+    /// invariants as the non-pipeline path.
     async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
-        const ATOMIC_RETRIES: u32 = 5;
-        let mut last_err: Option<SyncError> = None;
-        for attempt in 1..=ATOMIC_RETRIES {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
+
+            if attempt > 1 {
+                let backoff_ms = atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
+                }
+            }
+
             match self
                 .runtime
                 .process_block_atomic(height, &block_data, &block_hash)
@@ -785,26 +910,28 @@ where
                     match commit_res {
                         Ok(()) => {
                             info!(
-                                "Block {} committed atomically in pipeline (attempt {}/{})",
-                                height, attempt, ATOMIC_RETRIES
+                                "Block {} committed atomically in pipeline (attempt {})",
+                                height, attempt
                             );
                             return Ok(());
                         }
                         Err(commit_err) => {
-                            warn!(
-                                "Pipeline atomic commit failed for height {} (attempt {}/{}): {} — retrying",
-                                height, attempt, ATOMIC_RETRIES, commit_err
+                            log_atomic_retry_failure(
+                                "pipeline atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
                             );
-                            last_err = Some(commit_err);
                         }
                     }
                 }
                 Err(atomic_err) => {
-                    warn!(
-                        "Pipeline atomic block execution failed for height {} (attempt {}/{}): {} — retrying",
-                        height, attempt, ATOMIC_RETRIES, atomic_err
+                    log_atomic_retry_failure(
+                        "pipeline atomic block execution",
+                        height,
+                        attempt,
+                        &format!("{}", atomic_err),
                     );
-                    last_err = Some(atomic_err);
                 }
             }
 
@@ -814,17 +941,7 @@ where
                     height, e
                 );
             }
-
-            sleep(Duration::from_millis(100 * attempt as u64)).await;
         }
-
-        error!(
-            "FATAL: pipeline atomic block apply failed for height {} after {} retries. \
-             Last error: {:?}. Exiting so supervisor restarts the process — \
-             on restart, recovery will re-run block {} from scratch.",
-            height, ATOMIC_RETRIES, last_err, height
-        );
-        std::process::exit(1);
     }
 }
 

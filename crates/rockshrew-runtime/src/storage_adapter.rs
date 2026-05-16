@@ -188,15 +188,20 @@ impl StorageAdapter for RocksDBStorageAdapter {
     /// Bundle the three metadata writes for block `height` into a single
     /// RocksDB `WriteBatch` and commit it with `WriteOptions::set_sync(true)`.
     ///
-    /// Note: the **WASM-side __flush** (`BatchedSMTHelper::calculate_and_store_state_root_batched`)
-    /// already writes the indexed-height pointer, the state-root marker, the
-    /// per-height manifest, and the block-hash record into a single batch
-    /// inside the runtime. This adapter-level `commit_atomic` is the
-    /// sync-framework-side commit that runs *after* `process_block_atomic`
-    /// for callers (mock storage, tests, or non-WASM runtimes) that don't
-    /// route their k/v writes through the __flush path. For the production
-    /// RocksDB path the two batches are idempotent (same keys, same values),
-    /// so writing both is correct.
+    /// As of v9.0.5-rc.4 this adapter is the **exclusive writer** of the
+    /// `__INTERNAL/height` indexed-height pointer. The WASM-side __flush
+    /// (`BatchedSMTHelper::calculate_and_store_state_root_batched`) used to
+    /// write the same pointer in the same batch as the SMT updates — but
+    /// that interacted catastrophically with the strict-in-order check
+    /// below: __flush advanced the pointer to N, then commit_atomic read it
+    /// back, saw N, and refused to advance to N. See the long comment in
+    /// `calculate_and_store_state_root_batched` for the production incident
+    /// timeline.
+    ///
+    /// The WASM-side __flush still writes the block-hash record and the
+    /// state-root marker for height N — those writes are idempotent w.r.t.
+    /// the writes here (same key, same value), so the two batches together
+    /// commit consistently.
     ///
     /// Strict in-order check: refuses to commit unless `height == tip + 1`,
     /// matching the user-stated invariant that we never skip or rewrite a

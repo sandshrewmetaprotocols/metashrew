@@ -368,11 +368,19 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
     /// Optimized batch calculation of state root for multiple keys with minimal storage.
     ///
     /// All writes — SMT updates, length counters, state-root marker, manifest,
-    /// runtime tip-height, sync-framework indexed-height, and block-hash record —
-    /// are bundled into a single atomic RocksDB batch so a process crash, OOM kill,
-    /// or ENOSPC anywhere in the path leaves the database at either height N-1 or
-    /// height N, never a partial mix. `block_hash` may be empty for callers that
-    /// don't track it (tests, legacy fast paths).
+    /// runtime tip-height, and block-hash record — are bundled into a single
+    /// atomic RocksDB batch. The sync-framework `__INTERNAL/height` pointer
+    /// is intentionally *not* written here (see inline comment below and
+    /// `RocksDBStorageAdapter::commit_atomic` for the rc.4 rationale): that
+    /// key is owned exclusively by the storage adapter's `commit_atomic`,
+    /// which runs immediately after this batch. The result is the same
+    /// crash-safety property — DB is left at either tip = N-1 or tip = N —
+    /// because the strict-in-order check inside `commit_atomic` refuses to
+    /// advance the indexed-height pointer unless the per-height records
+    /// this batch wrote are already on disk.
+    ///
+    /// `block_hash` may be empty for callers that don't track it (tests,
+    /// legacy fast paths).
     pub fn calculate_and_store_state_root_batched(
         &mut self,
         height: u32,
@@ -451,14 +459,30 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             &height.to_le_bytes(),
         );
 
-        // Sync-framework indexed-height pointer. Must move in lockstep with
-        // TIP_HEIGHT_KEY or the indexer can re-apply an already-committed block
-        // on restart, producing duplicate append-only entries and a divergent
-        // database. Same key as `RocksDBStorageAdapter::get_indexed_height`.
-        batch.put(b"__INTERNAL/height".as_ref(), &height.to_le_bytes());
-
+        // NOTE (v9.0.5-rc.4): the sync-framework `__INTERNAL/height` pointer
+        // is NOT written here. It is owned exclusively by the storage
+        // adapter's `commit_atomic`, which runs immediately after this batch
+        // commits inside `MetashrewSync::process_block` (and the snapshot
+        // paths in `SnapshotMetashrewSync`).
+        //
+        // Why: writing `__INTERNAL/height` here causes self-rejection in
+        // `commit_atomic`'s strict-in-order check. The chain is:
+        //   1. `process_block_atomic` runs WASM, which calls __flush, which
+        //      lands this batch with `__INTERNAL/height = N`.
+        //   2. `commit_atomic` reads `__INTERNAL/height`, sees N, and refuses
+        //      to advance to N because its rule is `height == tip + 1`.
+        // Observed at h≈947735 during May 2026 snapshot verification on
+        // `meta`. In rc.2 the bounded retry-then-process::exit policy turned
+        // the self-rejection into a crash loop; in rc.3 the new infinite
+        // retry policy would have turned it into a hang. This change is what
+        // makes the strict-in-order check usable in production.
+        //
         // Sync-framework block-hash record. Same key as
-        // `RocksDBStorageAdapter::store_block_hash`.
+        // `RocksDBStorageAdapter::store_block_hash`. We DO still write this
+        // here so that view/preview lookups for the block hash at height N
+        // see it immediately after __flush, even before `commit_atomic` runs.
+        // It's also idempotent w.r.t. the `commit_atomic` write (same key,
+        // same value).
         if !block_hash.is_empty() {
             let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
             batch.put(&blockhash_key, block_hash);

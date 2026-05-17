@@ -31,7 +31,7 @@
 //!   3. Linear advance: when the processor advances atomically, the
 //!      fetcher sends each height EXACTLY once.
 
-use crate::{compute_next_fetch_range, LAST_SENT_UNSET};
+use crate::{compute_next_fetch_range, near_tip_min_send_height, near_tip_should_drop, LAST_SENT_UNSET};
 
 // ----------------------------------------------------------------------------
 // Test 1: slow processor → no duplicates
@@ -292,4 +292,159 @@ fn fetcher_jumps_to_processor_tip_if_ahead_of_last_sent() {
         "must skip ahead to processor_tip, not stick at last_sent + 1",
     );
     assert_eq!(e, 949_736);
+}
+
+// ============================================================================
+// v9.0.5-rc.7 NEAR-TIP path dedup tests.
+//
+// rc.6 fixed the batch-prefetch path but the near-tip single-block
+// path was still vulnerable: when `remote_tip - fetch_start <=
+// reorg_check_threshold` (default 6), the fetcher called
+// `engine.get_next_block_data()` and sent whatever height the engine
+// returned, with NO check against `last_sent_height`.  When the
+// processor was slow on block N, `engine.current_height()` stayed at
+// N while the fetcher's `last_sent_height` had already climbed (in a
+// previous near-tip iteration that successfully bumped it).  On the
+// next loop, `get_next_block_data` returned N again, the send went
+// through, and the processor saw a duplicate N.
+//
+// Production evidence on v9.0.5-rc.6 mainnet pod (block 949728):
+//   01:15:17 INFO Fetched block 949728 (1750254 bytes)
+//   01:15:17 INFO Fetched block 949728 (1750254 bytes)  <- DUPLICATE
+//   01:16:47 processed block 949728 atomically
+//   ... 949729..949733 process ...
+//   01:20:58 processed block 949728 atomically   <- second copy
+//   01:20:58 WARN out-of-order commit rejected: attempted 949728,
+//                 current tip 949733
+//
+// The tests below pin down the dedup invariant via the pure helpers
+// `near_tip_min_send_height` and `near_tip_should_drop`.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Test 7: stuck atomic in near-tip path → DROP every duplicate of
+// last_sent.
+//
+// Simulates `engine.get_next_block_data()` returning the same height
+// for many consecutive calls (because `current_height` hasn't
+// advanced yet).  The decision helper MUST drop every one of them.
+// ----------------------------------------------------------------------------
+#[test]
+fn fetcher_near_tip_does_not_dup() {
+    // The fetcher already sent 949_728 successfully.
+    let last_sent = 949_728i64;
+
+    // The processor atomic is stuck at 949_728 (the block is still
+    // being processed).  `get_next_block_data` returns 949_728
+    // repeatedly.  Every iteration must DROP.
+    let mut sent_anything = false;
+    for _ in 0..20 {
+        let candidate = 949_728u32;
+        if near_tip_should_drop(last_sent, candidate) {
+            // Drop: do not send.
+            continue;
+        }
+        sent_anything = true;
+    }
+    assert!(
+        !sent_anything,
+        "near-tip path must drop every duplicate of last_sent; sent at least one",
+    );
+
+    // Defensive: even a candidate BELOW last_sent (handle_reorg
+    // lowered current_height) must be dropped.
+    assert!(
+        near_tip_should_drop(last_sent, 949_727),
+        "candidate < last_sent must be dropped (defensive against handle_reorg lowering current_height)",
+    );
+    assert!(
+        near_tip_should_drop(last_sent, 949_000),
+        "candidate way below last_sent must be dropped",
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Test 8: near-tip path resumes once the atomic advances.
+//
+// Same setup as Test 7, but after several iterations the processor
+// commits 949_728 and `get_next_block_data` starts returning 949_729.
+// The dedup helper MUST allow 949_729 through (and any height >=
+// last_sent + 1).
+// ----------------------------------------------------------------------------
+#[test]
+fn fetcher_near_tip_resumes_when_atomic_advances() {
+    let last_sent = 949_728i64;
+
+    // While the atomic is stuck: 949_728 is dropped.
+    assert!(near_tip_should_drop(last_sent, 949_728));
+
+    // Atomic advances by one: 949_729 must go through.
+    assert!(
+        !near_tip_should_drop(last_sent, 949_729),
+        "next height (last_sent + 1) must NOT be dropped — that's the resume point",
+    );
+
+    // Heights further ahead must also go through.
+    assert!(!near_tip_should_drop(last_sent, 949_730));
+    assert!(!near_tip_should_drop(last_sent, 950_000));
+}
+
+// ----------------------------------------------------------------------------
+// Test 9: cold start (LAST_SENT_UNSET) accepts anything.
+//
+// On the first iteration the fetcher has nothing in flight; the
+// near-tip path must allow whatever `get_next_block_data` returns
+// (including 0 if we're indexing genesis).
+// ----------------------------------------------------------------------------
+#[test]
+fn fetcher_near_tip_cold_start_accepts_anything() {
+    let last_sent = LAST_SENT_UNSET;
+    assert_eq!(near_tip_min_send_height(last_sent), 0);
+    assert!(!near_tip_should_drop(last_sent, 0));
+    assert!(!near_tip_should_drop(last_sent, 949_728));
+    assert!(!near_tip_should_drop(last_sent, u32::MAX));
+}
+
+// ----------------------------------------------------------------------------
+// Test 10: reproduction of the production incident.
+//
+// Drives the near-tip dedup decision through the exact sequence
+// observed on the v9.0.5-rc.6 mainnet pod for block 949_728.  In rc.6
+// the fetcher sent 949_728 twice.  With the rc.7 guard, the second
+// duplicate is dropped.
+// ----------------------------------------------------------------------------
+#[test]
+fn fetcher_near_tip_repro_949728_dup() {
+    // ----- Iteration 1: cold-ish — last_sent = 949_727 from a
+    // previous near-tip iteration.  `get_next_block_data` returns
+    // 949_728 (processor caught up).  Must accept.
+    let mut last_sent = 949_727i64;
+    let candidate = 949_728u32;
+    assert!(
+        !near_tip_should_drop(last_sent, candidate),
+        "first sighting of 949_728 must be accepted",
+    );
+    // Simulate successful send: bump watermark.
+    last_sent = candidate as i64;
+
+    // ----- Iteration 2: processor is still grinding on 949_728
+    // (took 90 seconds in production).  `get_next_block_data`
+    // re-reads the same atomic and returns 949_728 again.  In rc.6
+    // this was sent through and caused the bug.  Must DROP now.
+    let candidate_again = 949_728u32;
+    assert!(
+        near_tip_should_drop(last_sent, candidate_again),
+        "second sighting of 949_728 in same near-tip pass MUST be dropped (rc.6 production bug)",
+    );
+
+    // Watermark must not advance on the dropped iteration.
+    assert_eq!(last_sent, 949_728);
+
+    // ----- Iteration 3: processor finally commits 949_728.
+    // `get_next_block_data` returns 949_729.  Must accept.
+    let candidate_next = 949_729u32;
+    assert!(
+        !near_tip_should_drop(last_sent, candidate_next),
+        "next height after the dup-storm must be accepted",
+    );
 }

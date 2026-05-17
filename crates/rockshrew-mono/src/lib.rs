@@ -183,6 +183,39 @@ pub(crate) fn compute_next_fetch_range(
     Some((fetch_start, fetch_end))
 }
 
+/// v9.0.5-rc.7 near-tip dedup helper.
+///
+/// Pure function (no I/O, no async).  Computes the minimum height the
+/// near-tip single-block path may send to the prefetch channel, given
+/// the fetcher's current `last_sent` watermark.  The near-tip path
+/// gets its height from `engine.get_next_block_data()`, which returns
+/// the processor's `current_height` atomic — that atomic lags behind
+/// `last_sent_height` while the processor is slow, and can also be
+/// lowered by `handle_reorg`.  Any height strictly below
+/// `near_tip_min_send_height(last_sent)` is a stale duplicate and
+/// MUST be dropped.
+///
+/// Returns 0 when `last_sent` is `LAST_SENT_UNSET` (anything is
+/// acceptable on a cold fetcher); otherwise `last_sent + 1`.
+pub(crate) fn near_tip_min_send_height(last_sent: i64) -> u32 {
+    if last_sent < 0 {
+        0
+    } else {
+        (last_sent as u32).saturating_add(1)
+    }
+}
+
+/// v9.0.5-rc.7 near-tip dedup decision.
+///
+/// Returns true iff the near-tip single-block path should drop the
+/// block returned by `engine.get_next_block_data()` rather than send
+/// it to the prefetch channel.  Encapsulates the dedup invariant so
+/// the live loop in `crate::run` and the unit tests share one source
+/// of truth.
+pub(crate) fn near_tip_should_drop(last_sent: i64, candidate_height: u32) -> bool {
+    candidate_height < near_tip_min_send_height(last_sent)
+}
+
 /// Command-line arguments for `rockshrew-mono`.
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -870,17 +903,58 @@ where
                     std::cmp::max((last_sent_snapshot as u32).saturating_add(1), processor_tip)
                 };
                 if remote_tip.saturating_sub(near_tip_fetch_start) <= engine.config.reorg_check_threshold {
-                    // Fall back to single-block fetch near tip (reorg-safe)
+                    // v9.0.5-rc.7 near-tip dedup guard.
+                    //
+                    // rc.6 added `last_sent_height` and a "bump on
+                    // send-Ok" on this path, but did NOT guard the
+                    // send itself.  `engine.get_next_block_data()`
+                    // returns `engine.current_height()` — the
+                    // PROCESSOR's atomic — which lags behind
+                    // `last_sent_height` whenever the processor is
+                    // slow.  When the processor takes >1s on block N
+                    // and we re-enter this near-tip branch, the
+                    // engine returns N again, we send N a second
+                    // time, the processor commits N, then the second
+                    // copy hits the rc.5 strict-in-order check in
+                    // `commit_atomic` and triggers the rc.3 infinite
+                    // retry.  Production observed exactly this on
+                    // v9.0.5-rc.6 mainnet pods (block 949728 was
+                    // fetched twice in the same second, processed
+                    // once at 01:16:47, then "processed" again at
+                    // 01:20:58 with "out-of-order commit rejected:
+                    // attempted 949728, current tip 949733").
+                    //
+                    // Fix: compute the minimum acceptable height
+                    // BEFORE calling `get_next_block_data`, then drop
+                    // anything strictly below it.  Defensive against
+                    // `get_next_block_data` itself returning a lower
+                    // height (which it can do if `handle_reorg` lowers
+                    // `current_height` between iterations).
+                    let min_send_height = near_tip_min_send_height(last_sent_snapshot);
                     match engine.get_next_block_data().await {
                         Ok(Some((height, block_data, block_hash))) => {
                             drop(engine);
+                            if near_tip_should_drop(last_sent_snapshot, height) {
+                                // Duplicate: the processor's atomic
+                                // has not yet caught up to what the
+                                // fetcher has already enqueued. Sleep
+                                // briefly, let the processor advance,
+                                // and retry on the next loop.
+                                debug!(
+                                    "FETCHER: dropping near-tip duplicate height={} (last_sent={} min_send={})",
+                                    height, last_sent_snapshot, min_send_height,
+                                );
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                                continue;
+                            }
                             if block_sender_clone.send(BlockData { height, block_data, block_hash: block_hash.clone() }).await.is_err() {
                                 break;
                             }
-                            // Bump fetcher watermark even on the
-                            // single-block path so the batch path
-                            // doesn't restart from an out-of-date
-                            // processor_tip if we re-enter it.
+                            // Bump fetcher watermark only AFTER a
+                            // successful send.  fetch_max so a
+                            // concurrent rollback-reset can't be
+                            // clobbered by a stale send that happened
+                            // to win the race.
                             last_sent_height.fetch_max(height as i64, Ordering::SeqCst);
                         }
                         Ok(None) => {

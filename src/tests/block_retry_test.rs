@@ -136,6 +136,7 @@ async fn test_block_retry_fix() -> Result<()> {
         pipeline_size: Some(4), // Use a larger pipeline to test concurrency
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
@@ -218,6 +219,7 @@ async fn test_snapshot_sync_retry_fix() -> Result<()> {
         pipeline_size: Some(1), // Single-threaded to make the test deterministic
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::snapshot_sync::SnapshotMetashrewSync::new(
@@ -429,6 +431,7 @@ async fn test_abort_on_critical_failure() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(

@@ -60,7 +60,7 @@ use anyhow::Result;
 use clap::Parser;
 use log::{error, info, warn};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::signal;
@@ -95,6 +95,92 @@ struct BlockData {
 enum BlockResult {
     Success(u32),
     Error(u32, anyhow::Error),
+}
+
+/// Sentinel for `Arc<AtomicI64>`-encoded `last_sent_height`. We use a
+/// signed atomic so that -1 ("the fetcher has not sent anything yet")
+/// is distinguishable from height 0. Heights are u32 so they always fit
+/// in the positive range of an i64.
+pub(crate) const LAST_SENT_UNSET: i64 = -1;
+
+/// v9.0.5-rc.6 fetcher-dedup helper.
+///
+/// Pure function (no I/O, no async) that computes the next half-open
+/// `[fetch_start, fetch_end)` range the prefetcher should fetch. Tested
+/// directly without spinning up the full fetcher loop.
+///
+/// ## The bug this guards against
+///
+/// In v9.0.5-rc.5 the fetcher computed `fetch_start =
+/// engine.current_height()` every loop iteration. The engine's
+/// `current_height` is the PROCESSOR's committed tip — it lags behind
+/// what the fetcher has already enqueued. When the processor was slow
+/// (e.g. a single block taking 90 seconds to apply), the fetcher would
+/// loop, re-read the unchanged `current_height = N`, and re-enqueue the
+/// same range `[N, N+prefetch_size)`. Once the processor caught up, it
+/// would see (and try to commit) the duplicate `N` AFTER the original
+/// `N..N+prefetch_size-1` had already been committed, hitting the
+/// rc.3 strict-in-order check in `commit_atomic` and looping forever
+/// in the rc.3 infinite-retry backoff.
+///
+/// ## Invariants enforced
+///
+/// 1. The fetcher MUST NOT send the same height twice consecutively.
+/// 2. The fetcher MUST NOT send a height below the processor's tip
+///    (the processor would reject it).
+/// 3. Following a rollback (the processor's tip drops because a reorg
+///    handler rewound it), the fetcher MUST resume fetching from the
+///    new tip — `last_sent_height` is reset down to `LAST_SENT_UNSET`
+///    by the rollback path.
+///
+/// ## Arguments
+///
+/// * `processor_tip` — the processor's committed tip
+///   (`engine.current_height()`).
+/// * `last_sent` — the height of the most recent block the fetcher
+///   successfully sent to the channel, or `LAST_SENT_UNSET` (-1) if
+///   the fetcher hasn't sent anything yet OR if a rollback reset it.
+/// * `prefetch_size` — the max number of blocks per batch.
+/// * `remote_tip` — the bitcoind tip height.
+///
+/// ## Return
+///
+/// `Some((start, end))` — a half-open range of heights to fetch this
+/// iteration, or `None` if there's nothing new to fetch
+/// (caller should sleep and retry).
+pub(crate) fn compute_next_fetch_range(
+    processor_tip: u32,
+    last_sent: i64,
+    prefetch_size: usize,
+    remote_tip: u32,
+) -> Option<(u32, u32)> {
+    // The fetcher's own high-water-mark — what it has already enqueued.
+    // If unset, fall back to the processor's tip (first iteration).
+    let after_last_sent: u32 = if last_sent < 0 {
+        processor_tip
+    } else {
+        // last_sent is u32-in-i64; the next height to fetch is last_sent + 1.
+        (last_sent as u32).saturating_add(1)
+    };
+
+    // Never go BELOW the processor's tip — the processor would reject
+    // anything below its committed tip. (Rollback path covers
+    // "processor went backward": it resets last_sent to UNSET, which
+    // makes after_last_sent fall through to processor_tip here.)
+    let fetch_start = std::cmp::max(after_last_sent, processor_tip);
+
+    // Cap the batch by prefetch_size and the remote tip.
+    if remote_tip < fetch_start {
+        return None;
+    }
+    let fetch_end = std::cmp::min(
+        fetch_start.saturating_add(prefetch_size as u32),
+        remote_tip.saturating_add(1),
+    );
+    if fetch_start >= fetch_end {
+        return None;
+    }
+    Some((fetch_start, fetch_end))
 }
 
 /// Command-line arguments for `rockshrew-mono`.
@@ -185,6 +271,25 @@ pub struct Args {
     /// memory pressure. Default: 1000 (1 second).
     #[arg(long, default_value_t = metashrew_runtime::DEFAULT_MEMORY_FLOOR_REFRESH_MS)]
     pub view_memory_floor_refresh_ms: u64,
+
+    /// v9.0.5-rc.6: disable the init-time pointer-divergence heal.
+    ///
+    /// By default, on startup the sync engine reads the three on-disk
+    /// height pointers (`__INTERNAL/height`,
+    /// `/__INTERNAL/tip-height`, max-stored-blockhash height) and, if
+    /// they disagree, rolls back to the minimum. This was added to
+    /// recover from the crash-loop class of incident seen on a
+    /// mainnet pod where the sync engine's in-memory current_height
+    /// fell behind the on-disk tip without a reorg firing, causing
+    /// `commit_atomic` to reject every commit with
+    /// "out-of-order commit rejected" until the operator
+    /// manually restarted.
+    ///
+    /// Set `--no-startup-heal` to disable. Useful when you want to
+    /// inspect divergent state on a damaged DB before letting the
+    /// indexer advance.
+    #[arg(long, default_value_t = false)]
+    pub no_startup_heal: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -590,7 +695,22 @@ where
         pipeline_size: args.pipeline_size,
         max_reorg_depth: args.max_reorg_depth,
         reorg_check_threshold: args.reorg_check_threshold,
+        // v9.0.5-rc.6: default-on startup-heal of divergent on-disk
+        // pointers. Operators can pass `--no-startup-heal` to disable.
+        enable_startup_heal: !args.no_startup_heal,
     };
+    if args.no_startup_heal {
+        warn!(
+            "Startup-heal of divergent on-disk pointers is DISABLED (--no-startup-heal). \
+             Indexer will trust __INTERNAL/height as-is and refuse to advance on divergence."
+        );
+    } else {
+        info!(
+            "Startup-heal of divergent on-disk pointers is ENABLED (default). \
+             init() will reconcile __INTERNAL/height, /__INTERNAL/tip-height, and the highest \
+             stored block-hash record before sync advances."
+        );
+    }
 
     let sync_mode = if args.snapshot_directory.is_some() {
         SyncMode::Snapshot(Default::default())
@@ -678,10 +798,25 @@ where
     let (block_sender, mut block_receiver) = mpsc::channel::<BlockData>(prefetch_size);
     let (result_sender, mut result_receiver) = mpsc::channel::<BlockResult>(prefetch_size);
 
+    // v9.0.5-rc.6 fetcher-dedup: the fetcher tracks its OWN high-water
+    // mark of what it has already sent to the prefetch channel,
+    // SEPARATE from `engine.current_height()` (which is the processor's
+    // committed tip — lags behind the fetcher's enqueued tip). Without
+    // this, when the processor is slow the fetcher re-reads the
+    // unchanged processor tip on every loop iteration and re-enqueues
+    // the same range, which the processor then rejects with
+    // "out-of-order commit rejected". See `compute_next_fetch_range`
+    // for the full reasoning. Encoded as `Arc<AtomicI64>` so the
+    // reorg-handler (in the indexer task) can reset it down to
+    // LAST_SENT_UNSET when a rollback fires, without needing a watch
+    // channel or other notification plumbing.
+    let last_sent_height = Arc::new(AtomicI64::new(LAST_SENT_UNSET));
+
     let fetcher_handle = tokio::spawn({
         let sync_engine_clone = sync_engine_arc.clone();
         let block_sender_clone = block_sender.clone();
         let exit_at = args.exit_at;
+        let last_sent_height = last_sent_height.clone();
 
         async move {
             info!("Block fetcher task started (prefetch_size={}).", prefetch_size);
@@ -705,7 +840,7 @@ where
                     }
                 }
 
-                let fetch_start = engine.current_height();
+                let processor_tip = engine.current_height();
                 let remote_tip = match engine.node().get_tip_height().await {
                     Ok(tip) => tip,
                     Err(e) => {
@@ -716,15 +851,37 @@ where
                     }
                 };
 
-                // Check for reorgs when close to tip
-                if remote_tip.saturating_sub(fetch_start) <= engine.config.reorg_check_threshold {
+                // v9.0.5-rc.6 fetcher-dedup: compute the next range from
+                // BOTH the processor's tip AND the fetcher's own
+                // last-sent watermark.  If the processor is behind the
+                // fetcher's already-enqueued tip (the channel-buffered
+                // case), use last_sent + 1 to advance.  If the processor
+                // is AHEAD of last_sent (a rollback reset us, or this
+                // is the first iteration), use processor_tip.
+                let last_sent_snapshot = last_sent_height.load(Ordering::SeqCst);
+
+                // Check for reorgs when close to tip — fall back to single-block
+                // fetch (which goes through the engine's reorg-safe path and
+                // updates its own internal cursor; we also bump last_sent_height
+                // on the way out so the batch path stays consistent).
+                let near_tip_fetch_start = if last_sent_snapshot < 0 {
+                    processor_tip
+                } else {
+                    std::cmp::max((last_sent_snapshot as u32).saturating_add(1), processor_tip)
+                };
+                if remote_tip.saturating_sub(near_tip_fetch_start) <= engine.config.reorg_check_threshold {
                     // Fall back to single-block fetch near tip (reorg-safe)
                     match engine.get_next_block_data().await {
                         Ok(Some((height, block_data, block_hash))) => {
                             drop(engine);
-                            if block_sender_clone.send(BlockData { height, block_data, block_hash }).await.is_err() {
+                            if block_sender_clone.send(BlockData { height, block_data, block_hash: block_hash.clone() }).await.is_err() {
                                 break;
                             }
+                            // Bump fetcher watermark even on the
+                            // single-block path so the batch path
+                            // doesn't restart from an out-of-date
+                            // processor_tip if we re-enter it.
+                            last_sent_height.fetch_max(height as i64, Ordering::SeqCst);
                         }
                         Ok(None) => {
                             drop(engine);
@@ -739,22 +896,30 @@ where
                     continue;
                 }
 
-                // Batch prefetch: fetch up to prefetch_size blocks concurrently
-                let fetch_end = std::cmp::min(
-                    fetch_start + prefetch_size as u32,
-                    remote_tip + 1,
-                );
-                if fetch_start >= fetch_end {
-                    drop(engine);
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    continue;
-                }
+                // Batch prefetch: fetch up to prefetch_size blocks concurrently.
+                // Pure-function range computation tested in unit tests below.
+                let (fetch_start, fetch_end) = match compute_next_fetch_range(
+                    processor_tip,
+                    last_sent_snapshot,
+                    prefetch_size,
+                    remote_tip,
+                ) {
+                    Some(range) => range,
+                    None => {
+                        drop(engine);
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
 
                 let batch_size = (fetch_end - fetch_start) as usize;
                 let node = engine.node().clone();
                 drop(engine); // Release engine lock before concurrent fetches
 
-                debug!("FETCHER: Prefetching blocks {}..{} ({} blocks)", fetch_start, fetch_end - 1, batch_size);
+                debug!(
+                    "FETCHER: Prefetching blocks {}..{} ({} blocks) [processor_tip={}, last_sent={}]",
+                    fetch_start, fetch_end - 1, batch_size, processor_tip, last_sent_snapshot,
+                );
 
                 // Spawn concurrent fetch tasks
                 let mut fetch_handles = Vec::with_capacity(batch_size);
@@ -779,9 +944,17 @@ where
                     }
                     match handle.await {
                         Ok(Ok(block)) => {
-                            debug!("FETCHER: Fetched block {} ({} bytes)", block.height, block.block_data.len());
+                            let h = block.height;
+                            debug!("FETCHER: Fetched block {} ({} bytes)", h, block.block_data.len());
                             if block_sender_clone.send(block).await.is_err() {
                                 abort_remaining = true;
+                            } else {
+                                // v9.0.5-rc.6: bump watermark only AFTER
+                                // a successful send.  fetch_max so a
+                                // concurrent rollback-reset can't be
+                                // clobbered by a stale send that
+                                // happened to win the race.
+                                last_sent_height.fetch_max(h as i64, Ordering::SeqCst);
                             }
                         }
                         Ok(Err(e)) => {
@@ -854,6 +1027,7 @@ where
 
     let indexer_handle = tokio::spawn({
         let sync_engine_clone = sync_engine_arc.clone();
+        let last_sent_height_idx = last_sent_height.clone();
         async move {
         info!("Starting block indexing process...");
         let mut block_count = 0u64;
@@ -892,6 +1066,21 @@ where
                         {
                             Ok(rollback_height) => {
                                 info!("Rolled back to height {}. Resuming sync.", rollback_height);
+                                // v9.0.5-rc.6: rollback dropped the
+                                // processor's tip DOWN. The fetcher's
+                                // own last-sent watermark could be
+                                // ahead of the rollback point; reset
+                                // it to UNSET so the next fetch loop
+                                // picks up processor_tip as the new
+                                // starting height. We use store, not
+                                // fetch_min, to ensure full reset —
+                                // we never want to keep a stale
+                                // last_sent past a rollback.
+                                last_sent_height_idx.store(LAST_SENT_UNSET, Ordering::SeqCst);
+                                warn!(
+                                    "FETCHER: last_sent_height reset to UNSET after rollback to {} — fetcher will resume from processor_tip",
+                                    rollback_height
+                                );
                             }
                             Err(e) => {
                                 error!("Failed to handle reorg: {}", e);

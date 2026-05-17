@@ -93,6 +93,42 @@ where
     }
 
     pub async fn init(&self) {
+        // v9.0.5-rc.6: defensively heal divergent on-disk pointers BEFORE
+        // computing start_height. Honors `config.enable_startup_heal`
+        // (default true). See `crate::sync::heal_pointer_divergence_at_startup`
+        // for the full reasoning. We call the shared helper from
+        // `crate::sync` so both the plain and snapshot-enabled engines
+        // get the same heal semantics.
+        let healed_tip = match crate::sync::heal_pointer_divergence_at_startup(
+            self.node.clone(),
+            self.storage.clone(),
+            &self.config,
+        )
+        .await
+        {
+            Ok((h, outcome)) => {
+                match outcome {
+                    crate::sync::StartupHealOutcome::Healed { from, healed_to } => {
+                        warn!(
+                            "startup-heal: applied (from={} healed_to={}); resuming sync from {}",
+                            from, healed_to, healed_to + 1
+                        );
+                    }
+                    crate::sync::StartupHealOutcome::AlreadyConsistent { tip } => {
+                        info!("startup-heal: pointers consistent at tip {}", tip);
+                    }
+                    crate::sync::StartupHealOutcome::Disabled => {
+                        info!("startup-heal: disabled by config; trusting __INTERNAL/height = {}", h);
+                    }
+                }
+                h
+            }
+            Err(e) => {
+                error!("startup-heal: FAILED ({}); refusing to advance with divergent state — exiting", e);
+                panic!("startup-heal failed: {}", e);
+            }
+        };
+
         let mut storage = self.storage.write().await;
         let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
         let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
@@ -102,6 +138,13 @@ where
         } else {
             self.config.start_block
         };
+
+        if indexed_height != healed_tip && !(indexed_height == 0 && healed_tip == 0) {
+            warn!(
+                "startup-heal: post-heal indexed_height ({}) != healed_tip ({}); using indexed_height",
+                indexed_height, healed_tip
+            );
+        }
 
         if indexed_height == 0 && self.config.start_block > 0 {
             let prev_height = self.config.start_block.saturating_sub(1);

@@ -24,6 +24,21 @@ pub struct SyncConfig {
     pub max_reorg_depth: u32,
     /// Reorg check threshold (blocks from tip)
     pub reorg_check_threshold: u32,
+    /// v9.0.5-rc.6: at `init()` time, defensively heal divergent on-disk
+    /// pointers from prior crash-looping runs before letting sync advance.
+    /// Reads three independent height pointers (the sync-engine indexed
+    /// height, the runtime-side tip-height key, and the highest stored
+    /// block-hash record). When they disagree, picks the minimum
+    /// (conservative — re-applies some blocks rather than skipping any),
+    /// validates that height against bitcoind, walks back further if the
+    /// stored hash diverges from canonical, then issues a single atomic
+    /// rollback that brings all three pointers into line.
+    ///
+    /// When `false`, init keeps the rc.5 behaviour: trusts whatever
+    /// `__INTERNAL/height` says and proceeds. Useful for operators who
+    /// want to inspect divergent state manually before letting the
+    /// indexer advance.
+    pub enable_startup_heal: bool,
 }
 
 impl Default for SyncConfig {
@@ -34,6 +49,7 @@ impl Default for SyncConfig {
             pipeline_size: None,
             max_reorg_depth: 100,
             reorg_check_threshold: 6,
+            enable_startup_heal: true,
         }
     }
 }

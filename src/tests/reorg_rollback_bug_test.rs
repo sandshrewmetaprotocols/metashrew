@@ -121,6 +121,7 @@ async fn test_reorg_with_proper_smt_rollback() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
@@ -175,6 +176,7 @@ async fn test_reorg_with_proper_smt_rollback() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
@@ -245,6 +247,7 @@ async fn test_reorg_demonstrates_proper_cleanup() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
@@ -289,6 +292,7 @@ async fn test_reorg_demonstrates_proper_cleanup() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(

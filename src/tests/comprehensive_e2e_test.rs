@@ -150,6 +150,7 @@ async fn test_reorg_rollback_works() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
@@ -195,6 +196,7 @@ async fn test_reorg_rollback_works() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(
@@ -287,6 +289,7 @@ async fn test_normal_indexing_without_reorg() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer = metashrew_sync::sync::MetashrewSync::new(

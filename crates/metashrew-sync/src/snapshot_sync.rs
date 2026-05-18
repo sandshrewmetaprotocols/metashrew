@@ -369,6 +369,28 @@ where
         loop {
             attempt = attempt.saturating_add(1);
 
+            // v9.0.5-rc.9: staleness guard. If the engine's `current_height`
+            // has advanced past `height` while we were either waiting to be
+            // called or sleeping between retry attempts, the block has
+            // already been applied by another code path (or by a previous
+            // iteration whose commit succeeded but whose return value was
+            // dropped on a panic, etc.). Treat that as a successful no-op
+            // and bail. Without this guard, `commit_atomic` would reject the
+            // request with the rc.5 "out-of-order commit rejected" error on
+            // every iteration, and the rc.3 infinite-retry policy would
+            // spin forever — exactly the production wedge documented in
+            // tests/snapshot_path_stale_retry_test.rs.
+            let current = self.current_height.load(Ordering::SeqCst);
+            if height < current {
+                debug!(
+                    "snapshot-path: block {} stale relative to current_height ({}); \
+                     exiting retry loop after {} attempt(s) — caller raced another \
+                     path that advanced the tip past this height",
+                    height, current, attempt
+                );
+                return Ok(());
+            }
+
             if attempt > 1 {
                 let backoff_ms = crate::sync::atomic_retry_backoff_ms(attempt);
                 if backoff_ms > 0 {
@@ -536,6 +558,22 @@ where
         let mut attempt: u32 = 0;
         loop {
             attempt = attempt.saturating_add(1);
+
+            // v9.0.5-rc.9: staleness guard — see the matching block in
+            // `process_block` for the full rationale. The
+            // `snapshot-loop`-labelled commit-rejection retries were the
+            // other path that could wedge with the same "infinite-retry
+            // against an already-advanced tip" failure mode.
+            let current = self.current_height.load(Ordering::SeqCst);
+            if height < current {
+                debug!(
+                    "snapshot-loop: block {} stale relative to current_height ({}); \
+                     exiting retry loop after {} attempt(s) — caller raced another \
+                     path that advanced the tip past this height",
+                    height, current, attempt
+                );
+                return Ok(());
+            }
 
             if attempt > 1 {
                 let backoff_ms = crate::sync::atomic_retry_backoff_ms(attempt);

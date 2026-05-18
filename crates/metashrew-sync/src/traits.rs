@@ -225,6 +225,121 @@ pub trait StorageAdapter: Send + Sync {
     async fn get_db_handle(&self) -> SyncResult<std::sync::Arc<rocksdb::DB>> {
         Err(crate::SyncError::Storage("Database handle not available for this storage adapter".to_string()))
     }
+
+    /// v9.0.5-rc.6 startup-heal hook: read the runtime-owned tip-height
+    /// pointer (`/__INTERNAL/tip-height`). This is the pointer written by
+    /// the WASM-runtime side's `__flush` and `handle_reorg`. In a healthy
+    /// system this equals `get_indexed_height`, but on a DB left behind
+    /// by a crash-looping pre-rc.5 build they can diverge — the runtime
+    /// flushed its tip but `commit_atomic` was rejected, or vice versa.
+    ///
+    /// Default impl returns `get_indexed_height` (so mock-style adapters
+    /// that don't track the runtime tip key separately can't trip the
+    /// divergence-detection code). RocksDB-backed adapters MUST override.
+    async fn get_runtime_tip_height(&self) -> SyncResult<u32> {
+        self.get_indexed_height().await
+    }
+
+    /// v9.0.5-rc.6 startup-heal hook: walk down from `get_indexed_height`
+    /// and return the highest height H for which a block-hash record
+    /// exists (i.e. `get_block_hash(H)` returns Some). Bounded by
+    /// `floor` so we don't scan the entire chain on a damaged DB.
+    ///
+    /// Default impl uses a bounded linear walk via `get_block_hash`. The
+    /// RocksDB adapter can override with a prefix scan for speed.
+    async fn find_max_stored_block_hash_height(&self, floor: u32) -> SyncResult<u32> {
+        let top = self.get_indexed_height().await?;
+        if top == 0 {
+            return Ok(0);
+        }
+        let mut h = top;
+        let stop_at = floor;
+        while h > stop_at {
+            if self.get_block_hash(h).await?.is_some() {
+                return Ok(h);
+            }
+            h = h.saturating_sub(1);
+        }
+        // h == floor or 0: check it explicitly
+        if self.get_block_hash(h).await?.is_some() {
+            Ok(h)
+        } else {
+            Ok(0)
+        }
+    }
+
+    /// v9.0.5-rc.6 startup-heal hook: bring all three pointers into line
+    /// with `target_height` in ONE atomic batch — rollback storage past
+    /// the target AND write the runtime-side tip-height key. RocksDB
+    /// adapters that have direct DB access should override to use a
+    /// single `WriteBatch` (matching the rc.5 single-batch invariant);
+    /// the default impl falls back to `rollback_to_height` followed by
+    /// no runtime-tip write (mock adapters don't have a separate runtime
+    /// pointer).
+    async fn heal_pointers_atomic(&mut self, target_height: u32) -> SyncResult<()> {
+        let current = self.get_indexed_height().await?;
+        if current > target_height {
+            self.rollback_to_height(target_height).await?;
+        } else if current < target_height {
+            return Err(crate::SyncError::Storage(format!(
+                "heal_pointers_atomic refused to advance tip: current={} target={} \
+                 (heal only rolls back, never forward)",
+                current, target_height
+            )));
+        }
+        Ok(())
+    }
+
+    /// Atomically commit a block in a SINGLE underlying write: the WASM-side
+    /// per-block batch (`batch_data`, produced by `process_block_atomic` and
+    /// shipped through `AtomicBlockResult::batch_data`) AND the sync-framework
+    /// metadata writes (indexed-height pointer, block-hash record, state-root
+    /// record) are submitted together — one `db.write_opt(batch, sync=true)`,
+    /// one fsync.
+    ///
+    /// # Invariants enforced by the implementation
+    ///
+    /// - **Strict in-order progression**: the call MUST fail (and write nothing) when
+    ///   `height != current_indexed_height + 1`. This matches the user-stated invariant
+    ///   that `tip_height` advances exactly 0 → 1 → 2 → … with no gaps, no skips, and
+    ///   no rewrites outside of an explicit `rollback_to_height` call.
+    /// - **True all-or-nothing**: WASM writes + metadata writes land in one
+    ///   underlying batch with sync/fsync, so a crash leaves the DB at either
+    ///   `tip = height - 1` (nothing committed) or `tip = height` (everything
+    ///   committed). There is no intermediate state where the WASM writes
+    ///   landed but the metadata didn't, or vice versa. This closes the
+    ///   two-fsync window present in pre-rc.4 builds, which is the class of
+    ///   bug consistent with the supply-drift observed on mainnet g/h pods.
+    ///
+    /// The default implementation here is a *non-atomic* shim that calls the three
+    /// individual mutators in sequence and ignores `batch_data`. It exists only so
+    /// that legacy / mock storage adapters keep compiling — RocksDB-backed adapters
+    /// MUST override it to get the atomicity + durability guarantees described above.
+    async fn commit_atomic(
+        &mut self,
+        height: u32,
+        block_hash: &[u8],
+        state_root: &[u8],
+        _batch_data: &[u8],
+    ) -> SyncResult<()> {
+        // Strict in-order check (default impl): refuse to commit out of sequence.
+        let current = self.get_indexed_height().await?;
+        // If current is 0 and we have no stored hash for height 0, we accept any first
+        // commit (genesis or configured start_block). Otherwise the new height must be
+        // exactly current + 1.
+        let allow_first = current == 0 && self.get_block_hash(0).await?.is_none();
+        if !allow_first && height != current.saturating_add(1) {
+            return Err(crate::SyncError::Storage(format!(
+                "out-of-order commit rejected: attempted height {} but current tip is {} \
+                 (commit_atomic only accepts height == tip + 1)",
+                height, current
+            )));
+        }
+        self.store_block_hash(height, block_hash).await?;
+        self.store_state_root(height, state_root).await?;
+        self.set_indexed_height(height).await?;
+        Ok(())
+    }
 }
 
 /// Storage statistics

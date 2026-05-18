@@ -1,6 +1,6 @@
 [package]
 name = "metashrew-minimal"
-version = "9.0.1"
+version = "9.0.4-rc.5"
 edition = "2024"
 
 [lib]

@@ -239,6 +239,43 @@ impl StorageAdapter for MockStorage {
             storage_size_bytes: Some((total_entries * 64) as u64),
         })
     }
+
+    /// Override the default sequential-write shim with an in-memory equivalent
+    /// of the RocksDB atomic commit: all three writes happen under one big
+    /// lock acquisition so they are observable as a unit, AND we enforce the
+    /// strict-in-order rule (`height == tip + 1` except for the first commit
+    /// on a fresh DB). This lets unit tests exercise the exact same invariant
+    /// surface as the production RocksDB adapter.
+    async fn commit_atomic(
+        &mut self,
+        height: u32,
+        block_hash: &[u8],
+        state_root: &[u8],
+        _batch_data: &[u8],
+    ) -> SyncResult<()> {
+        if !*self.available.read().unwrap() {
+            return Err(SyncError::Storage("Storage not available".to_string()));
+        }
+        // Take all locks up front so the three "writes" are atomic w.r.t.
+        // any concurrent reader (the test harness might be poking at state).
+        let mut indexed = self.indexed_height.lock().await;
+        let mut hashes = self.block_hashes.lock().await;
+        let mut roots = self.state_roots.lock().await;
+
+        let current = *indexed;
+        let is_fresh = current == 0 && !hashes.contains_key(&0);
+        if !is_fresh && height != current.saturating_add(1) {
+            return Err(SyncError::Storage(format!(
+                "out-of-order commit rejected: attempted height {} but current tip is {} \
+                 (commit_atomic only accepts height == tip + 1)",
+                height, current
+            )));
+        }
+        hashes.insert(height, block_hash.to_vec());
+        roots.insert(height, state_root.to_vec());
+        *indexed = height;
+        Ok(())
+    }
 }
 
 /// Mock runtime adapter for testing

@@ -105,6 +105,126 @@ use crate::{
     SyncConfig, SyncEngine, SyncError, SyncResult, SyncStatus, ViewCall,
 };
 
+// ---------------------------------------------------------------------------
+// Atomic-retry backoff + escalating-log helpers (v9.0.5-rc.3).
+//
+// The block-apply paths in this crate retry the (process_block_atomic +
+// commit_atomic) pair *forever* on transient failure — the user's directive
+// is that we MUST NOT exit on atomic-write failure. To avoid a busy-loop on
+// long stalls (fsync wedged, disk full, IO timeout, etc.) we sleep between
+// attempts using exponential backoff with a 30 s cap, and we escalate the
+// log severity so operators see the stall.
+//
+// Backoff schedule (ms):
+//   attempt 1   -> 0
+//   attempt 2   -> 100
+//   attempt 3   -> 200
+//   attempt 4   -> 400
+//   attempt 5   -> 800
+//   attempt 6   -> 1_600
+//   attempt 7   -> 3_200
+//   attempt 8   -> 6_400
+//   attempt 9   -> 12_800
+//   attempt 10  -> 25_600
+//   attempt 11+ -> 30_000 (capped)
+//
+// Log severity:
+//   attempts 1..=ATOMIC_RETRY_WARN_THRESHOLD   -> warn!
+//   attempts thresh+1 ..= ATOMIC_RETRY_ERROR_THRESHOLD -> error! every time
+//   attempts > ATOMIC_RETRY_ERROR_THRESHOLD     -> error! only every
+//                                                  ATOMIC_RETRY_ERROR_SPAM_EVERY
+//                                                  iterations
+// ---------------------------------------------------------------------------
+
+/// Below (inclusive) this attempt count we log at WARN.
+pub const ATOMIC_RETRY_WARN_THRESHOLD: u32 = 5;
+/// Beyond this attempt count we drop to one-in-N error logs.
+pub const ATOMIC_RETRY_ERROR_THRESHOLD: u32 = 30;
+/// Past `ATOMIC_RETRY_ERROR_THRESHOLD`, log once every N iterations.
+pub const ATOMIC_RETRY_ERROR_SPAM_EVERY: u32 = 10;
+/// Cap on the per-attempt backoff (ms).
+pub const ATOMIC_RETRY_BACKOFF_CAP_MS: u64 = 30_000;
+
+/// Returns the milliseconds to sleep *before* `attempt` (1-indexed). Attempt 1
+/// returns 0 — no sleep before the first try.
+pub fn atomic_retry_backoff_ms(attempt: u32) -> u64 {
+    if attempt <= 1 {
+        0
+    } else {
+        // attempt 2  -> shift 0 -> 100 ms
+        // attempt 3  -> shift 1 -> 200 ms
+        // ...
+        // attempt 10 -> shift 8 -> 25_600 ms
+        // attempt 11 -> shift 9 -> 51_200 ms -> capped at 30_000 ms
+        // attempt 12+ -> shift 9 -> 30_000 ms (capped)
+        let shift = (attempt - 2).min(9) as u32;
+        (100u64.saturating_mul(1u64 << shift)).min(ATOMIC_RETRY_BACKOFF_CAP_MS)
+    }
+}
+
+/// Common logger for atomic-retry failures. Picks WARN / ERROR per the
+/// escalation policy and includes a hint about possible state corruption if
+/// the error looks like an out-of-order commit rejection (which should never
+/// happen in steady-state and indicates the storage tip advanced from under
+/// us — typically a sign that *something* is very wrong, but we still keep
+/// retrying because the operator can SIGKILL to escalate).
+pub fn log_atomic_retry_failure(
+    op_label: &str,
+    height: u32,
+    attempt: u32,
+    err_str: &str,
+) {
+    // "out-of-order commit rejected" is the signature emitted by
+    // `commit_atomic`'s strict-in-order check (see traits.rs and the
+    // RocksDB adapter). If we hit it during a retry loop, the tip has
+    // either advanced past us (impossible without another writer) or
+    // regressed below us. Either way it's a hard anomaly — but we keep
+    // retrying per the v9.0.5-rc.3 invariant. The operator can SIGKILL to
+    // escalate; we do NOT call std::process::exit here.
+    let out_of_order = err_str.contains("out-of-order commit rejected");
+
+    if attempt <= ATOMIC_RETRY_WARN_THRESHOLD {
+        warn!(
+            "{} failed for height {} (attempt {}): {} — retrying",
+            op_label, height, attempt, err_str
+        );
+    } else if attempt <= ATOMIC_RETRY_ERROR_THRESHOLD {
+        if out_of_order {
+            error!(
+                "{} failed for height {} (attempt {}, out-of-order commit rejected — \
+                 possible state corruption / unexpected tip advance; manual intervention \
+                 may be required): {} — block {} atomic apply has been retrying for {} attempts",
+                op_label, height, attempt, err_str, height, attempt
+            );
+        } else {
+            error!(
+                "{} failed for height {} (attempt {}): {} — block {} atomic apply has \
+                 been retrying for {} attempts",
+                op_label, height, attempt, err_str, height, attempt
+            );
+        }
+    } else {
+        // Past ATOMIC_RETRY_ERROR_THRESHOLD: only log every Nth attempt to
+        // keep stderr usable while the stall persists.
+        if (attempt - ATOMIC_RETRY_ERROR_THRESHOLD) % ATOMIC_RETRY_ERROR_SPAM_EVERY == 0 {
+            if out_of_order {
+                error!(
+                    "{} STILL failing for height {} (attempt {}, out-of-order commit rejected — \
+                     possible state corruption / unexpected tip advance; manual intervention \
+                     may be required): {} — block {} atomic apply has been retrying for {} attempts",
+                    op_label, height, attempt, err_str, height, attempt
+                );
+            } else {
+                error!(
+                    "{} STILL failing for height {} (attempt {}): {} — block {} atomic apply \
+                     has been retrying for {} attempts",
+                    op_label, height, attempt, err_str, height, attempt
+                );
+            }
+        }
+    }
+}
+
 /// Generic Bitcoin indexer synchronization engine
 pub struct MetashrewSync<N, S, R>
 where
@@ -145,6 +265,45 @@ where
     }
 
     pub async fn init(&self) {
+        // v9.0.5-rc.6: defensively heal divergent on-disk pointers BEFORE
+        // computing start_height. Honors `config.enable_startup_heal`
+        // (default true). See `heal_pointer_divergence_at_startup` for
+        // the full reasoning.
+        let healed_tip = match heal_pointer_divergence_at_startup(
+            self.node.clone(),
+            self.storage.clone(),
+            &self.config,
+        )
+        .await
+        {
+            Ok((h, outcome)) => {
+                match outcome {
+                    StartupHealOutcome::Healed { from, healed_to } => {
+                        warn!(
+                            "startup-heal: applied (from={} healed_to={}); resuming sync from {}",
+                            from, healed_to, healed_to + 1
+                        );
+                    }
+                    StartupHealOutcome::AlreadyConsistent { tip } => {
+                        info!("startup-heal: pointers consistent at tip {}", tip);
+                    }
+                    StartupHealOutcome::Disabled => {
+                        info!("startup-heal: disabled by config; trusting __INTERNAL/height = {}", h);
+                    }
+                }
+                h
+            }
+            Err(e) => {
+                error!("startup-heal: FAILED ({}); refusing to advance with divergent state — exiting", e);
+                // We can't `?` here because init returns (). The
+                // production stack treats startup-heal failure as a
+                // hard stop: log loudly and panic, so the operator
+                // sees the failure rather than getting a silently
+                // wrong indexer.
+                panic!("startup-heal failed: {}", e);
+            }
+        };
+
         let (indexed_height, start_height) = {
             let storage = self.storage.read().await;
             let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
@@ -157,6 +316,17 @@ where
             };
             (indexed_height, start_height)
         };
+
+        // Sanity: heal-returned tip should match the re-read indexed_height.
+        // If it doesn't, the heal did something we didn't intend.
+        if indexed_height != healed_tip
+            && !(indexed_height == 0 && healed_tip == 0)
+        {
+            warn!(
+                "startup-heal: post-heal indexed_height ({}) != healed_tip ({}); using indexed_height",
+                indexed_height, healed_tip
+            );
+        }
 
         if indexed_height == 0 && self.config.start_block > 0 {
             let prev_height = self.config.start_block.saturating_sub(1);
@@ -171,7 +341,7 @@ where
             }
         }
 
-        
+
         self.current_height.store(start_height, Ordering::SeqCst);
     }
 
@@ -358,9 +528,37 @@ where
         }
     }
 
-    /// Process a single block atomically
+    /// Process a single block atomically, with bounded retries and **no**
+    /// non-atomic fallback path.
+    ///
+    /// The user-stated invariant is:
+    ///
+    /// > "if an atomic write fails it either happens or it doesn't, and we
+    /// > never skip a block. Anytime we run metashrew-runtime on a block,
+    /// > it should produce that set of k/v pairs, then attempt to write
+    /// > them until it succeeds, and if it doesn't, or the software is
+    /// > restarted, it should pick up where it left off, and rerun that
+    /// > block to get that same k/v pairs for that same height, and apply
+    /// > them successfully."
+    ///
+    /// Implementation:
+    ///
+    /// 1. SPV-style validate that this block connects to our stored tip.
+    /// 2. Loop **forever** calling `process_block_atomic`: each attempt
+    ///    re-executes the WASM module from scratch (memory refresh is
+    ///    unconditional inside `process_block_atomic`), produces a fresh,
+    ///    bit-for-bit identical k/v map (modulo timing-side-channels in the
+    ///    indexer, which are out of scope here), and tries to commit via
+    ///    the storage adapter's `commit_atomic`.
+    /// 3. Backoff between attempts is exponential, capped at 30s. Log
+    ///    severity escalates: `warn!` for attempts 1-5, `error!` for
+    ///    attempts 6-30, `error!` every 10th iteration beyond 30. There
+    ///    is **no** `process::exit` — the block-apply blocks until the
+    ///    atomic commit succeeds. The operator can SIGKILL to escalate if
+    ///    needed. There is also no silent fallback to a different code
+    ///    path with different write semantics.
     pub async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
-        // Validate block hash and chain continuity (SPV-style)
+        // 1. SPV-style continuity check.
         if !self.validate_block_connects(height, &block_data, &block_hash).await? {
             return Err(SyncError::BlockProcessing {
                 height,
@@ -375,88 +573,79 @@ where
             block_data.len()
         );
 
-        // Try atomic processing first
-        let atomic_result = self.runtime
-            .process_block_atomic(height, &block_data, &block_hash)
-            .await;
+        // 2. Infinite-retry atomic apply. Block until commit succeeds.
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
 
-        match atomic_result {
-            Ok(result) => {
-                // Atomic processing succeeded - commit all operations at once
-                info!("Atomic block processing succeeded for height {}", height);
-
-                // Update storage with all metadata atomically
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &result.block_hash).await?;
-                    storage.store_state_root(height, &result.state_root).await?;
+            // Backoff (no sleep before first attempt).
+            if attempt > 1 {
+                let backoff_ms = atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
                 }
-
-                // Update metrics
-                self.blocks_processed.fetch_add(1, Ordering::SeqCst);
-                {
-                    // NOTE: Timestamp is for monitoring/metrics only, not used in state calculation
-                    let mut last_time = self.last_block_time.write().await;
-                    *last_time = Some(SystemTime::now());
-                }
-
-                info!(
-                    "Successfully processed block {} atomically with state root",
-                    height
-                );
-                Ok(())
             }
-            Err(atomic_err) => {
-                // CRITICAL WARNING: Fallback to non-atomic processing can cause state divergence
-                // between instances under different load conditions. This should be investigated.
-                error!(
-                    "CRITICAL: Atomic processing failed for height {}, falling back to non-atomic. \
-                     This may cause STATE DIVERGENCE between indexer instances! Error: {:?}",
-                    height, atomic_err
-                );
 
-                // Log memory and resource state to help diagnose why atomic processing failed
-                log::warn!(
-                    "Block {} triggered fallback: block_size={} bytes, consider investigating \
-                     if this happens frequently under load",
-                    height,
-                    block_data.len()
-                );
-
-                // Process with runtime (non-atomic fallback)
-                self.runtime
-                    .process_block(height, &block_data)
-                    .await
-                    .map_err(|e| SyncError::BlockProcessing {
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    // Sync-framework-side atomic commit. The RocksDB adapter
+                    // implementation bundles the three writes (indexed-height,
+                    // block-hash record, state-root record) into a single
+                    // sync=true WriteBatch and enforces height == tip + 1.
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically (attempt {})",
+                                height, attempt
+                            );
+                            self.blocks_processed.fetch_add(1, Ordering::SeqCst);
+                            {
+                                let mut last_time = self.last_block_time.write().await;
+                                *last_time = Some(SystemTime::now());
+                            }
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            log_atomic_retry_failure(
+                                "atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
+                            );
+                        }
+                    }
+                }
+                Err(atomic_err) => {
+                    log_atomic_retry_failure(
+                        "atomic block execution",
                         height,
-                        message: format!("Fallback processing also failed: {}", e),
-                    })?;
-
-                // Get state root after processing
-                let state_root = self.runtime.get_state_root(height).await?;
-
-                // Update storage with height, block hash, and state root
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &block_hash).await?;
-                    storage.store_state_root(height, &state_root).await?;
+                        attempt,
+                        &format!("{}", atomic_err),
+                    );
                 }
+            }
 
-                // Update metrics
-                self.blocks_processed.fetch_add(1, Ordering::SeqCst);
-                {
-                    // NOTE: Timestamp is for monitoring/metrics only, not used in state calculation
-                    let mut last_time = self.last_block_time.write().await;
-                    *last_time = Some(SystemTime::now());
-                }
-
-                info!(
-                    "Successfully processed block {} with fallback method",
-                    height
+            // Refresh the runtime's WASM memory before the next attempt so
+            // we start from a clean instance — the runtime is supposed to
+            // do this internally on error already, but a belt-and-braces
+            // refresh here keeps the retry loop deterministic against any
+            // future changes to the runtime adapter. Re-executing the block
+            // from scratch is the whole point of the retry loop.
+            if let Err(e) = self.runtime.refresh_memory().await {
+                warn!(
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
                 );
-                Ok(())
             }
         }
     }
@@ -738,68 +927,69 @@ where
     S: StorageAdapter + 'static,
     R: RuntimeAdapter + 'static,
 {
+    /// Pipeline-mode block apply. Mirrors `MetashrewSync::process_block` but
+    /// without the SPV continuity check (that's done by the fetcher upstream
+    /// in this pipeline) and without the metric/timing bookkeeping (that's
+    /// handled by the result-handling loop). Atomic-only, infinite retry
+    /// with exponential backoff — block until the commit succeeds; same
+    /// invariants as the non-pipeline path.
     async fn process_block(&self, height: u32, block_data: Vec<u8>, block_hash: Vec<u8>) -> SyncResult<()> {
-        // Try atomic processing first
-        let atomic_result = self.runtime
-            .process_block_atomic(height, &block_data, &block_hash)
-            .await;
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
 
-        match atomic_result {
-            Ok(result) => {
-                // Atomic processing succeeded
-                info!(
-                    "Atomic block processing succeeded for height {} in pipeline",
-                    height
-                );
-
-                // Update storage with all metadata atomically
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &result.block_hash).await?;
-                    storage.store_state_root(height, &result.state_root).await?;
+            if attempt > 1 {
+                let backoff_ms = atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
                 }
-
-                Ok(())
             }
-            Err(atomic_err) => {
-                // CRITICAL WARNING: Fallback to non-atomic processing can cause state divergence
-                // between instances under different load conditions. This should be investigated.
-                error!(
-                    "CRITICAL: Atomic processing failed for height {} in pipeline, falling back. \
-                     This may cause STATE DIVERGENCE between indexer instances! Error: {:?}",
-                    height, atomic_err
-                );
 
-                // Log memory and resource state to help diagnose why atomic processing failed
-                log::warn!(
-                    "Block {} in pipeline triggered fallback: block_size={} bytes, \
-                     investigate if this happens frequently under load",
-                    height,
-                    block_data.len()
-                );
-
-                // Process with runtime (non-atomic fallback)
-                self.runtime
-                    .process_block(height, &block_data)
-                    .await
-                    .map_err(|e| SyncError::BlockProcessing {
-                        height,
-                        message: format!("Pipeline fallback processing also failed: {}", e),
-                    })?;
-
-                // Get state root after processing
-                let state_root = self.runtime.get_state_root(height).await?;
-
-                // Update storage with height, block hash, and state root
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &block_hash).await?;
-                    storage.store_state_root(height, &state_root).await?;
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically in pipeline (attempt {})",
+                                height, attempt
+                            );
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            log_atomic_retry_failure(
+                                "pipeline atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
+                            );
+                        }
+                    }
                 }
+                Err(atomic_err) => {
+                    log_atomic_retry_failure(
+                        "pipeline atomic block execution",
+                        height,
+                        attempt,
+                        &format!("{}", atomic_err),
+                    );
+                }
+            }
 
-                Ok(())
+            if let Err(e) = self.runtime.refresh_memory().await {
+                warn!(
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
+                );
             }
         }
     }
@@ -883,6 +1073,249 @@ where
         self.process_block(height, block_data, block_hash).await
     }
 
+}
+
+// ---------------------------------------------------------------------------
+// v9.0.5-rc.6: startup-heal of divergent on-disk pointers.
+//
+// Background — mainnet incident on a v9.0.5-rc.5 box:
+//   The sync engine was looping process_block(N) repeatedly while the
+//   storage tip was N+5. commit_atomic rejected every commit with the
+//   strict-in-order check. Three pointers existed on disk:
+//     __INTERNAL/height               (owned by commit_atomic)
+//     /__INTERNAL/tip-height          (owned by runtime-side __flush)
+//     /__INTERNAL/height-to-hash/H    (owned by commit_atomic, per height)
+//   They were all consistent — but the sync engine's in-memory
+//   current_height had been knocked back to N somehow (legacy code path
+//   on a prior version), and the rc.5 reorg detector couldn't fire to
+//   heal it because the storage state was internally consistent: bitcoind
+//   agreed with all stored hashes too. A clean stop+restart unblocked it
+//   because init() re-reads __INTERNAL/height. This module preserves that
+//   recovery semantics structurally: init() always defensively heals.
+//
+// The heal must:
+//   1. Read all three pointers + an optional bitcoind check.
+//   2. If they all agree AND the canonical bitcoind hash matches the
+//      stored hash at the tip: no-op (idempotent on healthy state).
+//   3. Otherwise: pick min(p1, p2, p3) as the safe candidate, walk DOWN
+//      from there until the stored hash matches bitcoind (or bitcoind
+//      is unreachable — trust the local pointers and bail to step 4).
+//   4. Issue a single atomic rollback to the discovered safe height.
+//   5. Set current_height = safe_height + 1 and proceed.
+//
+// Conservative-by-design: min-wins. We'd rather re-apply blocks (the
+// rc.5 single-batch atomic commit makes this idempotent and correct)
+// than skip any. The strict-in-order check in commit_atomic guarantees
+// we don't accidentally write garbage on top of valid state — it'd be
+// rejected at the storage layer.
+// ---------------------------------------------------------------------------
+
+/// Outcome of a startup-heal pass. Returned to callers so they can log
+/// observably what happened (or didn't).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupHealOutcome {
+    /// All three pointers agreed and (optionally) bitcoind confirmed the
+    /// tip. No writes happened.
+    AlreadyConsistent { tip: u32 },
+    /// Pointers diverged or bitcoind disagreed. We rolled back to
+    /// `healed_to`. `from` is the highest divergent value we saw.
+    Healed { from: u32, healed_to: u32 },
+    /// Heal was disabled by config. Pointers were not even read.
+    Disabled,
+}
+
+/// Run the v9.0.5-rc.6 startup-heal pass. Reads all three pointers,
+/// validates the highest commonly-agreed height against bitcoind, and
+/// issues an atomic rollback if anything diverges. Idempotent: re-running
+/// on already-healed state is a no-op.
+///
+/// Returns the height that the heal believes is the safe tip — caller
+/// should set `current_height = returned_value + 1`. If
+/// `enable_startup_heal` is false, returns the raw `__INTERNAL/height`
+/// unchanged.
+///
+/// If bitcoind is unreachable during the heal, we DO NOT block startup —
+/// we trust the on-disk pointers and proceed with the min-wins pick.
+/// This matches the "don't block startup on a network blip" constraint.
+pub async fn heal_pointer_divergence_at_startup<N, S>(
+    node: Arc<N>,
+    storage: Arc<RwLock<S>>,
+    config: &SyncConfig,
+) -> SyncResult<(u32, StartupHealOutcome)>
+where
+    N: BitcoinNodeAdapter + 'static,
+    S: StorageAdapter + 'static,
+{
+    if !config.enable_startup_heal {
+        let storage_guard = storage.read().await;
+        let h = storage_guard.get_indexed_height().await.unwrap_or(0);
+        drop(storage_guard);
+        debug!("startup-heal disabled by config; trusting __INTERNAL/height = {}", h);
+        return Ok((h, StartupHealOutcome::Disabled));
+    }
+
+    // --- Step 1: read all three pointers ---
+    let (indexed_height, runtime_tip, max_blockhash_h) = {
+        let storage_guard = storage.read().await;
+        let indexed_height = storage_guard.get_indexed_height().await.unwrap_or(0);
+        let runtime_tip = storage_guard
+            .get_runtime_tip_height()
+            .await
+            .unwrap_or(indexed_height);
+        // bound the blockhash scan: don't look further down than (indexed_height - 256)
+        // unless indexed_height is small.
+        let floor = indexed_height.saturating_sub(256);
+        let max_blockhash_h = storage_guard
+            .find_max_stored_block_hash_height(floor)
+            .await
+            .unwrap_or(indexed_height);
+        drop(storage_guard);
+        (indexed_height, runtime_tip, max_blockhash_h)
+    };
+
+    info!(
+        "startup-heal: pointer scan — __INTERNAL/height={} /__INTERNAL/tip-height={} max-stored-blockhash={}",
+        indexed_height, runtime_tip, max_blockhash_h
+    );
+
+    // --- Step 2: trivially-consistent fast path ---
+    let all_agree = indexed_height == runtime_tip && runtime_tip == max_blockhash_h;
+    if all_agree && indexed_height == 0 {
+        // Fresh DB (or genesis): nothing to heal.
+        info!("startup-heal: fresh DB (all pointers 0); no heal needed");
+        return Ok((indexed_height, StartupHealOutcome::AlreadyConsistent { tip: indexed_height }));
+    }
+
+    // --- Step 3: pick min-wins candidate ---
+    let from = indexed_height.max(runtime_tip).max(max_blockhash_h);
+    let candidate = indexed_height.min(runtime_tip).min(max_blockhash_h);
+
+    // --- Step 4: bitcoind-validate the candidate (best-effort) ---
+    // Walk DOWN from candidate until stored_hash matches bitcoind's hash
+    // at that height. Bounded by max_reorg_depth so we can't infinite-loop
+    // on a thoroughly corrupted DB.
+    let safe_height;
+    let bitcoind_reachable = node.is_connected().await;
+    if all_agree && bitcoind_reachable {
+        // Verify candidate against bitcoind. If they agree, we're clean.
+        let storage_guard = storage.read().await;
+        let stored = storage_guard.get_block_hash(candidate).await.unwrap_or(None);
+        drop(storage_guard);
+        if let Some(stored_hash) = stored {
+            match node.get_block_hash(candidate).await {
+                Ok(remote_hash) if remote_hash == stored_hash => {
+                    info!(
+                        "startup-heal: all pointers agree at height {} and bitcoind confirms; clean state",
+                        candidate
+                    );
+                    return Ok((candidate, StartupHealOutcome::AlreadyConsistent { tip: candidate }));
+                }
+                Ok(remote_hash) => {
+                    warn!(
+                        "startup-heal: pointers agree at {} but bitcoind disagrees (stored={} remote={}); walking back",
+                        candidate,
+                        hex::encode(&stored_hash),
+                        hex::encode(&remote_hash),
+                    );
+                    // Fall through to the bitcoind walk-back below.
+                }
+                Err(e) => {
+                    warn!(
+                        "startup-heal: bitcoind unreachable for height {} ({}); trusting local pointers",
+                        candidate, e
+                    );
+                    return Ok((candidate, StartupHealOutcome::AlreadyConsistent { tip: candidate }));
+                }
+            }
+        } else {
+            // Stored hash missing at candidate — heal needed even though
+            // pointers agreed numerically. Treat as divergent.
+            warn!(
+                "startup-heal: stored block-hash record missing at agreed-tip {}; walking back",
+                candidate
+            );
+        }
+    } else if !all_agree {
+        error!(
+            "startup-heal: POINTER DIVERGENCE — __INTERNAL/height={} /__INTERNAL/tip-height={} max-stored-blockhash={}; \
+             min-wins candidate = {}, will rollback to safe height",
+            indexed_height, runtime_tip, max_blockhash_h, candidate
+        );
+    }
+
+    // Bitcoind-walk-back loop. Only when bitcoind is reachable; otherwise
+    // we just trust the min-wins candidate.
+    if bitcoind_reachable {
+        let floor = candidate.saturating_sub(config.max_reorg_depth);
+        let mut h = candidate;
+        loop {
+            let storage_guard = storage.read().await;
+            let stored = storage_guard.get_block_hash(h).await.unwrap_or(None);
+            drop(storage_guard);
+            match stored {
+                Some(stored_hash) => match node.get_block_hash(h).await {
+                    Ok(remote_hash) if remote_hash == stored_hash => {
+                        safe_height = h;
+                        break;
+                    }
+                    Ok(_remote_hash) => {
+                        warn!(
+                            "startup-heal: hash mismatch at height {}; walking back",
+                            h
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "startup-heal: bitcoind unreachable mid-walk at height {} ({}); trusting candidate {}",
+                            h, e, candidate
+                        );
+                        safe_height = candidate.min(h);
+                        break;
+                    }
+                },
+                None => {
+                    // No stored hash; can't validate. Walk down.
+                    debug!("startup-heal: no stored hash at height {}; walking back", h);
+                }
+            }
+            if h == 0 || h <= floor {
+                safe_height = h;
+                break;
+            }
+            h = h.saturating_sub(1);
+        }
+    } else {
+        info!(
+            "startup-heal: bitcoind unreachable at init; using min-wins candidate {} without validation",
+            candidate
+        );
+        safe_height = candidate;
+    }
+
+    // --- Step 5: issue the atomic heal write ---
+    if safe_height < indexed_height || safe_height < runtime_tip || safe_height < max_blockhash_h {
+        warn!(
+            "startup-heal: ROLLING BACK to height {} (was indexed_height={} runtime_tip={} max_blockhash_h={})",
+            safe_height, indexed_height, runtime_tip, max_blockhash_h
+        );
+        let mut storage_guard = storage.write().await;
+        if let Err(e) = storage_guard.heal_pointers_atomic(safe_height).await {
+            error!(
+                "startup-heal: heal_pointers_atomic FAILED at height {}: {} — refusing to start with divergent state",
+                safe_height, e
+            );
+            return Err(e);
+        }
+        drop(storage_guard);
+        info!("startup-heal: rolled back to height {} successfully", safe_height);
+        Ok((safe_height, StartupHealOutcome::Healed { from, healed_to: safe_height }))
+    } else {
+        info!(
+            "startup-heal: pointers consistent at height {} after walk-back (no write needed)",
+            safe_height
+        );
+        Ok((safe_height, StartupHealOutcome::AlreadyConsistent { tip: safe_height }))
+    }
 }
 
 /// Handles chain reorganizations by finding the common ancestor and rolling back state.

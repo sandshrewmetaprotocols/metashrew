@@ -93,6 +93,42 @@ where
     }
 
     pub async fn init(&self) {
+        // v9.0.5-rc.6: defensively heal divergent on-disk pointers BEFORE
+        // computing start_height. Honors `config.enable_startup_heal`
+        // (default true). See `crate::sync::heal_pointer_divergence_at_startup`
+        // for the full reasoning. We call the shared helper from
+        // `crate::sync` so both the plain and snapshot-enabled engines
+        // get the same heal semantics.
+        let healed_tip = match crate::sync::heal_pointer_divergence_at_startup(
+            self.node.clone(),
+            self.storage.clone(),
+            &self.config,
+        )
+        .await
+        {
+            Ok((h, outcome)) => {
+                match outcome {
+                    crate::sync::StartupHealOutcome::Healed { from, healed_to } => {
+                        warn!(
+                            "startup-heal: applied (from={} healed_to={}); resuming sync from {}",
+                            from, healed_to, healed_to + 1
+                        );
+                    }
+                    crate::sync::StartupHealOutcome::AlreadyConsistent { tip } => {
+                        info!("startup-heal: pointers consistent at tip {}", tip);
+                    }
+                    crate::sync::StartupHealOutcome::Disabled => {
+                        info!("startup-heal: disabled by config; trusting __INTERNAL/height = {}", h);
+                    }
+                }
+                h
+            }
+            Err(e) => {
+                error!("startup-heal: FAILED ({}); refusing to advance with divergent state — exiting", e);
+                panic!("startup-heal failed: {}", e);
+            }
+        };
+
         let mut storage = self.storage.write().await;
         let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
         let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
@@ -102,6 +138,13 @@ where
         } else {
             self.config.start_block
         };
+
+        if indexed_height != healed_tip && !(indexed_height == 0 && healed_tip == 0) {
+            warn!(
+                "startup-heal: post-heal indexed_height ({}) != healed_tip ({}); using indexed_height",
+                indexed_height, healed_tip
+            );
+        }
 
         if indexed_height == 0 && self.config.start_block > 0 {
             let prev_height = self.config.start_block.saturating_sub(1);
@@ -301,13 +344,18 @@ where
         }
     }
 
+    /// Process a single block atomically. See `MetashrewSync::process_block`
+    /// for the full invariants — this is the snapshot-enabled engine's
+    /// equivalent and follows the same infinite-retry-with-exponential-backoff
+    /// policy: block until atomic commit succeeds, no silent fallback to a
+    /// non-atomic write path, no `process::exit`.
     pub async fn process_block(
         &self,
         height: u32,
         block_data: Vec<u8>,
         block_hash: Vec<u8>,
     ) -> SyncResult<()> {
-        // Validate block hash and chain continuity (SPV-style)
+        // SPV-style continuity check.
         if !self.validate_block_connects(height, &block_data, &block_hash).await? {
             return Err(SyncError::BlockProcessing {
                 height,
@@ -317,65 +365,64 @@ where
             });
         }
 
-        // Try atomic processing first
-        let atomic_result = self.runtime
-            .process_block_atomic(height, &block_data, &block_hash)
-            .await;
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
 
-        match atomic_result {
-            Ok(result) => {
-                // Atomic processing succeeded
-                info!(
-                    "Atomic block processing succeeded for height {} in pipeline",
-                    height
-                );
-
-                // Update storage with all metadata atomically
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &result.block_hash).await?;
-                    storage.store_state_root(height, &result.state_root).await?;
+            if attempt > 1 {
+                let backoff_ms = crate::sync::atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
                 }
-
-                // Update current height atomic
-                self.current_height.store(height + 1, Ordering::SeqCst);
-                self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
-
-                Ok(())
             }
-            Err(_) => {
-                // Fallback to non-atomic processing
-                warn!(
-                    "Atomic processing failed for height {} in pipeline, falling back",
-                    height
-                );
 
-                // Process with runtime (non-atomic fallback)
-                self.runtime
-                    .process_block(height, &block_data)
-                    .await
-                    .map_err(|e| SyncError::BlockProcessing {
-                        height,
-                        message: e.to_string(),
-                    })?;
-
-                // Get state root after processing
-                let state_root = self.runtime.get_state_root(height).await?;
-
-                // Update storage with height, block hash, and state root
-                {
-                    let mut storage = self.storage.write().await;
-                    storage.set_indexed_height(height).await?;
-                    storage.store_block_hash(height, &block_hash).await?;
-                    storage.store_state_root(height, &state_root).await?;
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically (snapshot path, attempt {})",
+                                height, attempt
+                            );
+                            self.current_height.store(height + 1, Ordering::SeqCst);
+                            self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            crate::sync::log_atomic_retry_failure(
+                                "snapshot-path atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
+                            );
+                        }
+                    }
                 }
+                Err(atomic_err) => {
+                    crate::sync::log_atomic_retry_failure(
+                        "snapshot-path atomic block execution",
+                        height,
+                        attempt,
+                        &format!("{}", atomic_err),
+                    );
+                }
+            }
 
-                // Update current height atomic
-                self.current_height.store(height + 1, Ordering::SeqCst);
-                self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
-
-                Ok(())
+            if let Err(e) = self.runtime.refresh_memory().await {
+                warn!(
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
+                );
             }
         }
     }
@@ -476,51 +523,101 @@ where
         height: u32,
         block_data: Vec<u8>,
     ) -> SyncResult<()> {
-        // Normal block processing
-        self.runtime.process_block(height, &block_data).await?;
-
-        // Get state root and block hash
-        let state_root = self.runtime.get_state_root(height).await?;
-
+        // Atomic path: same infinite-retry-with-exponential-backoff policy as
+        // `process_block`. The block hash comes from the node here because
+        // this entry point doesn't receive it from a caller; it's the
+        // snapshot-sync-loop's own fetcher boundary. The SPV continuity check
+        // still happens inside the runtime's `validate_block_connects` path
+        // when callers route through `process_block`, but this convenience
+        // method on the snapshot loop skips it because the loop has already
+        // done reorg handling and chain-continuity inspection upstream.
         let block_hash = self.node.get_block_hash(height).await?;
 
-        // Update storage
-        {
-            let mut storage = self.storage.write().await;
-            storage.set_indexed_height(height).await?;
-            storage.store_block_hash(height, &block_hash).await?;
-            storage.store_state_root(height, &state_root).await?;
-        }
+        let mut attempt: u32 = 0;
+        loop {
+            attempt = attempt.saturating_add(1);
 
-        // CRITICAL FIX: Only update current_height AFTER all operations succeed
-        // This prevents the height from advancing when there are failures
-        self.current_height.store(height + 1, Ordering::SeqCst);
-        self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
-
-        {
-            let mut last_time = self.last_block_time.write().await;
-            *last_time = Some(SystemTime::now());
-        }
-
-        // Check if we should create a snapshot
-        if let Err(e) = self.create_snapshot_if_needed(height).await {
-            warn!("Failed to create snapshot at height {}: {}", height, e);
-        }
-
-        // Register snapshot with server if running
-        let mode = self.sync_mode.read().await;
-        if matches!(*mode, SyncMode::SnapshotServer(_)) {
-            if let Some(provider) = self.snapshot_provider.read().await.as_ref() {
-                if provider.should_create_snapshot(height) {
-                    if let Some(_server) = self.snapshot_server.write().await.as_mut() {
-                        // This would be implemented to register the snapshot with the server
-                        debug!("Would register snapshot at height {} with server", height);
-                    }
+            if attempt > 1 {
+                let backoff_ms = crate::sync::atomic_retry_backoff_ms(attempt);
+                if backoff_ms > 0 {
+                    sleep(Duration::from_millis(backoff_ms)).await;
                 }
             }
-        }
 
-        Ok(())
+            match self
+                .runtime
+                .process_block_atomic(height, &block_data, &block_hash)
+                .await
+            {
+                Ok(result) => {
+                    let commit_res = {
+                        let mut storage = self.storage.write().await;
+                        storage
+                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
+                            .await
+                    };
+                    match commit_res {
+                        Ok(()) => {
+                            info!(
+                                "Block {} committed atomically (snapshot loop, attempt {})",
+                                height, attempt
+                            );
+                            self.current_height.store(height + 1, Ordering::SeqCst);
+                            self.blocks_synced_normally.fetch_add(1, Ordering::SeqCst);
+                            {
+                                let mut last_time = self.last_block_time.write().await;
+                                *last_time = Some(SystemTime::now());
+                            }
+                            // Snapshot creation hooks (best-effort, non-atomic).
+                            if let Err(e) = self.create_snapshot_if_needed(height).await {
+                                warn!("Failed to create snapshot at height {}: {}", height, e);
+                            }
+                            let mode = self.sync_mode.read().await;
+                            if matches!(*mode, SyncMode::SnapshotServer(_)) {
+                                if let Some(provider) =
+                                    self.snapshot_provider.read().await.as_ref()
+                                {
+                                    if provider.should_create_snapshot(height) {
+                                        if let Some(_server) =
+                                            self.snapshot_server.write().await.as_mut()
+                                        {
+                                            debug!(
+                                                "Would register snapshot at height {} with server",
+                                                height
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            return Ok(());
+                        }
+                        Err(commit_err) => {
+                            crate::sync::log_atomic_retry_failure(
+                                "snapshot-loop atomic commit",
+                                height,
+                                attempt,
+                                &format!("{}", commit_err),
+                            );
+                        }
+                    }
+                }
+                Err(atomic_err) => {
+                    crate::sync::log_atomic_retry_failure(
+                        "snapshot-loop atomic execution",
+                        height,
+                        attempt,
+                        &format!("{}", atomic_err),
+                    );
+                }
+            }
+
+            if let Err(e) = self.runtime.refresh_memory().await {
+                warn!(
+                    "refresh_memory() between retries failed at height {}: {} (continuing)",
+                    height, e
+                );
+            }
+        }
     }
 
     /// Run the main sync loop with snapshot support
@@ -871,7 +968,7 @@ where
 
 }
 
-fn parse_height_string(height_str: &str) -> SyncResult<u32> {
+pub fn parse_height_string(height_str: &str) -> SyncResult<u32> {
     let height_part = height_str.split(':').next().unwrap_or(height_str);
     height_part
         .parse::<u32>()

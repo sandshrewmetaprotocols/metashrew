@@ -137,6 +137,7 @@ async fn test_simple_reorg_longer_chain_wins() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_a = metashrew_sync::sync::MetashrewSync::new(
@@ -169,6 +170,7 @@ async fn test_simple_reorg_longer_chain_wins() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_b = metashrew_sync::sync::MetashrewSync::new(
@@ -224,6 +226,7 @@ async fn test_deep_reorg() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_a = metashrew_sync::sync::MetashrewSync::new(
@@ -256,6 +259,7 @@ async fn test_deep_reorg() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_b = metashrew_sync::sync::MetashrewSync::new(
@@ -303,6 +307,7 @@ async fn test_multiple_sequential_reorgs() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_a = metashrew_sync::sync::MetashrewSync::new(
@@ -333,6 +338,7 @@ async fn test_multiple_sequential_reorgs() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_b = metashrew_sync::sync::MetashrewSync::new(
@@ -363,6 +369,7 @@ async fn test_multiple_sequential_reorgs() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_a2 = metashrew_sync::sync::MetashrewSync::new(
@@ -410,6 +417,7 @@ async fn test_state_consistency_after_reorg() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_a = metashrew_sync::sync::MetashrewSync::new(
@@ -446,6 +454,7 @@ async fn test_state_consistency_after_reorg() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_b = metashrew_sync::sync::MetashrewSync::new(
@@ -515,6 +524,7 @@ async fn test_reorg_at_genesis() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_a = metashrew_sync::sync::MetashrewSync::new(
@@ -545,6 +555,7 @@ async fn test_reorg_at_genesis() -> Result<()> {
         pipeline_size: Some(1),
         max_reorg_depth: 100,
         reorg_check_threshold: 6,
+        enable_startup_heal: false,
     };
 
     let mut syncer_b = metashrew_sync::sync::MetashrewSync::new(

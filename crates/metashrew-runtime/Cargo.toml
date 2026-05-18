@@ -1,18 +1,26 @@
 [package]
 name = "metashrew-runtime"
-version = "9.0.1"
+version = "9.0.4-rc.5"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0.75"
 prost = "0.12.1"
 prost-build = "0.12.1"
-wasmtime = "18.0.4"
+wasmtime = "43"
 itertools = "0.12.0"
 log = "0.4.20"
 hex = "0.4.3"
 tokio = { workspace = true, features = ["full"] }
 sha2 = { workspace = true }
+# sysinfo powers the host-memory floor check on the view path. We refresh
+# the cached value at most every `memory_floor_refresh_ms` (default 1s) so
+# we do not add per-call latency to view-runtime acquire.
+sysinfo = { version = "0.30", default-features = false }
+thiserror = "1.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 [build-dependencies]
 prost-build.workspace = true

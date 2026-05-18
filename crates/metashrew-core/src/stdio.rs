@@ -18,6 +18,17 @@ pub fn stdout() -> Stdout {
     Stdout(())
 }
 
+// `println!` / `print!` here route through the host `__log` import (see
+// `log()` below). On the indexer hot path that's a wasmi→host call plus
+// stdout I/O per line — across thousands of cellpacks per heavy block
+// (e.g. mass-mint DIESEL blocks) the cumulative cost dominates per-block
+// throughput. The `debug-log` feature toggles the macros: ON keeps the
+// original behaviour, OFF compiles them to `()` so call sites pay
+// nothing. The `use ...::stdio::{stdout, Write}` imports that nearly
+// every consumer pairs with `use metashrew_core::{println, ...}` are
+// already `#[allow(unused_imports)]`-annotated, so the no-op variant
+// doesn't trigger dead-import warnings downstream.
+#[cfg(feature = "debug-log")]
 #[macro_export]
 macro_rules! println {
   ( $( $x:tt )* ) => {
@@ -27,6 +38,13 @@ macro_rules! println {
   }
 }
 
+#[cfg(not(feature = "debug-log"))]
+#[macro_export]
+macro_rules! println {
+  ( $( $x:tt )* ) => { () }
+}
+
+#[cfg(feature = "debug-log")]
 #[macro_export]
 macro_rules! print {
   ( $( $x:tt )* ) => {
@@ -34,6 +52,12 @@ macro_rules! print {
       write!(stdout(), $($x)*).unwrap();
     }
   }
+}
+
+#[cfg(not(feature = "debug-log"))]
+#[macro_export]
+macro_rules! print {
+  ( $( $x:tt )* ) => { () }
 }
 
 /*

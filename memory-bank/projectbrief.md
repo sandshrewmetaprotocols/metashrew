@@ -176,7 +176,7 @@ Developers can create custom metaprotocols by:
 2. Implementing the required interface functions
 3. Loading the compiled WASM module into Metashrew
 
-Example metaprotocols are available in the [sandshrewmetaprotocols](https://github.com/sandshrewmetaprotocols) GitHub organization, including ALKANES which is mentioned in the documentation.
+Example metaprotocols built on metashrew include [alkanes-rs](https://github.com/kungfuflex/alkanes-rs) (the ALKANES metaprotocol) which exercises the full host-function surface (storage, view functions, fuel accounting).
 
 ### View Functions
 

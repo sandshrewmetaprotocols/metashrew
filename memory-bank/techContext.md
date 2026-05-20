@@ -161,7 +161,7 @@ This allows multiple applications to share the same RocksDB instance without key
 
 ```sh
 # Clone the repository
-git clone https://github.com/sandshrewmetaprotocols/metashrew
+git clone https://github.com/kungfuflex/metashrew
 cd metashrew
 
 # Build the combined binary (recommended)

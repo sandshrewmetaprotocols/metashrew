@@ -1,48 +1,62 @@
 # metashrew
 
-Bitcoin indexer framework powered by WebAssembly (WASM).
+Bitcoin indexer framework powered by WebAssembly.
 
-## Overview
+Write a single WASM module that decodes a block and emits key/value writes; metashrew handles the rest — Bitcoin Core block fetch, atomic RocksDB writes, reorg-safe rollbacks, historical state queries at any height, and a JSON-RPC server for view functions.
 
-Metashrew was architected to reduce the problem of building a metaprotocol, or even a lower-level indexer, to architecting an executable that handles solely the logic of processing a single block. The executables follow a portable calling convention and are compatible with AssemblyScript, but can also, themselves, be written in C or Rust, or anything that builds to a WASM target.
+```
+                                   ┌────────────────────────────────┐
+   Bitcoin Core ──getblock──▶  fetcher  ──block──▶  block-processor │
+                                   │                                │
+                                   │                                ▼
+                                   │                           wasmi/wasmtime
+                                   │                           runs YOUR
+                                   │                           indexer.wasm
+                                   │                                │
+                                   │                          __flush(K/V)
+                                   │                                │
+                                   ▼                                ▼
+                              metashrew_view                   RocksDB
+                              JSON-RPC ◀──read history──▶  (versioned chains
+                                                            per key, height-tagged)
+```
 
-Rather than dealing with complex Bitcoin node interactions, developers only need to implement block processing logic in their preferred language that compiles to WASM (AssemblyScript, Rust, C, etc.).
+The runtime is a thin shim: it loads a wasm binary, calls `_start()` for each block, traps host calls (`__host_len`, `__load_input`, `__get`, `__get_len`, `__flush`, `__log`) into Rust, and commits the emitted batch atomically. View functions exported by the wasm module are callable over JSON-RPC and read the same chain-versioned KV store at any historical height.
 
-Repositories are hosted within [https://github.com/sandshrewmetaprotocols](https://github.com/sandshrewmetaprotocols) with a number of metaprotocols already built to WASM, which can be loaded into metashrew.
+The reference metaprotocol built on metashrew is [alkanes-rs](https://github.com/kungfuflex/alkanes-rs) (ALKANES).
 
-The framework handles:
-- Block synchronization with Bitcoin Core
-- Database management and rollbacks
-- JSON-RPC interface for queries
-- View function execution for historical state
+## Table of contents
+
+| Document | What it covers |
+|----------|----------------|
+| [docs/SPECIFICATION.md](docs/SPECIFICATION.md) | Full technical spec — WASM ABI, host functions, KV storage model, view-function semantics, sync framework |
+| [docs/REORG_ROLLBACK_FIX.md](docs/REORG_ROLLBACK_FIX.md) | How chain reorgs are detected + reverted (per-block manifest + rollback by deleting future-height chain entries) |
+| [docs/MEMORY_NONDETERMINISM_BUG.md](docs/MEMORY_NONDETERMINISM_BUG.md) | Consensus-critical: why WASM memory limits must be identical across nodes (and how to verify) |
+| [docs/WASMTIME_UPGRADE.md](docs/WASMTIME_UPGRADE.md) | Background on the wasmtime 18 → 43 upgrade path (relevant if integrating WASIP2 component-model programs alongside metashrew) |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Build setup, project structure, PR process |
+
+## Versions
+
+- **v10.x.y** (current): binary versioned-chain entry format (`[u32 LE height | value_bytes]`), chunked outpoint storage API on `KeyValuePointer`, WAL-off gating during initial sync (`bitcoind_tip - indexer_tip > SYNC_WAL_OFF_THRESHOLD`), RocksDB CF tuning (L0–L2 uncompressed), view-syscall infrastructure (`__flush` dispatcher for view-side LRU cache + thread spawn/join). Default branch: `kungfuflex/v10.0.0-alpha.1`.
+- **v9.x.y**: previous stable; UTF-8 hex-string K/V entry format. Not forward-compatible — v10 indexers re-sync from genesis with a clean RocksDB.
 
 ## Prerequisites
 
-- Rust toolchain (latest stable)
-- Bitcoin Core node (v22.0+)
-- For WASM development:
-  - AssemblyScript toolchain (optional)
-  - Rust wasm32 target (optional)
-  - C/C++ WASM toolchain (optional)
+- Rust stable toolchain
+- Bitcoin Core (v22.0+) with `rpcuser`/`rpcpassword` configured
+- For WASM indexer development: `rustup target add wasm32-unknown-unknown`
 
-## Installation
+## Install
 
-1. Clone the repository:
 ```sh
-git clone https://github.com/sandshrewmetaprotocols/metashrew
+git clone https://github.com/kungfuflex/metashrew
 cd metashrew
-```
-
-2. Build the indexer:
-```sh
 cargo build --release -p rockshrew-mono
 ```
 
-This produces the `rockshrew-mono` binary that combines both indexing and view capabilities.
+Produces `target/release/rockshrew-mono` — combined indexer + JSON-RPC view server.
 
-## Basic Usage
-
-Start rockshrew-mono with your WASM indexer:
+## Run
 
 ```sh
 ./target/release/rockshrew-mono \
@@ -54,36 +68,33 @@ Start rockshrew-mono with your WASM indexer:
   --port 8080
 ```
 
-Configuration options:
-- `--daemon-rpc-url`: Bitcoin Core RPC URL
-- `--auth`: RPC credentials (username:password)
-- `--indexer`: Path to your WASM indexer
-- `--db-path`: Database directory
-- `--start-block`: Optional starting block height
-- `--host`: JSON-RPC bind address
-- `--port`: JSON-RPC port
-- `--label`: Optional database label
-- `--exit-at`: Optional block height to stop at
+Flags (full list via `--help`):
 
-## Comparing Indexers with rockshrew-diff
+| Flag | Purpose |
+|------|---------|
+| `--daemon-rpc-url` | Bitcoin Core RPC endpoint |
+| `--auth` | RPC credentials `user:password` |
+| `--indexer` | Path to your `.wasm` indexer |
+| `--db-path` | RocksDB directory |
+| `--start-block` | Override starting block height |
+| `--exit-at` | Stop at a block height (testing) |
+| `--host` / `--port` | JSON-RPC bind |
+| `--label` | Multi-instance namespacing on the same disk |
 
-The `rockshrew-diff` tool allows you to compare the output of two different WASM modules processing the same blockchain data. This is particularly useful for:
+## Query indexed state
 
-- Validating changes to metaprotocol implementations
-- Ensuring upgrades don't introduce financial side effects
-- Debugging differences between implementations
-- Testing compatibility between versions
+```sh
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"metashrew_view",
+       "params":["viewFunctionName","0xhexInput","latest"]}'
+```
 
-### How It Works
+Built-in methods: `metashrew_view`, `metashrew_height`. View functions are arbitrary exports from the indexer wasm — `params[0]` is the export name, `params[1]` is the input bytes (hex), `params[2]` is the height (`"latest"` or a decimal string).
 
-1. `rockshrew-diff` processes blocks with both WASM modules
-2. It compares key-value pairs with a specified prefix
-3. When differences are found, it prints a detailed report and exits
-4. If no differences are found, it continues to the next block
+## rockshrew-diff: side-by-side indexer comparison
 
-### Example Usage
-
-Compare balance changes indexed by two versions of the ALKANES metaprotocol:
+Run two WASM modules over the same block range and diff their KV writes by prefix. Useful for verifying upgrades don't introduce state divergence:
 
 ```sh
 ./target/release/rockshrew-diff \
@@ -96,144 +107,89 @@ Compare balance changes indexed by two versions of the ALKANES metaprotocol:
   --start-block 880000
 ```
 
-This example compares how two versions of the ALKANES metaprotocol index balance changes at the key prefix `/runes/proto/1/byoutpoint/`. This ensures that protocol upgrades don't introduce destructive financial side effects - a major benefit of using a metashrew-based index for metaprotocol development.
+Differences print a per-key diff and exit non-zero. No diff → continues to the next block. The example prefix `0x2f72756e65732f70726f746f2f312f62796f7574706f696e742f` is `/runes/proto/1/byoutpoint/` — the ALKANES outpoint-indexed balance subtree.
 
-### Configuration Options
+Flags:
 
-- `--daemon-rpc-url`: Bitcoin Core RPC URL
-- `--auth`: RPC credentials (username:password)
-- `--indexer`: Path to primary WASM module
-- `--compare`: Path to comparison WASM module
-- `--db-path`: Database directory for both modules
-- `--prefix`: Hex-encoded key prefix to compare (must start with 0x)
-- `--start-block`: Block height to start comparison
-- `--exit-at`: Optional block height to stop at
-- `--pipeline-size`: Optional pipeline size for parallel processing (default: 5)
+| Flag | Purpose |
+|------|---------|
+| `--indexer` | Primary WASM module |
+| `--compare` | Comparison WASM module |
+| `--prefix` | Hex-encoded key prefix to diff (must start with `0x`) |
+| `--start-block` | Block height to start at |
+| `--pipeline-size` | Parallel block prefetch depth (default 5) |
 
-## WASM Runtime Environment
+## WASM indexer ABI
 
-### Host Functions
+A minimal indexer needs to handle two callbacks: `_start` (called once per block) plus zero or more view functions.
 
-Your WASM program has access to these key host functions:
+### Host functions imported by the wasm
 
-```typescript
-// Get input data length (block height + serialized block)
-__host_len(): i32
-
-// Load input data into WASM memory
-__load_input(ptr: i32): void
-
-// Write to stdout (UTF-8 encoded)
-__log(ptr: i32): void
-
-// Commit key-value pairs to database
-__flush(ptr: i32): void
-
-// Get value length for a key
-__get_len(ptr: i32): i32
-
-// Read value for a key
-__get(key_ptr: i32, value_ptr: i32): void
+```text
+__host_len(): i32                      // length of input (height-prefixed serialized block)
+__load_input(ptr: i32): void           // copy input into wasm memory at ptr
+__log(ptr: i32): void                  // utf-8 logging
+__get_len(key_ptr: i32): i32           // length of value for key
+__get(key_ptr: i32, value_ptr: i32)    // copy value bytes into wasm memory
+__flush(ptr: i32): void                // commit a serialized KV batch
 ```
 
-### Memory Layout
+Pointers follow AssemblyScript ArrayBuffer layout: 4 bytes of little-endian u32 length immediately followed by data bytes.
 
-Pointers passed to host functions must follow AssemblyScript's ArrayBuffer memory layout:
-- 4 bytes for length (little-endian u32)
-- Followed by actual data bytes
+### Required wasm exports
 
-### Required Entry Points
+- `_start()` — main indexing function. Reads `__host_len()` bytes via `__load_input`. The input is `[u32 LE: block_height | serialized_block_bytes]`. Process the block, accumulate KV writes in a `KeyValueFlush` protobuf, and call `__flush(ptr_to_serialized_flush)` exactly once.
+- View functions (any name) — receive function-specific input via `__load_input`, return output by calling `__flush` with the response wrapped in a `KeyValueFlush` where `list[0]` is the response bytes (convention; specific view ABIs vary by indexer).
 
-Your WASM program must export:
+### Minimal Rust skeleton
 
-1. `_start()` - Main indexing function
-   - Receives: block height (u32) + serialized block
-   - Processes block and updates database
+```rust
+use metashrew_core::{input, flush, get, set};
 
-2. View functions (optional)
-   - Custom named exports
-   - Receive: function-specific input
-   - Return: function-specific output
-   - Read-only access to database
-
-## Building an Indexer
-
-Here's a minimal example using AssemblyScript:
-
-```typescript
-// indexer.ts
-export function _start(): void {
-  // Get input (height + block)
-  const data = input();
-  const height = u32(data.slice(0, 4));
-  const block = data.slice(4);
-  
-  // Process block...
-  
-  // Write to database
-  flush();
+#[no_mangle]
+pub extern "C" fn _start() {
+    let raw = input();
+    let height = u32::from_le_bytes(raw[..4].try_into().unwrap());
+    let block = &raw[4..];
+    // ... decode block, update KV via set(key, value) ...
+    flush();
 }
 
-// Optional view function
-export function getBalance(address: string): u64 {
-  const data = input();
-  // Query database state...
-  return balance;
+#[no_mangle]
+pub extern "C" fn my_view() {
+    // ... read state via get(key), serialize response ...
+    flush_response(response_bytes);
 }
 ```
 
-For a complete example, see the [alkanes-rs](https://github.com/kungfuflex/alkanes-rs) indexer.
+See [alkanes-rs](https://github.com/kungfuflex/alkanes-rs) for a complete production indexer.
 
-## Database Architecture
+## Storage model
 
-Metashrew uses RocksDB with an append-only architecture:
+Every KV write the indexer emits at height `H` for key `K` becomes a new entry in a per-key versioned chain:
 
-- Keys are versioned by position
-- Values are annotated with block height
-- Maintains list of touched keys per block
-- Enables automatic rollbacks on reorgs
-- Supports historical state queries
+```text
+{K}/length         -> u32 LE (count of entries in K's chain)
+{K}/0              -> [u32 LE: H_0 | value_at_H_0]
+{K}/1              -> [u32 LE: H_1 | value_at_H_1]
+...
+```
 
-The database structure allows:
-- Consistent state across parallel indexers
-- Easy rollbacks during reorgs
-- Historical state queries
-- High performance reads/writes
+Reads at height `H` binary-search the chain for the largest stored height `≤ H` and return that value. This gives O(log N) historical reads with no separate state-at-height snapshot cost.
 
-## Development Guide
+Rollbacks on reorg are O(keys touched in the reorged range) — read the per-height manifest at `/__INTERNAL/keys-at-height/{height}`, walk each key's chain, drop entries with height in the reorged range. Full details in [docs/REORG_ROLLBACK_FIX.md](docs/REORG_ROLLBACK_FIX.md).
 
-1. Choose your WASM development environment:
-   - AssemblyScript (TypeScript-like)
-   - Rust + wasm32-unknown-unknown
-   - C/C++ with Emscripten
-   
-2. Implement required functions:
-   - `_start()` for indexing
-   - View functions as needed
+## v10 changes worth knowing
 
-3. Build WASM binary:
-   ```sh
-   # AssemblyScript
-   asc indexer.ts -o indexer.wasm
-   
-   # Rust
-   cargo build --target wasm32-unknown-unknown
-   ```
-
-4. Test locally:
-   ```sh
-   ./rockshrew-mono --daemon-rpc-url ... --indexer ./indexer.wasm
-   ```
-
-5. Query indexed data:
-   ```sh
-   curl -X POST http://localhost:8080 \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"metashrew_view","params":["viewFunction","inputHex","latest"]}'
-   ```
+- **Binary K/V entries**: replaces v9's `"{height}:{hex_value}"` UTF-8 strings. No 2× hex expansion on every stored value, no string parsing on read. Same chain structure as v9 (length key + indexed entry keys), so binary search semantics are unchanged.
+- **Chunked outpoint API**: `KeyValuePointer::set_chunk` / `get_chunk` / `get_chunk_at_height` lets indexers store a whole multi-entry record under one chain key (the alkanes v3 OUTPOINT_TO_RUNES uses this for balance sheets with `spent_at_height` markers).
+- **WAL-off during catch-up**: when `bitcoind_tip - indexer_tip > SYNC_WAL_OFF_THRESHOLD`, `commit_atomic` switches to `no_wal_write_options()` and force-flushes every `SYNC_WAL_OFF_FLUSH_INTERVAL` blocks. Atomicity is preserved (WriteBatch is still all-or-nothing within a single `write_opt`); only durability is relaxed during the bulk-sync window. Auto re-enables when close to tip.
+- **View syscalls via `__flush` dispatcher** (feature `view-syscalls`): the `__flush` host function in view mode is now a discriminator-style dispatcher for `ViewSyscall` protobuf payloads — `CacheGet`/`CachePut` against a host-side LRU cache, and `ThreadSpawn`/`ThreadJoin` for parallel-view fanout. No wasm ABI change; legacy `__flush` callers still work. Indexer engine has `wasm_threads(false)` (consensus-critical); view engine has `wasm_threads(true)`.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-For additional tools and metaprotocols, visit [sandshrewmetaprotocols](https://github.com/sandshrewmetaprotocols).
+## License
+
+MIT

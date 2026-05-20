@@ -9,19 +9,22 @@
 
 2. Clone and build:
    ```sh
-   git clone https://github.com/sandshrewmetaprotocols/metashrew
+   git clone https://github.com/kungfuflex/metashrew
    cd metashrew
-   cargo build
+   cargo build --release -p rockshrew-mono
    ```
 
 ## Project Structure
 
-- `runtime/`: Core WASM runtime and database interface
-- `memshrew/`: Mempool tracking service
-- `rockshrew/`: Main indexer binary
-- `rockshrew-runtime/`: Indexer-specific runtime extensions
-- `rockshrew-view/`: View function handler
-- `rockshrew-mono/`: Combined indexer and view server
+All crates live under `crates/`:
+
+- `crates/metashrew-core/`: WASM-side host imports + helpers used by indexer modules
+- `crates/metashrew-support/`: Shared types and traits used by both runtime and core
+- `crates/metashrew-runtime/`: Native WASM runtime (wasmtime/wasmi), KV abstractions, view engine
+- `crates/metashrew-sync/`: Block sync framework + traits (`StorageAdapter`, `NodeAdapter`)
+- `crates/rockshrew-runtime/`: RocksDB-backed `StorageAdapter` implementation
+- `crates/rockshrew-mono/`: Combined indexer + JSON-RPC view server binary
+- `crates/memshrew-runtime/`: In-memory `StorageAdapter` (tests, mempool-only previews)
 
 ## Development Workflow
 

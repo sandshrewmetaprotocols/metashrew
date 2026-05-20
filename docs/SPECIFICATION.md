@@ -1957,4 +1957,4 @@ This specification provides a complete technical reference that maps directly to
 **Document Version:** 2.0
 **Last Updated:** June 24th, 2025
 **License:** MIT License
-**Repository:** https://github.com/sandshrewmetaprotocols/metashrew
+**Repository:** https://github.com/kungfuflex/metashrew

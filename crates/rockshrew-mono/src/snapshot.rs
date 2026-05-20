@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
+use metashrew_runtime::smt::{encode_chain_length, encode_value_entry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -270,17 +271,22 @@ impl SnapshotManager {
             return None;
         }
         
-        // For append-only update keys like "key/0", "key/1", etc., we want the base key
-        // The value should already be the decoded hex value (not "height:hex" format)
+        // For append-only update keys like "key/0", "key/1", etc., we want the base key.
+        // In v10 the on-disk value is `[u32 LE height | raw_value]`; the
+        // "logical value" the snapshot layer cares about is the raw bytes
+        // after the 4-byte height prefix.
         if key_str.contains('/') {
             if let Some(slash_pos) = key_str.rfind('/') {
                 let suffix = &key_str[slash_pos + 1..];
-                
-                // Verify this is a numeric update index
+
                 if suffix.chars().all(|c| c.is_ascii_digit()) {
-                    // Extract the base key (everything before the "/index")
                     let base_key = key_str[..slash_pos].as_bytes().to_vec();
-                    return Some((base_key, value.to_vec()));
+                    let logical_value = if value.len() >= 4 {
+                        value[4..].to_vec()
+                    } else {
+                        value.to_vec()
+                    };
+                    return Some((base_key, logical_value));
                 }
             }
         }
@@ -868,23 +874,19 @@ impl SnapshotManager {
                 let value = diff_data.diff_data[i..i + value_len].to_vec();
                 i += value_len;
 
-                // This section is part of the snapshot restoration logic and should
-                // directly write to the database using the append-only format.
+                // Write to the append-only format using v10 binary entries.
+                // We overwrite the length to 1 — snapshot restoration is the
+                // definitive state at the interval's end_height, not a
+                // history merge.
                 let key_str = String::from_utf8_lossy(&key);
                 let length_key = format!("{}/length", key_str);
+                db.put(length_key.as_bytes(), &encode_chain_length(1))?;
 
-                // For simplicity in snapshot restoration, we assume we are writing the
-                // definitive state at this point. We'll overwrite the length.
-                // A more sophisticated approach might merge histories, but for now,
-                // this ensures the restored state is clean.
-                let new_length = 1;
-                db.put(length_key.as_bytes(), new_length.to_string().as_bytes())?;
-
-                // Store the single historical value.
                 let update_key = format!("{}/0", key_str);
-                let value_hex = hex::encode(&value);
-                let update_value = format!("{}:{}", interval.end_height, value_hex);
-                db.put(update_key.as_bytes(), update_value.as_bytes())?;
+                db.put(
+                    update_key.as_bytes(),
+                    encode_value_entry(interval.end_height, &value),
+                )?;
 
                 applied_keys += 1;
             }

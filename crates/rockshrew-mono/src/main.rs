@@ -11,15 +11,16 @@
 //! **IMPORTANT**: This system NO LONGER uses BST (Binary Search Tree) indexing. All BST code
 //! has been removed as it was a flawed design. We now use a pure append-only approach:
 //!
-//! ### Key-Value Structure:
-//! - `"key/length"`: Total number of updates for a key since indexing began
+//! ### Key-Value Structure (v10 binary format):
+//! - `"key/length"`: u32 LE — total number of updates for a key since indexing began
 //! - `"key/0"`, `"key/1"`, `"key/2"`, etc.: Individual update entries
-//! - Values stored as: `"height:hex_encoded_value"`
+//! - Values stored as: `[u32 LE height | raw_value_bytes]` (v10; replaces the
+//!   v9 `"{height}:{hex_value}"` UTF-8 string format — saves 50% on disk and
+//!   removes per-read string parsing)
 //!
 //! ### Benefits:
 //! - **Reorg Safety**: No data loss during blockchain reorganizations
 //! - **Historical Access**: Binary search through updates for any block height
-//! - **Debugging**: Human-readable keys and height-prefixed values
 //! - **Consistency**: Deterministic state at any point in blockchain history
 //!
 //! ## CRATE HIERARCHY & CODE ORGANIZATION

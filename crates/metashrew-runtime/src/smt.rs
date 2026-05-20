@@ -29,14 +29,15 @@
 //! - **Caching**: In-memory caches for frequently accessed nodes
 //! - **Lazy evaluation**: Compute only what's needed for current operations
 //!
-//! # Database Schema
+//! # Database Schema (v10 binary format)
 //!
-//! The new append-only implementation uses human-readable keys:
-//!
-//! - `key/length`: Number of updates for a key
-//! - `key/0`, `key/1`, `key/2`, etc.: Individual updates in format "height:value"
+//! - `key/length`: u32 LE — number of updates for a key
+//! - `key/0`, `key/1`, `key/2`, etc.: individual updates encoded as
+//!   `[u32 LE height | raw_value_bytes]` (replaces the v9
+//!   `"{height}:{hex_value}"` UTF-8 string format — 50% smaller, no
+//!   per-read string parsing)
 //! - `smt:node:`: SMT internal and leaf nodes
-//! - `smt:root:`: State roots at specific heights
+//! - `smt:root:`: state roots at specific heights
 //!
 //! # Usage Patterns
 //!
@@ -119,6 +120,70 @@ pub fn deserialize_key_manifest(data: &[u8]) -> Vec<Vec<u8>> {
         offset += key_len;
     }
     keys
+}
+
+/// v10 versioned-chain entry encoding: `[u32 LE: height | value_bytes]`.
+///
+/// Replaces the v9 `"{height}:{hex_value}"` UTF-8-string-with-hex format that
+/// lived in `put_to_batch`/`get_at_height`. The binary encoding:
+/// - removes the 2× hex expansion on every stored value
+/// - removes the string parsing + `hex::decode` on every read
+/// - keeps the same chain structure (`{key}/length` + `{key}/{i}`) so binary
+///   search semantics are unchanged
+///
+/// v10 storage is intentionally not backwards-compatible with v9 — v10 indexers
+/// re-sync from genesis with a clean RocksDB.
+#[inline]
+pub fn encode_value_entry(height: u32, value: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + value.len());
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf.extend_from_slice(value);
+    buf
+}
+
+/// Decode a v10 versioned-chain entry: returns `(height, value_slice)`.
+#[inline]
+pub fn decode_value_entry(entry: &[u8]) -> Result<(u32, &[u8])> {
+    if entry.len() < 4 {
+        return Err(anyhow!(
+            "v10 chain entry too short: {} bytes (need ≥4)",
+            entry.len()
+        ));
+    }
+    let mut h = [0u8; 4];
+    h.copy_from_slice(&entry[..4]);
+    Ok((u32::from_le_bytes(h), &entry[4..]))
+}
+
+/// Encode a chain length (u32 LE). Replaces the v9 ASCII-decimal length format.
+#[inline]
+pub fn encode_chain_length(n: u32) -> [u8; 4] {
+    n.to_le_bytes()
+}
+
+/// Decode a chain length. Missing/short bytes decode as 0 to match the v9
+/// "no length key → empty chain" behavior.
+#[inline]
+pub fn decode_chain_length(bytes: &[u8]) -> u32 {
+    if bytes.len() < 4 {
+        return 0;
+    }
+    let mut b = [0u8; 4];
+    b.copy_from_slice(&bytes[..4]);
+    u32::from_le_bytes(b)
+}
+
+/// Build the `{key}/{index}` entry key for a chain. Centralized so call sites
+/// don't reinvent `i.to_string().as_bytes()` (the index suffix stays ASCII —
+/// only the value-entry payload becomes binary).
+#[inline]
+pub fn chain_entry_key(key: &[u8], index: u32) -> Vec<u8> {
+    let idx_str = index.to_string();
+    let mut k = Vec::with_capacity(key.len() + 1 + idx_str.len());
+    k.extend_from_slice(key);
+    k.push(b'/');
+    k.extend_from_slice(idx_str.as_bytes());
+    k
 }
 
 /// Empty node hash representing uninitialized or empty SMT nodes
@@ -452,23 +517,19 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
                 // If not in our map, fetch from storage.
                 let length_key = [key.as_slice(), b"/length".as_slice()].concat();
                 match self.storage.get_immutable(&length_key)? {
-                    Some(length_bytes) => {
-                        String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-                    }
+                    Some(length_bytes) => decode_chain_length(&length_bytes),
                     None => 0,
                 }
             };
 
-            // Append the new value.
-            let update_key = [key.as_slice(), b"/".as_slice(), length.to_string().as_bytes()].concat();
-            let value_hex = hex::encode(value);
-            let update_value = format!("{}:{}", height, value_hex);
-            batch.put(&update_key, update_value.as_bytes());
+            // Append the new value (v10 binary entry: [u32 LE height | value]).
+            let update_key = chain_entry_key(key, length);
+            batch.put(&update_key, encode_value_entry(height, value));
 
             // Update length in the batch and our in-memory map.
             let new_length = length + 1;
             let length_key = [key.as_slice(), b"/length".as_slice()].concat();
-            batch.put(&length_key, new_length.to_string().as_bytes());
+            batch.put(&length_key, encode_chain_length(new_length));
             key_lengths.insert(key.clone(), new_length);
         }
 
@@ -514,9 +575,7 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
         let length_key = [key, b"/length"].concat();
         let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+            Some(length_bytes) => decode_chain_length(&length_bytes),
             None => return Ok(None), // Key doesn't exist
         };
 
@@ -531,33 +590,17 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
 
         while left < right {
             let mid = (left + right) / 2;
-            let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
-            
+            let update_key = chain_entry_key(key, mid);
+
             match self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 Some(update_data) => {
-                    let update_str = String::from_utf8_lossy(&update_data);
-                    if let Some(colon_pos) = update_str.find(':') {
-                        let height_str = &update_str[..colon_pos];
-                        if let Ok(update_height) = height_str.parse::<u32>() {
-                            if update_height <= height {
-                                // This update is valid, save it and search for a more recent one
-                                let value_hex = &update_str[colon_pos + 1..];
-                                if let Ok(value_bytes) = hex::decode(value_hex) {
-                                    best_value = Some(value_bytes);
-                                } else {
-                                    return Err(anyhow!("Invalid hex encoding in stored value"));
-                                }
-                                left = mid + 1;
-                            } else {
-                                // This update is too recent, search earlier
-                                right = mid;
-                            }
-                        } else {
-                            return Err(anyhow!("Invalid height format in update"));
-                        }
+                    let (update_height, value_bytes) = decode_value_entry(&update_data)?;
+                    if update_height <= height {
+                        best_value = Some(value_bytes.to_vec());
+                        left = mid + 1;
                     } else {
-                        return Err(anyhow!("Invalid update format"));
+                        right = mid;
                     }
                 }
                 None => {
@@ -1600,22 +1643,17 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let length_key = [key, b"/length"].concat();
         let current_length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+            Some(length_bytes) => decode_chain_length(&length_bytes),
             None => 0,
         };
 
-        // 2. Store the new value with the next index
-        let update_key = [key, b"/", current_length.to_string().as_bytes()].concat();
-        // Use hex encoding for binary data to avoid UTF-8 issues
-        let value_hex = hex::encode(value);
-        let update_value = format!("{}:{}", height, value_hex);
-        batch.put(&update_key, update_value.as_bytes());
+        // v10 binary entry: [u32 LE height | raw value bytes].
+        let update_key = chain_entry_key(key, current_length);
+        batch.put(&update_key, encode_value_entry(height, value));
 
-        // 3. Update the length
+        // Update the length (u32 LE, replaces v9 ASCII-decimal).
         let new_length = current_length + 1;
-        batch.put(&length_key, new_length.to_string().as_bytes());
+        batch.put(&length_key, encode_chain_length(new_length));
 
         Ok(())
     }
@@ -1625,9 +1663,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let length_key = [key, b"/length"].concat();
         let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+            Some(length_bytes) => decode_chain_length(&length_bytes),
             None => return Ok(None), // Key doesn't exist
         };
 
@@ -1635,40 +1671,24 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
             return Ok(None);
         }
 
-        // 2. Binary search through the updates to find the most recent one at or before the target height
+        // Binary search through the updates to find the most recent one at or before the target height
         let mut left = 0;
         let mut right = length;
         let mut best_value: Option<Vec<u8>> = None;
 
         while left < right {
             let mid = (left + right) / 2;
-            let update_key = [key, b"/", mid.to_string().as_bytes()].concat();
-            
+            let update_key = chain_entry_key(key, mid);
+
             match self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
                 Some(update_data) => {
-                    let update_str = String::from_utf8_lossy(&update_data);
-                    if let Some(colon_pos) = update_str.find(':') {
-                        let height_str = &update_str[..colon_pos];
-                        if let Ok(update_height) = height_str.parse::<u32>() {
-                            if update_height <= height {
-                                // This update is valid, save it and search for a more recent one
-                                let value_hex = &update_str[colon_pos + 1..];
-                                if let Ok(value_bytes) = hex::decode(value_hex) {
-                                    best_value = Some(value_bytes);
-                                    left = mid + 1;
-                                } else {
-                                    return Err(anyhow!("Invalid hex encoding in stored value"));
-                                }
-                            } else {
-                                // This update is too recent, search earlier
-                                right = mid;
-                            }
-                        } else {
-                            return Err(anyhow!("Invalid height format in update"));
-                        }
+                    let (update_height, value_bytes) = decode_value_entry(&update_data)?;
+                    if update_height <= height {
+                        best_value = Some(value_bytes.to_vec());
+                        left = mid + 1;
                     } else {
-                        return Err(anyhow!("Invalid update format"));
+                        right = mid;
                     }
                 }
                 None => {
@@ -1685,9 +1705,7 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let length_key = [key, b"/length"].concat();
         let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+            Some(length_bytes) => decode_chain_length(&length_bytes),
             None => return Ok(None), // Key doesn't exist
         };
 
@@ -1696,21 +1714,12 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         }
 
         // Get the most recent update (length - 1)
-        let update_key = [key, b"/", (length - 1).to_string().as_bytes()].concat();
+        let update_key = chain_entry_key(key, length - 1);
         match self.storage.get_immutable(&update_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
             Some(update_data) => {
-                let update_str = String::from_utf8_lossy(&update_data);
-                if let Some(colon_pos) = update_str.find(':') {
-                    let value_hex = &update_str[colon_pos + 1..];
-                    if let Ok(value_bytes) = hex::decode(value_hex) {
-                        Ok(Some(value_bytes))
-                    } else {
-                        Err(anyhow!("Invalid hex encoding in stored value"))
-                    }
-                } else {
-                    Err(anyhow!("Invalid update format"))
-                }
+                let (_height, value_bytes) = decode_value_entry(&update_data)?;
+                Ok(Some(value_bytes.to_vec()))
             }
             None => Ok(None),
         }
@@ -1721,26 +1730,19 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         let length_key = [key, b"/length"].concat();
         let length = match self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            Some(length_bytes) => {
-                String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
-            }
+            Some(length_bytes) => decode_chain_length(&length_bytes),
             None => return Ok(Vec::new()), // Key doesn't exist
         };
 
         let mut heights = Vec::new();
-        
+
         // Iterate through all updates and extract heights
         for i in 0..length {
-            let update_key = [key, b"/", i.to_string().as_bytes()].concat();
+            let update_key = chain_entry_key(key, i);
             if let Some(update_data) = self.storage.get_immutable(&update_key)
                 .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-                let update_str = String::from_utf8_lossy(&update_data);
-                if let Some(colon_pos) = update_str.find(':') {
-                    let height_str = &update_str[..colon_pos];
-                    if let Ok(height) = height_str.parse::<u32>() {
-                        heights.push(height);
-                    }
-                }
+                let (height, _value) = decode_value_entry(&update_data)?;
+                heights.push(height);
             }
         }
 
@@ -1797,31 +1799,26 @@ impl<T: KeyValueStoreLike> SMTHelper<T> {
         
         if let Some(length_bytes) = self.storage.get_immutable(&length_key)
             .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-            let length = String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0);
-            
+            let length = decode_chain_length(&length_bytes);
+
             let mut new_length = 0;
             // Find the last valid update at or before target_height
             for i in 0..length {
-                let update_key = [key, b"/", i.to_string().as_bytes()].concat();
+                let update_key = chain_entry_key(key, i);
                 if let Some(update_data) = self.storage.get_immutable(&update_key)
                     .map_err(|e| anyhow::anyhow!("Storage error: {:?}", e))? {
-                    let update_str = String::from_utf8_lossy(&update_data);
-                    if let Some(colon_pos) = update_str.find(':') {
-                        let height_str = &update_str[..colon_pos];
-                        if let Ok(update_height) = height_str.parse::<u32>() {
-                            if update_height <= target_height {
-                                new_length = i + 1;
-                            } else {
-                                // Delete this update
-                                batch.delete(&update_key);
-                            }
-                        }
+                    let (update_height, _value) = decode_value_entry(&update_data)?;
+                    if update_height <= target_height {
+                        new_length = i + 1;
+                    } else {
+                        // Delete this update
+                        batch.delete(&update_key);
                     }
                 }
             }
-            
+
             // Update the length
-            batch.put(&length_key, new_length.to_string().as_bytes());
+            batch.put(&length_key, encode_chain_length(new_length));
         }
 
         Ok(())

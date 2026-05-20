@@ -6,7 +6,10 @@
 
 use anyhow::Result;
 use log::{debug, info, warn};
-use crate::smt::{MANIFEST_PREFIX, SMT_ROOT_PREFIX, deserialize_key_manifest};
+use crate::smt::{
+    MANIFEST_PREFIX, SMT_ROOT_PREFIX, deserialize_key_manifest,
+    decode_chain_length, encode_chain_length, decode_value_entry,
+};
 
 /// One write operation queued during rollback. Used by [`SmtRollback::apply_atomic`]
 /// so a backend that supports batching (e.g. RocksDB) can commit an entire height's
@@ -48,20 +51,14 @@ pub trait SmtRollback {
     }
 }
 
-/// Parse height from an SMT update key
+/// Parse height from a v10 SMT update entry.
 ///
-/// SMT keys are stored as: `base_key/index`
-/// SMT values are stored as: `height:data`
+/// SMT keys are stored as: `base_key/index`.
+/// SMT values are stored as v10 binary entries: `[u32 LE height | value_bytes]`.
 ///
-/// This function extracts the height from the value.
+/// Returns `None` only if the entry is malformed (shorter than 4 bytes).
 fn parse_height_from_smt_value(value: &[u8]) -> Option<u32> {
-    let value_str = String::from_utf8_lossy(value);
-    if let Some(colon_pos) = value_str.find(':') {
-        let height_str = &value_str[..colon_pos];
-        height_str.parse::<u32>().ok()
-    } else {
-        None
-    }
+    decode_value_entry(value).ok().map(|(h, _)| h)
 }
 
 /// Roll back SMT data to a specific height
@@ -149,7 +146,7 @@ pub fn rollback_smt_data<S: SmtRollback>(
         length_key.extend_from_slice(length_suffix);
 
         let old_length = if let Some(length_bytes) = storage.get_value(&length_key)? {
-            String::from_utf8_lossy(&length_bytes).parse::<u32>().unwrap_or(0)
+            decode_chain_length(&length_bytes)
         } else {
             continue;
         };
@@ -192,7 +189,7 @@ pub fn rollback_smt_data<S: SmtRollback>(
         if new_length > 0 {
             ops.push(RollbackOp::Put(
                 length_key.clone(),
-                new_length.to_string().into_bytes(),
+                encode_chain_length(new_length).to_vec(),
             ));
             debug!(
                 "SMT structure {} compacted from {} to {} entries",
@@ -278,9 +275,7 @@ pub fn rollback_with_manifests<S: SmtRollback>(
             // above the rollback height
             let length_key = [key.as_slice(), b"/length"].concat();
             if let Some(length_bytes) = storage.get_value(&length_key)? {
-                let length = String::from_utf8_lossy(&length_bytes)
-                    .parse::<u32>()
-                    .unwrap_or(0);
+                let length = decode_chain_length(&length_bytes);
 
                 // Walk backward from the end to find entries above rollback_height
                 let mut new_length = length;
@@ -303,7 +298,7 @@ pub fn rollback_with_manifests<S: SmtRollback>(
                     if new_length > 0 {
                         ops.push(RollbackOp::Put(
                             length_key.clone(),
-                            new_length.to_string().into_bytes(),
+                            encode_chain_length(new_length).to_vec(),
                         ));
                     } else {
                         ops.push(RollbackOp::Delete(length_key.clone()));
@@ -402,44 +397,51 @@ mod tests {
 
     #[test]
     fn test_parse_height_from_smt_value() {
-        assert_eq!(parse_height_from_smt_value(b"123:data"), Some(123));
-        assert_eq!(parse_height_from_smt_value(b"0:data"), Some(0));
-        assert_eq!(parse_height_from_smt_value(b"noheight"), None);
-        assert_eq!(parse_height_from_smt_value(b":data"), None);
+        use crate::smt::encode_value_entry;
+        let entry_123 = encode_value_entry(123, b"data");
+        assert_eq!(parse_height_from_smt_value(&entry_123), Some(123));
+        let entry_0 = encode_value_entry(0, b"data");
+        assert_eq!(parse_height_from_smt_value(&entry_0), Some(0));
+        // Entries shorter than the 4-byte header are malformed → None.
+        assert_eq!(parse_height_from_smt_value(b"abc"), None);
+        assert_eq!(parse_height_from_smt_value(b""), None);
     }
 
     #[test]
     fn test_manifest_rollback_basic() {
-        use crate::smt::{serialize_key_manifest, MANIFEST_PREFIX, SMT_ROOT_PREFIX};
+        use crate::smt::{
+            encode_chain_length, encode_value_entry, serialize_key_manifest, MANIFEST_PREFIX,
+            SMT_ROOT_PREFIX,
+        };
 
         let mut storage = MockStorage {
             data: HashMap::new(),
         };
 
-        // Simulate indexing 3 blocks (heights 1, 2, 3)
+        // Simulate indexing 3 blocks (heights 1, 2, 3) using v10 binary format.
         // Block 1: modifies key_a, key_b
-        storage.data.insert(b"key_a/length".to_vec(), b"1".to_vec());
-        storage.data.insert(b"key_a/0".to_vec(), b"1:aa".to_vec());
-        storage.data.insert(b"key_b/length".to_vec(), b"1".to_vec());
-        storage.data.insert(b"key_b/0".to_vec(), b"1:bb".to_vec());
+        storage.data.insert(b"key_a/length".to_vec(), encode_chain_length(1).to_vec());
+        storage.data.insert(b"key_a/0".to_vec(), encode_value_entry(1, b"aa"));
+        storage.data.insert(b"key_b/length".to_vec(), encode_chain_length(1).to_vec());
+        storage.data.insert(b"key_b/0".to_vec(), encode_value_entry(1, b"bb"));
         let manifest1 = serialize_key_manifest(&[b"key_a", b"key_b"]);
         storage.data.insert(format!("{}1", MANIFEST_PREFIX).into_bytes(), manifest1);
         storage.data.insert(format!("{}1", SMT_ROOT_PREFIX).into_bytes(), b"root1".to_vec());
         storage.data.insert(b"block_hash_1".to_vec(), b"hash1".to_vec());
 
         // Block 2: modifies key_a, key_c
-        storage.data.insert(b"key_a/length".to_vec(), b"2".to_vec());
-        storage.data.insert(b"key_a/1".to_vec(), b"2:aa2".to_vec());
-        storage.data.insert(b"key_c/length".to_vec(), b"1".to_vec());
-        storage.data.insert(b"key_c/0".to_vec(), b"2:cc".to_vec());
+        storage.data.insert(b"key_a/length".to_vec(), encode_chain_length(2).to_vec());
+        storage.data.insert(b"key_a/1".to_vec(), encode_value_entry(2, b"aa2"));
+        storage.data.insert(b"key_c/length".to_vec(), encode_chain_length(1).to_vec());
+        storage.data.insert(b"key_c/0".to_vec(), encode_value_entry(2, b"cc"));
         let manifest2 = serialize_key_manifest(&[b"key_a", b"key_c"]);
         storage.data.insert(format!("{}2", MANIFEST_PREFIX).into_bytes(), manifest2);
         storage.data.insert(format!("{}2", SMT_ROOT_PREFIX).into_bytes(), b"root2".to_vec());
         storage.data.insert(b"block_hash_2".to_vec(), b"hash2".to_vec());
 
         // Block 3: modifies key_b
-        storage.data.insert(b"key_b/length".to_vec(), b"2".to_vec());
-        storage.data.insert(b"key_b/1".to_vec(), b"3:bb3".to_vec());
+        storage.data.insert(b"key_b/length".to_vec(), encode_chain_length(2).to_vec());
+        storage.data.insert(b"key_b/1".to_vec(), encode_value_entry(3, b"bb3"));
         let manifest3 = serialize_key_manifest(&[b"key_b"]);
         storage.data.insert(format!("{}3", MANIFEST_PREFIX).into_bytes(), manifest3);
         storage.data.insert(format!("{}3", SMT_ROOT_PREFIX).into_bytes(), b"root3".to_vec());
@@ -450,12 +452,18 @@ mod tests {
         assert!(result, "fast rollback should succeed with manifests");
 
         // key_a should be back to length 1 (only block 1 entry)
-        assert_eq!(storage.data.get(b"key_a/length".as_ref()), Some(&b"1".to_vec()));
+        assert_eq!(
+            storage.data.get(b"key_a/length".as_ref()),
+            Some(&encode_chain_length(1).to_vec())
+        );
         assert!(storage.data.contains_key(b"key_a/0".as_ref())); // block 1 entry kept
         assert!(!storage.data.contains_key(b"key_a/1".as_ref())); // block 2 entry removed
 
         // key_b should be back to length 1 (block 3 entry removed)
-        assert_eq!(storage.data.get(b"key_b/length".as_ref()), Some(&b"1".to_vec()));
+        assert_eq!(
+            storage.data.get(b"key_b/length".as_ref()),
+            Some(&encode_chain_length(1).to_vec())
+        );
         assert!(storage.data.contains_key(b"key_b/0".as_ref())); // block 1 entry kept
         assert!(!storage.data.contains_key(b"key_b/1".as_ref())); // block 3 entry removed
 

@@ -266,6 +266,49 @@ pub trait KeyValuePointer {
         }
     }
 
+    /// v10 chunk API: write a logical record as one opaque byte buffer at the
+    /// current height.
+    ///
+    /// Storage-semantically identical to [`set`](Self::set) — the underlying
+    /// version chain is the same — but the API signals "treat this value as
+    /// one chunked record, not N separate scalar fields". Callers that used
+    /// to do
+    ///
+    /// ```rust,ignore
+    /// for (rune_id, amount) in balance_sheet.entries() {
+    ///     ptr.select_value(rune_id).set_value(amount);
+    /// }
+    /// ```
+    ///
+    /// collapse to a single `set_chunk(balance_sheet.serialize().as_slice())`
+    /// — one chain write per outpoint per block instead of N.
+    fn set_chunk(&mut self, value: &[u8]) {
+        self.set(Arc::new(value.to_vec()));
+    }
+
+    /// v10 chunk API: read the chunk at the current read height. Returns
+    /// `None` if the key has no entry (the underlying `get` returns an empty
+    /// `Vec`, which this lifts to `None` so chunked callers don't have to
+    /// special-case the empty/missing distinction).
+    fn get_chunk(&self) -> Option<Arc<Vec<u8>>> {
+        let v = self.get();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    /// v10 chunk API: read the most-recent chunk written at or before
+    /// `height`. The default implementation returns `None` — implementations
+    /// that support arbitrary-height reads (host-side adapters, or wasm
+    /// modules linked against a `__get_at_height` host fn) override this.
+    /// Wasm-side `IndexPointer` / `AtomicPointer` use the default until a
+    /// follow-up commit wires the historical-read host fn.
+    fn get_chunk_at_height(&self, _height: u32) -> Option<Arc<Vec<u8>>> {
+        None
+    }
+
     fn select_value<T: ByteView>(&self, key: T) -> Self
     where
         Self: Sized,

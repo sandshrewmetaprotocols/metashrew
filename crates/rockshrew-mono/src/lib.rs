@@ -898,6 +898,15 @@ where
                         continue;
                     }
                 };
+                // v10 sync-mode: this fetcher loop polls bitcoind directly
+                // via engine.node().get_tip_height() — bypassing the
+                // SnapshotMetashrewSync wrappers that already set the
+                // storage adapter's bitcoind_tip. Inform the storage layer
+                // directly so commit_atomic's WAL-off gate sees the real
+                // gap. Without this, the fetcher races ahead at startup
+                // and the storage adapter never learns of the bitcoind
+                // tip during the deep-catch-up window.
+                engine.storage().read().await.set_bitcoind_tip(remote_tip).await;
 
                 // v9.0.5-rc.6 fetcher-dedup: compute the next range from
                 // BOTH the processor's tip AND the fetcher's own

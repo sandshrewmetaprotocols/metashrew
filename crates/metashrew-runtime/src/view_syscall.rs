@@ -9,8 +9,31 @@
 //! without compiling a fixture wasm.
 
 use crate::proto::metashrew::view_syscall::Request as ViewReq;
-use crate::proto::metashrew::ViewSyscall;
+use crate::proto::metashrew::{ThreadJoin, ThreadSpawn, ViewSyscall};
 use prost::Message;
+
+/// Decoded thread op extracted from a ViewSyscall payload. Used by the
+/// wasmtime `__flush` binding to split off thread ops (which need
+/// access to the wasm Caller's engine / module / registry) from the
+/// pure-function cache ops (`CacheGet` / `CachePut`) handled by
+/// [`dispatch_view_syscall`].
+#[derive(Debug, PartialEq)]
+pub enum ThreadOp {
+    Spawn(ThreadSpawn),
+    Join(ThreadJoin),
+}
+
+/// Decode a thread op out of an already-decoded `ViewSyscall`-shaped
+/// payload. Returns `None` if the payload doesn't decode at all or if
+/// it's a non-thread op (CacheGet / CachePut / etc.).
+pub fn decode_thread_op(payload: &[u8]) -> Option<ThreadOp> {
+    let syscall = ViewSyscall::decode(payload).ok()?;
+    match syscall.request? {
+        ViewReq::ThreadSpawn(req) => Some(ThreadOp::Spawn(req)),
+        ViewReq::ThreadJoin(req) => Some(ThreadOp::Join(req)),
+        _ => None,
+    }
+}
 
 /// Result of dispatching one view syscall.
 #[derive(Debug, PartialEq, Eq)]

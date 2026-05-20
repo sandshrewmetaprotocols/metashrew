@@ -770,8 +770,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 
                             Self::setup_linker(view_context.clone(), &mut linker).await
                                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup basic linker for preview view")?;
-                            Self::setup_linker_view(view_context.clone(), &mut linker).await
-                                .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup view linker for preview")?;
+                            Self::setup_linker_view(
+                                view_context.clone(),
+                                &mut linker,
+                                Some(self.module.clone()),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))
+                            .context("Failed to setup view linker for preview")?;
                             linker.define_unknown_imports_as_traps(&self.module)?;
                 
                             let instance = linker
@@ -1353,6 +1359,141 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         Ok(())
     }
 
+    /// Build a fresh view-runtime instance for a spawned view thread.
+    ///
+    /// Called from inside a `tokio::spawn` invoked by the `__flush`
+    /// ThreadSpawn handler. We can't share the parent view's Store
+    /// across threads (Store isn't Send for the duration of an in-flight
+    /// call), so spawn = "build a child Store against the same Engine +
+    /// Module, looks up the indirect-function-table entry, call it".
+    ///
+    /// For wasm built WITHOUT shared memory + atomics, the child runs in
+    /// an isolated linear-memory + module-local-globals — no cross-thread
+    /// data sharing. The cross-thread visibility you'd expect from a
+    /// real thread requires the wasm to be built with `(memory (shared
+    /// N M))` so the imports section binds a shared memory; the host's
+    /// `wasm_threads(true)` engine flag accepts that.
+    ///
+    /// Returns the i32 return value of the spawned function, or
+    /// `INVALID_EXIT_CODE` on any failure (instantiate, table lookup,
+    /// trap). Failures are logged but never propagated as panics — the
+    /// spawned task runs to completion under tokio::spawn and the join
+    /// path reads the exit code.
+    pub(crate) async fn run_spawned_view_thread_impl(
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
+        fn_idx: u32,
+        arg: u32,
+    ) -> i32 {
+        // Build a fresh linker for this child store. Re-runs the view
+        // linker setup so __get / __get_len / __log / __flush are all
+        // wired identically to the parent — including __flush itself,
+        // which lets spawned threads recursively spawn (rare but legal).
+        let mut linker = Linker::<State>::new(&engine);
+        let mut state = State::new();
+        state.view_threads = Some(std::sync::Arc::new(
+            crate::view_threads::ViewThreadRegistry::new(),
+        ));
+        let mut store = Store::<State>::new(&engine, state);
+        store.limiter(|s| &mut s.limits);
+        // Fuel for cooperative yielding, matching the parent view.
+        let _ = store.set_fuel(u64::MAX);
+        let _ = store.fuel_async_yield_interval(Some(10000));
+
+        if let Err(e) = Self::setup_linker(context.clone(), &mut linker).await {
+            log::warn!("spawned view thread: setup_linker failed: {:?}", e);
+            return crate::view_threads::INVALID_EXIT_CODE;
+        }
+        if let Err(e) =
+            Self::setup_linker_view(context.clone(), &mut linker, Some(module.clone())).await
+        {
+            log::warn!("spawned view thread: setup_linker_view failed: {:?}", e);
+            return crate::view_threads::INVALID_EXIT_CODE;
+        }
+        if let Err(e) = linker.define_unknown_imports_as_traps(&module) {
+            log::warn!("spawned view thread: define_unknown_imports_as_traps failed: {:?}", e);
+            return crate::view_threads::INVALID_EXIT_CODE;
+        }
+
+        let instance = match linker.instantiate_async(&mut store, &module).await {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("spawned view thread: instantiate failed: {:?}", e);
+                return crate::view_threads::INVALID_EXIT_CODE;
+            }
+        };
+
+        // Pull the indirect-function-table. Wasm built with the wasm32
+        // ABI exports the table that backs `call_indirect` as
+        // `__indirect_function_table`. If absent, this wasm wasn't built
+        // with threading in mind — fail clean.
+        let table = match instance
+            .get_export(&mut store, "__indirect_function_table")
+            .and_then(|e| e.into_table())
+        {
+            Some(t) => t,
+            None => {
+                log::warn!(
+                    "spawned view thread: wasm has no __indirect_function_table export"
+                );
+                return crate::view_threads::INVALID_EXIT_CODE;
+            }
+        };
+
+        let funcref = match table.get(&mut store, fn_idx as u64) {
+            Some(wasmtime::Ref::Func(Some(f))) => f,
+            _ => {
+                log::warn!(
+                    "spawned view thread: fn_idx {} not present in indirect table",
+                    fn_idx
+                );
+                return crate::view_threads::INVALID_EXIT_CODE;
+            }
+        };
+
+        // Try to call with the (i32) -> i32 ABI. If the actual table
+        // entry has a different signature, wasmtime returns an error
+        // from typed() and we fall back to a generic Val call.
+        let typed: Result<wasmtime::TypedFunc<i32, i32>, _> = funcref.typed(&store);
+        let result = match typed {
+            Ok(tf) => tf.call_async(&mut store, arg as i32).await,
+            Err(_) => {
+                // Fall back to untyped: arg is i32, return is i32. We
+                // require exactly one i32 in / one i32 out for the
+                // thread-spawn ABI.
+                let mut results = [wasmtime::Val::I32(0)];
+                match funcref
+                    .call_async(
+                        &mut store,
+                        &[wasmtime::Val::I32(arg as i32)],
+                        &mut results,
+                    )
+                    .await
+                {
+                    Ok(()) => match results[0] {
+                        wasmtime::Val::I32(v) => Ok(v),
+                        _ => {
+                            log::warn!(
+                                "spawned view thread: fn_idx {} returned non-i32",
+                                fn_idx
+                            );
+                            return crate::view_threads::INVALID_EXIT_CODE;
+                        }
+                    },
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("spawned view thread: call failed: {:?}", e);
+                crate::view_threads::INVALID_EXIT_CODE
+            }
+        }
+    }
+
     pub async fn setup_linker(
         context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
@@ -1462,6 +1603,14 @@ pub async fn setup_linker_view(
 
         linker: &mut Linker<State>,
 
+        // v10 view-syscall: the spawn host needs engine + module to
+        // re-instantiate the wasm in a child store. We accept them as
+        // `Option` so existing call-sites that don't yet thread these
+        // through (none in-tree, but kept for forward-compat) still
+        // compile. When `None`, ThreadSpawn returns a sentinel and the
+        // wasm sees an empty response (deterministic miss).
+        spawn_module: Option<wasmtime::Module>,
+
     ) -> Result<()> {
 
         let context_get = context.clone();
@@ -1492,14 +1641,19 @@ pub async fn setup_linker_view(
                 // pre-allocates the buffer + encodes the (ptr, cap) in the
                 // request.
                 let context_view_flush = context.clone();
+                let spawn_module_for_flush = spawn_module.clone();
                 linker
                     .func_wrap_async(
                         "env",
                         "__flush",
                         move |mut caller: Caller<'_, State>, (encoded,): (i32,)| {
                             let context = context_view_flush.clone();
+                            let spawn_module = spawn_module_for_flush.clone();
                             Box::new(async move {
-                                use crate::view_syscall::{dispatch_view_syscall, SyscallResult};
+                                use crate::view_syscall::{
+                                    decode_thread_op, dispatch_view_syscall, SyscallResult,
+                                    ThreadOp,
+                                };
 
                                 let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
                                     Some(m) => m,
@@ -1543,11 +1697,83 @@ pub async fn setup_linker_view(
                                         );
                                     }
                                     SyscallResult::UnsupportedOp => {
-                                        // Write empty (len=0) so wasm sees ENOSYS-like
-                                        // deterministic miss and can fall back.
-                                        write_syscall_response(
-                                            &mem, &mut caller, response_ptr, response_max, &[],
-                                        );
+                                        // v10 step 4: the dispatcher returns
+                                        // UnsupportedOp for thread ops because
+                                        // those need the wasmtime caller +
+                                        // registry, which the pure-function
+                                        // dispatcher doesn't see. Try to decode
+                                        // a thread op here; if found, run it
+                                        // with the bits we have.
+                                        match decode_thread_op(&payload) {
+                                            Some(ThreadOp::Spawn(req)) => {
+                                                let registry = caller
+                                                    .data()
+                                                    .view_threads
+                                                    .clone();
+                                                let response_bytes = match (registry, spawn_module.clone()) {
+                                                    (Some(registry), Some(module)) => {
+                                                        let engine = caller.engine().clone();
+                                                        let ctx = context.clone();
+                                                        // run_spawned_view_thread_blocking
+                                                        // schedules a tokio::spawn_blocking
+                                                        // task running its own current_thread
+                                                        // runtime, dodging wasmtime's
+                                                        // not-quite-Send setup_linker_view
+                                                        // future. The returned JoinHandle is
+                                                        // registered so wasm can join by id.
+                                                        let handle = crate::view_threads::run_spawned_view_thread_blocking::<T>(
+                                                            engine,
+                                                            module,
+                                                            ctx,
+                                                            req.fn_idx,
+                                                            req.arg,
+                                                        );
+                                                        let tid = registry.register(handle);
+                                                        tid.to_le_bytes().to_vec()
+                                                    }
+                                                    _ => {
+                                                        // No registry / no module
+                                                        // available — fail closed
+                                                        // by minting INVALID_THREAD_ID (0).
+                                                        crate::view_threads::INVALID_THREAD_ID
+                                                            .to_le_bytes()
+                                                            .to_vec()
+                                                    }
+                                                };
+                                                write_syscall_response(
+                                                    &mem,
+                                                    &mut caller,
+                                                    response_ptr,
+                                                    response_max,
+                                                    &response_bytes,
+                                                );
+                                            }
+                                            Some(ThreadOp::Join(req)) => {
+                                                let registry = caller
+                                                    .data()
+                                                    .view_threads
+                                                    .clone();
+                                                let exit = match registry {
+                                                    Some(r) => r.join(req.thread_id).await,
+                                                    None => crate::view_threads::INVALID_EXIT_CODE,
+                                                };
+                                                write_syscall_response(
+                                                    &mem,
+                                                    &mut caller,
+                                                    response_ptr,
+                                                    response_max,
+                                                    &exit.to_le_bytes(),
+                                                );
+                                            }
+                                            None => {
+                                                // Not a thread op either —
+                                                // genuine unsupported op. Emit a
+                                                // deterministic-miss marker.
+                                                write_syscall_response(
+                                                    &mem, &mut caller, response_ptr, response_max, &[],
+                                                );
+                                            }
+                                        }
                                     }
                                 }
                             })
@@ -1830,7 +2056,7 @@ pub async fn setup_linker_view(
         {
             Self::setup_linker(context.clone(), &mut linker).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup basic linker")?;
-            Self::setup_linker_view(context.clone(), &mut linker).await
+            Self::setup_linker_view(context.clone(), &mut linker, Some(module.clone())).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup view linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }

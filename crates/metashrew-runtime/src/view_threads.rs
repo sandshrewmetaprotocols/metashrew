@@ -65,14 +65,21 @@ impl ViewThreadRegistry {
     where
         F: Future<Output = i32> + Send + 'static,
     {
+        self.register(tokio::spawn(fut))
+    }
+
+    /// Register an already-spawned tokio `JoinHandle` and return the
+    /// thread id. Used by the wasm-spawn host (which spawns via
+    /// `tokio::task::spawn_blocking` for Send-bound reasons; see
+    /// `run_spawned_view_thread_blocking`).
+    pub fn register(&self, handle: tokio::task::JoinHandle<i32>) -> u32 {
         // Allocate id first. fetch_add wraps after 4 billion spawns —
         // that's safely outside any plausible single view-call lifetime.
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         if id == INVALID_THREAD_ID {
-            // Skip 0 if we ever wrap around.
-            return self.spawn(fut);
+            // Skip 0 if we ever wrap around. Re-register the same handle.
+            return self.register(handle);
         }
-        let handle = tokio::spawn(fut);
         let mut guard = match self.handles.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -130,6 +137,56 @@ impl Default for ViewThreadRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Drive `MetashrewRuntime::<T>::run_spawned_view_thread_impl` on a
+/// blocking thread.
+///
+/// We use `tokio::task::spawn_blocking` rather than `tokio::spawn`
+/// because the inner future captures wasmtime types whose Send
+/// inference is brittle — concretely, `MetashrewRuntime::setup_linker_view`
+/// returns a Future that wasmtime doesn't prove `Send` for, even though
+/// each individual host-fn closure inside it IS `Send`. By running the
+/// child on its own `current_thread` runtime inside `spawn_blocking`,
+/// we sidestep the parent runtime's Send-bound requirement entirely.
+///
+/// The cost is one extra OS-thread per spawned view-thread; that's
+/// acceptable for the view-syscall use case (cache-population, parallel
+/// scan) which is bounded by `--view-concurrency` x small-N anyway.
+pub fn run_spawned_view_thread_blocking<T>(
+    engine: wasmtime::Engine,
+    module: wasmtime::Module,
+    context: std::sync::Arc<std::sync::RwLock<crate::context::MetashrewRuntimeContext<T>>>,
+    fn_idx: u32,
+    arg: u32,
+) -> tokio::task::JoinHandle<i32>
+where
+    T: crate::traits::KeyValueStoreLike + Clone + Send + Sync + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        // Build a single-thread tokio runtime inside the blocking task.
+        // It owns the wasmtime Store + Instance lifetime, so the Send
+        // requirements of the outer tokio::spawn never apply.
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!(
+                    "spawn_blocking view thread: failed to build child runtime: {:?}",
+                    e
+                );
+                return INVALID_EXIT_CODE;
+            }
+        };
+        rt.block_on(async move {
+            crate::runtime::MetashrewRuntime::<T>::run_spawned_view_thread_impl(
+                engine, module, context, fn_idx, arg,
+            )
+            .await
+        })
+    })
 }
 
 #[cfg(test)]

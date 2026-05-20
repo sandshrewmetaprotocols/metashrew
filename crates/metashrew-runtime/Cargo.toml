@@ -18,6 +18,11 @@ sha2 = { workspace = true }
 # we do not add per-call latency to view-runtime acquire.
 sysinfo = { version = "0.30", default-features = false }
 thiserror = "1.0"
+# v10 view-syscall cache. `lru_mem` is a memory-bounded LRU; we use it
+# for the host-side ViewCache that backs the CacheGet / CachePut ops
+# under __flush in view mode. Same crate the kungfuflex/lru-cache branch
+# used for the wasm-side cache.
+lru-mem = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

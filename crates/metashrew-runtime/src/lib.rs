@@ -11,7 +11,9 @@ pub mod rollback;
 pub mod runtime;
 pub mod smt;
 pub mod traits;
+pub mod view_cache;
 pub mod view_limits;
+pub mod view_syscall;
 
 
 // Re-export core types and traits

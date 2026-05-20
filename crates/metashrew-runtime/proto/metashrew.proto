@@ -5,3 +5,40 @@ package metashrew;
 message KeyValueFlush {
   repeated bytes list = 1;
 }
+
+// =============================================================================
+// View-mode syscalls (v10) — see metashrew-support/proto/metashrew.proto for
+// the full doc-comment. The runtime crate has its own copy of the proto
+// (built via build.rs / prost-build, different OUT_DIR) and must stay in
+// lockstep with the support copy. If you change one, change both.
+// =============================================================================
+
+message ViewSyscall {
+  oneof request {
+    CacheGet     cache_get    = 1;
+    CachePut     cache_put    = 2;
+    ThreadSpawn  thread_spawn = 3;
+    ThreadJoin   thread_join  = 4;
+  }
+  uint32 response_ptr = 100;
+  uint32 response_max = 101;
+}
+
+message CacheGet {
+  bytes key = 1;
+}
+
+message CachePut {
+  bytes key   = 1;
+  bytes value = 2;
+  uint32 ttl_seconds = 3;
+}
+
+message ThreadSpawn {
+  uint32 fn_idx = 1;
+  uint32 arg    = 2;
+}
+
+message ThreadJoin {
+  uint32 thread_id = 1;
+}

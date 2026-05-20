@@ -22,10 +22,74 @@ message ViewFunction {
 message IndexerMetadata {
   // Version of the compiler used to build the indexer
   string compiler_version = 1;
-  
+
   // Version of rustc used to build the indexer
   string rustc_version = 2;
-  
+
   // List of view functions exported by the indexer
   repeated ViewFunction view_functions = 3;
+}
+
+// =============================================================================
+// View-mode syscalls (v10).
+//
+// `__flush` is currently a no-op when bound by `setup_linker_view` — view
+// calls don't have a write path. We reuse the same wasm ABI symbol
+// (`__flush(ptr: i32)`) to multiplex view-only host capabilities. The
+// payload at `ptr` is decoded as `ViewSyscall` in view mode (in indexer
+// mode it stays the existing `KeyValueFlush`). If decoding as
+// `ViewSyscall` fails, the host falls back to the legacy no-op for
+// forward compatibility — wasm that doesn't know about syscalls is
+// unaffected.
+//
+// Responses (where applicable) are written by the host directly into
+// wasm linear memory at `response_ptr` as `[u32 LE: len | bytes]`.
+// The wasm pre-allocates this buffer and encodes the pointer/cap in
+// the request. No change to `__flush`'s `(i32) -> ()` signature.
+//
+// Determinism note: view calls must return identical bytes on every
+// node serving the same height. Syscalls that touch host-shared state
+// (cache, threads) are perf-only — same logical inputs must produce
+// the same logical output regardless of cache hit/miss or thread
+// scheduling. The wasm author is responsible for honoring that.
+// =============================================================================
+
+message ViewSyscall {
+  oneof request {
+    CacheGet     cache_get    = 1;
+    CachePut     cache_put    = 2;
+    ThreadSpawn  thread_spawn = 3;
+    ThreadJoin   thread_join  = 4;
+  }
+  // Pre-allocated response buffer in wasm linear memory. Host writes
+  // `[u32 LE: response_len | response_bytes]` starting at this offset.
+  // If the response would overflow `response_max`, the host writes
+  // length=0 (empty response) and the syscall is treated as failed.
+  uint32 response_ptr = 100;
+  uint32 response_max = 101;
+}
+
+message CacheGet {
+  // Opaque cache key. The wasm should include any inputs that affect
+  // the cached value (height, request shape hash, etc.) to keep the
+  // entry deterministic.
+  bytes key = 1;
+}
+
+message CachePut {
+  bytes key   = 1;
+  bytes value = 2;
+  // Optional TTL in seconds. 0 = no TTL (entry lives until LRU eviction).
+  uint32 ttl_seconds = 3;
+}
+
+// Step 4 placeholder — host wires ENOSYS until view-threads lands.
+message ThreadSpawn {
+  uint32 fn_idx = 1;
+  uint32 arg    = 2;
+}
+
+// Step 4 placeholder.
+message ThreadJoin {
+  uint32 thread_id = 1;
 }

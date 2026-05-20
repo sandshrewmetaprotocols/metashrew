@@ -356,6 +356,43 @@ pub fn read_arraybuffer_as_vec(data: &[u8], data_start: i32) -> Vec<u8> {
     }
 }
 
+/// Write a v10 view-syscall response into wasm linear memory at
+/// `response_ptr` using the framing `[u32 LE: len | bytes]`.
+///
+/// If the response wouldn't fit within `response_max` (including the
+/// 4-byte length prefix), writes `[u32 LE: 0]` instead — wasm sees an
+/// empty response and treats it as a miss / failure. This is the same
+/// fail-closed contract as the CacheGet miss path so wasm can use a
+/// single "len==0 → didn't get a value" branch for both real misses
+/// and oversized misses.
+///
+/// Silently does nothing on `mem.write` failure — the call site is
+/// view-only and a memory-write failure means the wasm gave us a bad
+/// pointer; safer to let the wasm time out / return junk than to
+/// crash the host process.
+pub fn write_syscall_response(
+    mem: &wasmtime::Memory,
+    caller: &mut Caller<'_, State>,
+    response_ptr: usize,
+    response_max: usize,
+    response: &[u8],
+) {
+    let needed = 4usize.saturating_add(response.len());
+    if response_ptr == 0 || response_max < 4 || needed > response_max {
+        // Write a 0-length marker if there's at least room for the
+        // length prefix; otherwise drop silently.
+        if response_ptr > 0 && response_max >= 4 {
+            let _ = mem.write(&mut *caller, response_ptr, &0u32.to_le_bytes());
+        }
+        return;
+    }
+    let len_le = (response.len() as u32).to_le_bytes();
+    if mem.write(&mut *caller, response_ptr, &len_le).is_err() {
+        return;
+    }
+    let _ = mem.write(&mut *caller, response_ptr + 4, response);
+}
+
 // Legacy function removed
 
 pub fn to_signed_or_trap<'a, T: TryInto<i32>>(_caller: &mut Caller<'_, State>, v: T) -> i32 {
@@ -1388,36 +1425,90 @@ pub async fn setup_linker_view(
 
 
 
+                // v10 view-mode `__flush` dispatcher.
+                //
+                // Indexer mode treats `__flush(ptr)` as the batch-commit hook.
+                // View mode has no write path, so the existing wasm `__flush`
+                // call site is repurposed as a host-syscall dispatcher: the
+                // wasm passes a serialized `ViewSyscall` protobuf at `ptr`, the
+                // host decodes + dispatches into the LRU view-cache (CacheGet
+                // / CachePut) or — once steps 4-5 land — thread spawn/join.
+                //
+                // The signature is unchanged on purpose: `__flush(i32) -> ()`.
+                // No wasm ABI break. Wasm that does NOT know about the
+                // syscall protocol still gets the legacy no-op semantic —
+                // we recognize the protocol by successfully decoding the
+                // payload as `ViewSyscall`; anything else (`KeyValueFlush`,
+                // empty, garbage) falls through to no-op.
+                //
+                // Responses (CacheGet primarily) are written directly into
+                // wasm linear memory at `response_ptr` as
+                // `[u32 LE: response_len | response_bytes]`. Wasm
+                // pre-allocates the buffer + encodes the (ptr, cap) in the
+                // request.
+                let context_view_flush = context.clone();
                 linker
-
-
-
                     .func_wrap_async(
-
-
-
                         "env",
-
-
-
                         "__flush",
-
-
-
-                        move |_caller: Caller<'_, State>, (_encoded,): (i32,)| {
+                        move |mut caller: Caller<'_, State>, (encoded,): (i32,)| {
+                            let context = context_view_flush.clone();
                             Box::new(async move {
-                                // View mode __flush - no operation needed
+                                use crate::view_syscall::{dispatch_view_syscall, SyscallResult};
+
+                                let mem = match caller.get_export("memory").and_then(|e| e.into_memory()) {
+                                    Some(m) => m,
+                                    None    => return,
+                                };
+
+                                // Read the proto payload + the response-buffer
+                                // (ptr, max) from wasm memory. The immutable borrow
+                                // via `mem.data()` must end before we call
+                                // `mem.write(&mut caller, ...)` later — clone the
+                                // bytes we need and let the scope drop.
+                                let (payload, height) = {
+                                    let data = mem.data(&caller);
+                                    let payload = match try_read_arraybuffer_as_vec(data, encoded) {
+                                        Ok(v) => v,
+                                        Err(_) => return,
+                                    };
+                                    let height = context.read().unwrap().height;
+                                    (payload, height)
+                                };
+
+                                // We need response_ptr/max from the proto, but we
+                                // also let the dispatcher decode and run the op.
+                                // Decode once here to extract the (ptr, max) tuple.
+                                let (response_ptr, response_max) = {
+                                    use prost::Message;
+                                    use crate::proto::metashrew::ViewSyscall;
+                                    match ViewSyscall::decode(payload.as_slice()) {
+                                        Ok(s) => (s.response_ptr as usize, s.response_max as usize),
+                                        Err(_) => return, // legacy no-op
+                                    }
+                                };
+
+                                match dispatch_view_syscall(height, &payload) {
+                                    SyscallResult::NotASyscall | SyscallResult::NoResponse => {
+                                        // No memory write needed.
+                                    }
+                                    SyscallResult::Respond(value) => {
+                                        write_syscall_response(
+                                            &mem, &mut caller, response_ptr, response_max, &value,
+                                        );
+                                    }
+                                    SyscallResult::UnsupportedOp => {
+                                        // Write empty (len=0) so wasm sees ENOSYS-like
+                                        // deterministic miss and can fall back.
+                                        write_syscall_response(
+                                            &mem, &mut caller, response_ptr, response_max, &[],
+                                        );
+                                    }
+                                }
                             })
-
-
-
                         },
-
-
-
                     )
-
-            .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
+                    .map_err(|e| anyhow!("Failed to wrap __flush: {:?}", e))?;
 
 
 

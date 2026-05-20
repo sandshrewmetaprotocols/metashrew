@@ -186,6 +186,11 @@ where
         
         // Get remote tip
         let remote_tip = self.node.get_tip_height().await?;
+        // v10 sync-mode: inform the storage layer of the observed bitcoind
+        // tip so its `commit_atomic` can gate WAL-off behavior on the
+        // bitcoind/indexer gap. Read lock only — adapter uses atomic
+        // interior mutability for the tip value.
+        self.storage.read().await.set_bitcoind_tip(remote_tip).await;
 
         // Check for reorgs only when close to the tip
         if remote_tip.saturating_sub(current_height) <= self.config.reorg_check_threshold {
@@ -477,6 +482,8 @@ where
             SyncMode::Repo(_config) => {
                 let current_height = self.current_height.load(Ordering::SeqCst);
                 let tip_height = self.node.get_tip_height().await?;
+                // v10 sync-mode: see WAL-off gating note above.
+                self.storage.read().await.set_bitcoind_tip(tip_height).await;
 
                 if let Some(consumer) = self.snapshot_consumer.read().await.as_ref() {
                     consumer
@@ -494,6 +501,8 @@ where
     async fn attempt_snapshot_sync(&self) -> SyncResult<bool> {
         let current_height = self.current_height.load(Ordering::SeqCst);
         let tip_height = self.node.get_tip_height().await?;
+        // v10 sync-mode: see WAL-off gating note above.
+        self.storage.read().await.set_bitcoind_tip(tip_height).await;
 
         if let Some(consumer) = self.snapshot_consumer.write().await.as_mut() {
             if let Some(best_snapshot) = consumer
@@ -681,6 +690,11 @@ where
                     continue;
                 }
             };
+            // v10 sync-mode: inform the storage layer of the observed
+            // bitcoind tip so its `commit_atomic` can gate WAL-off behavior
+            // on the bitcoind/indexer gap. Read lock only — adapter uses
+            // atomic interior mutability for the tip value.
+            self.storage.read().await.set_bitcoind_tip(remote_tip).await;
 
             // Check for reorgs only when close to the tip
             if height > 0 && remote_tip.saturating_sub(height) <= self.config.reorg_check_threshold {
@@ -855,6 +869,8 @@ where
     async fn get_snapshot_stats(&self) -> SyncResult<SnapshotSyncStats> {
         let current_height = self.current_height.load(Ordering::SeqCst);
         let tip_height = self.node.get_tip_height().await?;
+        // v10 sync-mode: see WAL-off gating note above.
+        self.storage.read().await.set_bitcoind_tip(tip_height).await;
         let sync_mode = format!("{:?}", *self.sync_mode.read().await);
 
         Ok(SnapshotSyncStats {
@@ -911,6 +927,8 @@ where
         }
 
         let remote_tip = self.node.get_tip_height().await?;
+        // v10 sync-mode: see WAL-off gating note above.
+        self.storage.read().await.set_bitcoind_tip(remote_tip).await;
         if height > remote_tip {
             return Ok(None);
         }
@@ -972,6 +990,8 @@ where
     async fn get_status(&self) -> SyncResult<SyncStatus> {
         let current_height = self.current_height.load(Ordering::SeqCst);
         let tip_height = self.node.get_tip_height().await?;
+        // v10 sync-mode: see WAL-off gating note above.
+        self.storage.read().await.set_bitcoind_tip(tip_height).await;
         let blocks_behind = tip_height.saturating_sub(current_height);
         let last_block_time = *self.last_block_time.read().await;
 

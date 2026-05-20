@@ -343,6 +343,76 @@ async fn spawn_without_module_yields_invalid_id() {
     ));
 }
 
+/// Cross-validation: the bytes that the wasm-side `metashrew_core::view::spawn`
+/// wrapper produces decode cleanly on the host side as a `ThreadOp::Spawn`
+/// carrying the (fn_idx, arg) tuple the wasm passed in.
+///
+/// We can't actually CALL `metashrew_core::view::spawn` from a non-wasm
+/// test (it would invoke `__flush`, which is a no-op stub in test mode
+/// and never writes a thread id back into the response buffer). What
+/// we CAN do is reproduce the exact ViewSyscall shape the wasm-side
+/// wrapper builds (see `crates/metashrew-core/src/view.rs::spawn`) and
+/// verify the host's `decode_thread_op` extracts (fn_idx, arg)
+/// unchanged.
+///
+/// This is the integration-test equivalent of "did the wasm-side
+/// encoding drift from what the host expects" — a regression guard
+/// against either side diverging without the other updating.
+#[test]
+fn wasm_side_spawn_payload_decodes_on_host_side() {
+    // These are the values the wasm-side `view::spawn` would pass:
+    //   fn_idx = __view_thread_entry as *const () as u32 (trampoline slot)
+    //   arg    = Box::into_raw(Box<ThreadEntry>) as u32 (boxed closure ptr)
+    //
+    // The exact numeric values don't matter for decoding — we just
+    // need to verify the proto shape round-trips.
+    let fn_idx_wire: u32 = 0xfeed_face;
+    let arg_wire: u32 = 0xbeef_b00b;
+
+    let payload = ViewSyscall {
+        request: Some(ViewReq::ThreadSpawn(ThreadSpawn {
+            fn_idx: fn_idx_wire,
+            arg: arg_wire,
+        })),
+        response_ptr: 0x10000,
+        response_max: 8,
+    }
+    .encode_to_vec();
+
+    let op = metashrew_runtime::view_syscall::decode_thread_op(&payload);
+    match op {
+        Some(metashrew_runtime::view_syscall::ThreadOp::Spawn(req)) => {
+            assert_eq!(req.fn_idx, fn_idx_wire);
+            assert_eq!(req.arg, arg_wire);
+        }
+        other => panic!("expected ThreadOp::Spawn, got {:?}", other),
+    }
+}
+
+/// Cross-validation: ThreadJoin payload from the wasm side decodes
+/// cleanly on the host side. Companion to the spawn variant above.
+#[test]
+fn wasm_side_join_payload_decodes_on_host_side() {
+    let thread_id_wire: u32 = 0x1234_5678;
+
+    let payload = ViewSyscall {
+        request: Some(ViewReq::ThreadJoin(ThreadJoin {
+            thread_id: thread_id_wire,
+        })),
+        response_ptr: 0x20000,
+        response_max: 8,
+    }
+    .encode_to_vec();
+
+    let op = metashrew_runtime::view_syscall::decode_thread_op(&payload);
+    match op {
+        Some(metashrew_runtime::view_syscall::ThreadOp::Join(req)) => {
+            assert_eq!(req.thread_id, thread_id_wire);
+        }
+        other => panic!("expected ThreadOp::Join, got {:?}", other),
+    }
+}
+
 /// Sanity: the cache-op path is untouched by threading work.
 #[tokio::test(flavor = "current_thread")]
 async fn cache_ops_still_work_through_dispatcher() {

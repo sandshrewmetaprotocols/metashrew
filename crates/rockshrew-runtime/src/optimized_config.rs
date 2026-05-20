@@ -149,6 +149,68 @@ pub fn create_optimized_options() -> Options {
     opts
 }
 
+/// Create RocksDB options tuned for **fresh-sync from genesis** workloads
+/// (v10 deploy use case).
+///
+/// Difference vs [`create_optimized_options`]:
+/// - **Bloom filters OFF** during sync. Bloom lookups are useless during
+///   genesis catch-up because there's nothing to filter — every key is new.
+///   The bloom-table memory + write cost is wasted. Operators should
+///   reopen with `create_optimized_options` (or restart the binary with a
+///   different flag) once near tip — at that point bloom filters become
+///   essential for view-path query perf.
+/// - **Intermediate-level compression OFF**. L0/L1/L2 stay uncompressed —
+///   sync writes are write-once-read-rarely until the indexer catches up.
+///   Bottommost (L3+) stays Zstd so cold data still compresses well.
+/// - **max_write_buffer_number = 4** (vs 6 in the optimized variant).
+///   The plan calls for this — 4 memtables are enough during sync where
+///   block-apply is the bottleneck, not memtable rollover, and 4 reduces
+///   memory footprint.
+///
+/// Memory + parallelism settings are inherited from
+/// `create_optimized_options` — those don't change between sync and tip.
+pub fn create_sync_options() -> Options {
+    let mut opts = create_optimized_options();
+
+    opts.set_max_write_buffer_number(4);
+
+    // Rebuild the BlockBasedOptions with bloom filters disabled.
+    let cache_size = if let Ok(available_memory) = get_available_memory() {
+        (available_memory / 4)
+            .max(4 * 1024 * 1024 * 1024)
+            .min(16 * 1024 * 1024 * 1024)
+    } else {
+        8 * 1024 * 1024 * 1024
+    };
+    let cache = Cache::new_lru_cache(cache_size);
+    let mut table_opts = BlockBasedOptions::default();
+    table_opts.set_block_cache(&cache);
+    table_opts.set_block_size(256 * 1024);
+    table_opts.set_cache_index_and_filter_blocks(true);
+    table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+    table_opts.set_pin_top_level_index_and_filter(true);
+    // Bloom filters intentionally NOT set — they're rebuilt automatically
+    // by compaction once we switch to `create_optimized_options` at tip.
+    table_opts.set_format_version(5);
+    opts.set_block_based_table_factory(&table_opts);
+
+    // Per-level compression: only the bottommost level compresses during
+    // sync. Hot/warm levels stay uncompressed so block-apply doesn't
+    // pay CPU for compression that gets re-done at compaction anyway.
+    opts.set_compression_per_level(&[
+        DBCompressionType::None, // L0 — uncompressed
+        DBCompressionType::None, // L1 — uncompressed
+        DBCompressionType::None, // L2 — uncompressed
+        DBCompressionType::Zstd, // L3+ — cold, keep compressed
+        DBCompressionType::Zstd,
+        DBCompressionType::Zstd,
+        DBCompressionType::Zstd,
+    ]);
+    opts.set_compression_type(DBCompressionType::None);
+
+    opts
+}
+
 /// Create lightweight options for secondary (read-only) instances
 pub fn create_secondary_options() -> Options {
     let mut opts = create_optimized_options();

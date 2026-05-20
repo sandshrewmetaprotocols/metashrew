@@ -533,13 +533,19 @@ impl<T: KeyValueStoreLike> BatchedSMTHelper<T> {
             key_lengths.insert(key.clone(), new_length);
         }
 
-        // SKIP SMT root computation — it's O(n * tree_depth) with storage reads
-        // per key and is the primary bottleneck for large blocks. The state root
-        // is not used for reorg detection (block hashes are used instead) and is
-        // only stored as metadata. Store a placeholder to maintain schema compat.
+        // v10: drop the per-block SMT-root placeholder write that v9 stored
+        // here. The same key (`smt:root:{height}`) gets written
+        // unconditionally by `commit_atomic` a few lines later in the same
+        // atomic batch — the SMTHelper write was being overwritten by
+        // RocksDB before the batch was even flushed, so it was pure
+        // write amplification (32 bytes per block, ~50k wasted writes/yr at
+        // mainnet pace). The plan calls for a real checkpointed SMT root
+        // every N=100 blocks; that lands once we have a use case (none of
+        // `get_state_root` / view RPCs / reorg path actually rely on the
+        // tree root today — they use block-hash records instead). Until
+        // then, `commit_atomic` keeps writing the trivial root the runtime
+        // passes in (currently EMPTY_NODE_HASH).
         let new_root = prev_root;
-        let root_key = format!("{}{}", SMT_ROOT_PREFIX, height).into_bytes();
-        batch.put(&root_key, new_root.to_vec());
 
         // Write per-height manifest of modified keys for fast rollback
         if !key_values.is_empty() {

@@ -323,6 +323,21 @@ pub struct Args {
     /// indexer advance.
     #[arg(long, default_value_t = false)]
     pub no_startup_heal: bool,
+
+    /// v10 fresh-sync tuning: open RocksDB with sync-optimized options
+    /// instead of the default general-purpose options.
+    ///
+    /// Sync mode disables bloom filters and uncompresses L0/L1/L2 — both
+    /// useful only when catching up from genesis (no point filtering
+    /// reads on data that is being written for the first time, no point
+    /// compressing what will be re-compressed at compaction). Operators
+    /// should restart WITHOUT this flag once the indexer reaches tip so
+    /// bloom filters rebuild for query-path perf.
+    ///
+    /// Default: disabled (production behaviour unchanged). Set for
+    /// fresh-sync deployments only.
+    #[arg(long, default_value_t = false)]
+    pub sync_mode: bool,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -1316,8 +1331,16 @@ pub async fn run_prod(args: Args) -> Result<()> {
                 .with_view_limits(view_limits_cfg.clone());
         run_generic(args, runtime_adapter, storage_adapter).await
     } else {
-        let adapter =
-            RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
+        let db_path = args.db_path.to_string_lossy().to_string();
+        let adapter = if args.sync_mode {
+            info!(
+                "v10 sync-mode: opening RocksDB with bloom-off + L0/L1/L2 uncompressed (restart without --sync-mode at tip)"
+            );
+            let opts = rockshrew_runtime::optimized_config::create_sync_options();
+            RocksDBRuntimeAdapter::open(db_path, opts)?
+        } else {
+            RocksDBRuntimeAdapter::open_optimized(db_path)?
+        };
         let mut config_engine = wasmtime::Config::default();
         config_engine.async_support(true);
         let engine = wasmtime::Engine::new(&config_engine)?;

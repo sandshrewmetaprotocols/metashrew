@@ -8,9 +8,26 @@ use metashrew_runtime::{
 };
 use metashrew_sync::{StorageAdapter, StorageStats, SyncError, SyncResult};
 use rocksdb::{WriteBatch, WriteOptions, DB};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use crate::adapter::RocksDBRuntimeAdapter;
+
+/// v10: switch `commit_atomic` to `WriteOptions::disable_wal()` once the
+/// indexer is more than this many blocks behind the bitcoind tip. Below
+/// this gap, every commit fsyncs the WAL — the standard durability
+/// guarantee. Above it, blocks land in the memtable without WAL durability
+/// until the next forced `flush()` (every [`SYNC_WAL_OFF_FLUSH_INTERVAL`]
+/// blocks). A crash during the WAL-off window snaps back to the last
+/// flushed checkpoint and re-applies from there.
+pub const SYNC_WAL_OFF_THRESHOLD: u32 = 1000;
+
+/// v10: while WAL is off during deep sync, force a RocksDB flush every
+/// this-many blocks. A crash between flushes loses (at most) this many
+/// blocks of work, which is the explicit trade for the per-block fsync
+/// elimination. At a fresh-sync block rate of ~50 blocks/sec, 5000
+/// blocks ≈ 100s of replay, well within tolerance for an initial sync.
+pub const SYNC_WAL_OFF_FLUSH_INTERVAL: u32 = 5000;
 
 /// Build `WriteOptions` with `set_sync(true)` so the RocksDB WAL is fsynced
 /// before the write returns. This is what makes `commit_atomic` actually
@@ -24,15 +41,43 @@ fn sync_write_options() -> WriteOptions {
     wo
 }
 
+/// v10: build `WriteOptions` with WAL disabled, for the deep-sync window
+/// where bitcoind tip is far ahead of the indexer. Writes still land in
+/// the memtable atomically (RocksDB's WriteBatch primitive is independent
+/// of WAL — the atomicity guarantee comes from the batch, not the WAL).
+/// The durability gap is bounded by the periodic forced `flush()`.
+fn no_wal_write_options() -> WriteOptions {
+    let mut wo = WriteOptions::default();
+    wo.disable_wal(true);
+    wo
+}
+
 /// RocksDB storage adapter for persistent storage.
 #[derive(Clone)]
 pub struct RocksDBStorageAdapter {
     db: Arc<DB>,
+    /// v10 sync-mode: most recently observed bitcoind tip height,
+    /// reported by the sync engine via `set_bitcoind_tip`. Used by
+    /// `commit_atomic` to decide whether the indexer is in "deep sync"
+    /// mode (gap > threshold → WAL off) or "near tip" (gap ≤
+    /// threshold → WAL on). Init 0 means "unknown" — commit_atomic
+    /// treats unknown as "near tip" so we never accidentally disable
+    /// WAL on a pod that hasn't polled bitcoind yet.
+    bitcoind_tip: Arc<AtomicU32>,
+    /// v10 sync-mode: counter of blocks committed since the last forced
+    /// `flush()` in the WAL-off window. When this reaches
+    /// `SYNC_WAL_OFF_FLUSH_INTERVAL`, `commit_atomic` calls
+    /// `db.flush()` to checkpoint and resets the counter.
+    blocks_since_flush: Arc<AtomicU32>,
 }
 
 impl RocksDBStorageAdapter {
     pub fn new(db: Arc<DB>) -> Self {
-        Self { db }
+        Self {
+            db,
+            bitcoind_tip: Arc::new(AtomicU32::new(0)),
+            blocks_since_flush: Arc::new(AtomicU32::new(0)),
+        }
     }
 }
 
@@ -192,6 +237,12 @@ impl StorageAdapter for RocksDBStorageAdapter {
 
     async fn get_db_handle(&self) -> SyncResult<Arc<DB>> {
         Ok(self.db.clone())
+    }
+
+    /// v10 sync-mode hook: store the most recently observed bitcoind tip
+    /// height. `commit_atomic` reads this to decide WAL-off gating.
+    async fn set_bitcoind_tip(&self, tip: u32) {
+        self.bitcoind_tip.store(tip, Ordering::Relaxed);
     }
 
     /// v9.0.5-rc.6 startup-heal: read the runtime-side tip-height pointer
@@ -400,14 +451,57 @@ impl StorageAdapter for RocksDBStorageAdapter {
         let height_bytes = height.to_le_bytes();
         batch.put(&height_key, &height_bytes);
 
-        // ONE write_opt with sync=true. RocksDB's WriteBatch primitive
-        // guarantees atomicity within a single batch: every put is visible
-        // post-commit, or none of them is. WAL fsync is the durability
-        // guarantee that lets restart-recovery rely on the all-or-nothing
-        // invariant — without sync=true, a crash before the OS page cache
-        // flushes could lose the write after we returned Ok.
+        // v10 sync-mode gating: WAL-off only when the indexer is more
+        // than SYNC_WAL_OFF_THRESHOLD blocks behind the most recently
+        // observed bitcoind tip. Otherwise stay on the fsync path that
+        // gives commit_atomic its standard durability guarantee.
+        //
+        // Atomicity is independent of the WAL choice — RocksDB's
+        // WriteBatch primitive guarantees all-or-nothing within a
+        // single write_opt call regardless of fsync mode. WAL-off
+        // only relaxes the *durability* contract: a crash between
+        // forced flushes can lose up to SYNC_WAL_OFF_FLUSH_INTERVAL
+        // blocks of memtable state. The sync engine handles re-sync
+        // from the last persisted height on restart.
+        let bitcoind_tip = self.bitcoind_tip.load(Ordering::Relaxed);
+        let wal_off = bitcoind_tip > 0
+            && bitcoind_tip.saturating_sub(height) > SYNC_WAL_OFF_THRESHOLD;
+
+        let wo = if wal_off {
+            no_wal_write_options()
+        } else {
+            sync_write_options()
+        };
         self.db
-            .write_opt(batch, &sync_write_options())
-            .map_err(|e| SyncError::Storage(format!("commit_atomic write failed at height {}: {}", height, e)))
+            .write_opt(batch, &wo)
+            .map_err(|e| SyncError::Storage(format!("commit_atomic write failed at height {}: {}", height, e)))?;
+
+        // Periodic checkpoint flush during the WAL-off window. Resets
+        // the counter on flush. When WAL is on, we don't increment —
+        // every commit is already durable via the fsync.
+        if wal_off {
+            let prev = self.blocks_since_flush.fetch_add(1, Ordering::Relaxed);
+            if prev + 1 >= SYNC_WAL_OFF_FLUSH_INTERVAL {
+                info!(
+                    "v10 sync-mode: forced flush at height {} (every {} WAL-off blocks)",
+                    height, SYNC_WAL_OFF_FLUSH_INTERVAL
+                );
+                self.db
+                    .flush()
+                    .map_err(|e| SyncError::Storage(format!("WAL-off checkpoint flush failed at height {}: {}", height, e)))?;
+                self.blocks_since_flush.store(0, Ordering::Relaxed);
+            }
+        } else {
+            // When we flip back to WAL-on (near tip), force one flush
+            // to land all memtable state in SST + reset the counter.
+            // This bounds the worst-case startup-replay window.
+            if self.blocks_since_flush.load(Ordering::Relaxed) > 0 {
+                self.db
+                    .flush()
+                    .map_err(|e| SyncError::Storage(format!("WAL-on transition flush failed at height {}: {}", height, e)))?;
+                self.blocks_since_flush.store(0, Ordering::Relaxed);
+            }
+        }
+        Ok(())
     }
 }

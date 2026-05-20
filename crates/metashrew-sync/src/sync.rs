@@ -696,6 +696,12 @@ where
                             continue;
                         }
                     };
+                    // v10 sync-mode: inform the storage layer of the
+                    // observed bitcoind tip so its `commit_atomic` can
+                    // gate WAL-off behavior on the bitcoind/indexer gap.
+                    // Read lock only — adapter uses atomic interior
+                    // mutability for the tip value.
+                    self_clone.storage.read().await.set_bitcoind_tip(remote_tip).await;
 
                     // Check for reorgs only when close to the tip
                     if remote_tip.saturating_sub(current_height) <= self_clone.config.reorg_check_threshold {

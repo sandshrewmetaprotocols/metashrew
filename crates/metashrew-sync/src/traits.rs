@@ -220,6 +220,22 @@ pub trait StorageAdapter: Send + Sync {
     /// Get storage statistics (size, entries, etc.)
     async fn get_stats(&self) -> SyncResult<StorageStats>;
 
+    /// v10 sync-mode hook: report the most recently observed bitcoind tip
+    /// height to the storage layer. The sync engine calls this every time
+    /// it polls bitcoind for the remote tip.
+    ///
+    /// Storage adapters use this to make WAL-off gating decisions in
+    /// `commit_atomic`. When the indexer is more than
+    /// `SYNC_WAL_OFF_THRESHOLD` blocks behind bitcoind, the RocksDB
+    /// adapter switches to `WriteOptions::disable_wal()` for the block
+    /// commit (with a periodic `flush()` as a hard-checkpoint marker)
+    /// to amortize the per-block fsync cost across the catch-up window.
+    /// As soon as the gap shrinks below the threshold, WAL flips back on
+    /// — near-tip writes never lose their fsync guarantee.
+    ///
+    /// Default impl is a no-op. RocksDB adapters override.
+    async fn set_bitcoind_tip(&self, _tip: u32) {}
+
     /// Get the underlying database handle for snapshot operations
     /// This is specific to RocksDB implementations and may not be available for all storage adapters
     async fn get_db_handle(&self) -> SyncResult<std::sync::Arc<rocksdb::DB>> {

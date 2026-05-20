@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Result};
 use log::{error, info, warn};
-use metashrew_runtime::smt::{encode_chain_length, encode_value_entry};
+use metashrew_runtime::{encode_chain_length, encode_value_entry};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -235,7 +235,7 @@ impl SnapshotManager {
             } else {
                 // This is likely a raw logical key-value pair from WASM
                 // Skip internal keys but include everything else
-                if !key_str.starts_with("__INTERNAL") && !key_str.starts_with("smt:node:") {
+                if !key_str.starts_with("__INTERNAL") {
                     self.key_changes.insert(key.clone(), value);
                     // Track when this key was last changed for incremental snapshots
                     self.key_change_heights.insert(key, self.current_processing_height);
@@ -250,17 +250,7 @@ impl SnapshotManager {
     /// This determines what gets included in snapshot diffs
     fn extract_logical_kv(&self, key: &[u8], value: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
         let key_str = String::from_utf8_lossy(key);
-        
-        // Handle SMT root keys: include as-is for state verification
-        if key_str.starts_with("smt:root:") {
-            return Some((key.to_vec(), value.to_vec()));
-        }
-        
-        // Skip other SMT internal keys (nodes, etc.)
-        if key_str.starts_with("smt:") {
-            return None;
-        }
-        
+
         // Skip internal system keys
         if key_str.starts_with("__INTERNAL/") {
             return None;
@@ -896,57 +886,14 @@ impl SnapshotManager {
                 applied_keys, interval.start_height, interval.end_height
             );
 
-            // Use the expected_root that was already downloaded and parsed by the fetcher task
-            let expected_root = &diff_data.expected_root;
-
-            // Store stateroot in database
-            let root_key = format!("{}:{}", "smt:root:", interval.end_height).into_bytes();
-            db.put(&root_key, &expected_root)?;
-
-            // Verify the state root by computing it locally
-            info!(
-                "Verifying state root for blocks {}-{}",
-                interval.start_height, interval.end_height
-            );
-
-            // Instead of computing the state root, we'll just verify that the expected root exists in the database
-            let root_key = format!("{}:{}", "smt:root:", interval.end_height).into_bytes();
-            let stored_root = match db.get(&root_key)? {
-                Some(root) => root,
-                None => {
-                    error!(
-                        "State root not found in database for height {}",
-                        interval.end_height
-                    );
-                    return Err(anyhow!(
-                        "State root not found in database for height {}",
-                        interval.end_height
-                    ));
-                }
-            };
-
-            // Compare the stored root with the expected root
-            if stored_root == *expected_root {
-                info!(
-                    "State root verification successful for blocks {}-{}",
-                    interval.start_height, interval.end_height
-                );
-            } else {
-                error!(
-                    "State root verification failed for blocks {}-{}!",
-                    interval.start_height, interval.end_height
-                );
-                error!("Expected: {}", hex::encode(expected_root));
-                error!("Stored: {}", hex::encode(&stored_root));
-                return Err(anyhow!(
-                    "State root verification failed for blocks {}-{}",
-                    interval.start_height,
-                    interval.end_height
-                ));
-            }
-
-            // We've already verified the state root by comparing it with what's in the database
-            // No need to calculate it again
+            // The snapshot file's expected_root field is recorded in the
+            // SnapshotMetadata for the interval but is no longer cross-checked
+            // against an in-database state root — metashrew no longer computes
+            // or stores any state root (the SMT was removed; future per-table
+            // root checks live inside the WASM indexer). Previously this
+            // block wrote `smt:root:{height}` and re-read it for comparison;
+            // both operations are now no-ops against the on-disk schema.
+            let _expected_root = &diff_data.expected_root;
 
             // Update current height
             current_height = interval.end_height;

@@ -216,13 +216,12 @@ async fn test_reorg_rollback_works() -> Result<()> {
     info!("\n--- Phase 4: Verify which blocks are stored ---");
 
     // Check what block hashes are actually stored
-    use metashrew_runtime::smt::SMTHelper;
-    let smt_helper = SMTHelper::new(shared_storage.clone());
+    use metashrew_runtime::chain_entries::get_at_height;
 
     // Get stored block hashes at height 3, 4, 5
-    let stored_hash_3 = smt_helper.get_at_height(&"/block-hashes/3".as_bytes().to_vec(), 5)?;
-    let stored_hash_4 = smt_helper.get_at_height(&"/block-hashes/4".as_bytes().to_vec(), 5)?;
-    let stored_hash_5 = smt_helper.get_at_height(&"/block-hashes/5".as_bytes().to_vec(), 5)?;
+    let stored_hash_3 = get_at_height(&shared_storage, &"/block-hashes/3".as_bytes().to_vec(), 5)?;
+    let stored_hash_4 = get_at_height(&shared_storage, &"/block-hashes/4".as_bytes().to_vec(), 5)?;
+    let stored_hash_5 = get_at_height(&shared_storage, &"/block-hashes/5".as_bytes().to_vec(), 5)?;
 
     // Convert stored hashes to hex for comparison
     let chain_a_hash_3 = chain_a.get_block(3).unwrap().block_hash();

@@ -297,27 +297,10 @@ where
     ) -> SyncResult<AtomicBlockResult> {
         // No external lock needed - MetashrewRuntime handles internal synchronization
         self.runtime.process_block_atomic(height, block_data, block_hash).await.map(|r| AtomicBlockResult {
-            state_root: r.state_root,
             batch_data: r.batch_data,
             height: r.height,
             block_hash: r.block_hash,
         }).map_err(|e| SyncError::Runtime(e.to_string()))
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        // Briefly lock to get DB clone, then release for concurrent access
-        let db = {
-            let context = self.runtime.context.read().unwrap();
-            context.db.clone()
-        };
-        let smt_helper = metashrew_runtime::smt::SMTHelper::new(db);
-        match smt_helper.get_smt_root_at_height(height) {
-            Ok(root) => Ok(root.to_vec()),
-            Err(e) => Err(SyncError::Runtime(format!(
-                "Failed to get state root for height {}: {}",
-                height, e
-            ))),
-        }
     }
 
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {

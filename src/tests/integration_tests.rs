@@ -7,23 +7,19 @@ use crate::block_builder::ChainBuilder;
 use crate::test_utils::TestConfig;
 use anyhow::Result;
 use memshrew_runtime::MemStoreAdapter;
-use metashrew_runtime::smt::SMTHelper;
+use metashrew_runtime::chain_entries::get_at_height;
 use metashrew_support::utils;
 use std::collections::HashMap;
 
 // Helper functions for append-only store access
 fn get_blocktracker(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8>> {
-    let smt_helper = SMTHelper::new(adapter.clone());
     let key = b"/blocktracker".to_vec();
-    Ok(smt_helper
-        .get_at_height(&key, height)?
-        .unwrap_or_default())
+    Ok(get_at_height(adapter, &key, height)?.unwrap_or_default())
 }
 
 fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
-    let smt_helper = SMTHelper::new(adapter.clone());
     let key = format!("/blocks/{}", height).into_bytes();
-    Ok(smt_helper.get_at_height(&key, height)?)
+    Ok(get_at_height(adapter, &key, height)?)
 }
 
 /// Test complete indexing workflow - comprehensive E2E test

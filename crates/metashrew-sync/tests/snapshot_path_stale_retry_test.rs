@@ -63,8 +63,7 @@ use tokio::time::timeout;
 async fn warm_storage_to_tip(storage: &mut MockStorage, tip: u32) {
     for h in 1..=tip {
         let bh = vec![h as u8; 32];
-        let sr = vec![h as u8; 32];
-        storage.commit_atomic(h, &bh, &sr, &[]).await.unwrap();
+        storage.commit_atomic(h, &bh, &[]).await.unwrap();
     }
 }
 

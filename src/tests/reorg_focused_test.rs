@@ -18,7 +18,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use log::info;
 use memshrew_runtime::MemStoreAdapter;
-use metashrew_runtime::smt::SMTHelper;
+use metashrew_runtime::chain_entries::get_at_height;
 use metashrew_sync::{
     adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip,
     SyncConfig, SyncEngine, SyncResult,
@@ -95,15 +95,13 @@ impl BitcoinNodeAdapter for MockNode {
 }
 
 fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
-    let smt_helper = SMTHelper::new(adapter.clone());
     let key = format!("/blocks/{}", height).into_bytes();
-    smt_helper.get_at_height(&key, height)
+    get_at_height(adapter, &key, height)
 }
 
 fn get_blocktracker(adapter: &MemStoreAdapter, height: u32) -> Result<Vec<u8>> {
-    let smt_helper = SMTHelper::new(adapter.clone());
     let key = b"/blocktracker".to_vec();
-    smt_helper.get_at_height(&key, height).map(|opt| opt.unwrap_or_default())
+    get_at_height(adapter, &key, height).map(|opt| opt.unwrap_or_default())
 }
 
 /// Test 1: Simple reorg - shorter chain replaced by longer chain

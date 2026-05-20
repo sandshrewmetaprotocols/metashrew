@@ -1,14 +1,9 @@
-//! This module has been removed to eliminate code duplication.
-//! All SMT functionality now uses the generic, well-tested implementation
-//! from metashrew-runtime::smt::SMTHelper to ensure consistency between
-//! test and production environments.
+//! This module previously re-exported `metashrew_runtime::smt::SMTHelper` for
+//! backward compatibility. The SMT subsystem has been deleted from
+//! `metashrew-runtime` (v10 cleanup: the SMT was a no-op in the hot path and
+//! the only callers stored state-root metadata that nothing consumed). Future
+//! per-table root calculation happens inside the WASM indexer, not here.
 //!
-//! Use metashrew_runtime::smt::SMTHelper instead.
-
-// Re-export constants that were used by the old implementation
-// These constants are no longer needed since we fixed the snapshot tracking
-// to use the correct constants directly from metashrew_runtime::smt
-
-// Re-export the generic SMT implementation for backward compatibility
-#[allow(unused_imports)]
-pub use metashrew_runtime::smt::SMTHelper;
+//! This file is kept as an empty module so external `mod smt_helper;`
+//! declarations don't break; remove the file and the `pub mod smt_helper;`
+//! line in `lib.rs` once no callers reference it.

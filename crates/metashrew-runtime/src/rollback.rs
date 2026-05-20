@@ -1,14 +1,20 @@
-//! SMT Rollback Trait and Implementation
+//! Append-only chain rollback for blockchain reorganizations.
 //!
-//! This module provides a trait for properly rolling back Sparse Merkle Tree (SMT) data
-//! during blockchain reorganizations. Both RocksDB and in-memory storage adapters must
-//! implement this trait to ensure consistent reorg handling.
+//! This module provides a trait that storage adapters implement so that the
+//! generic rollback driver can trim the v10 versioned-chain entries
+//! (`{key}/{i}` updates + `{key}/length` counters) above a target height,
+//! plus the per-height metadata records (`block_hash_*`,
+//! `/__INTERNAL/height-to-hash/*`) the sync framework writes alongside.
+//!
+//! Manifest-driven fast rollback is the production path; the full-scan
+//! fallback is used only when manifests are missing (legacy databases
+//! indexed before manifests existed).
 
 use anyhow::Result;
 use log::{debug, info, warn};
-use crate::smt::{
-    MANIFEST_PREFIX, SMT_ROOT_PREFIX, deserialize_key_manifest,
-    decode_chain_length, encode_chain_length, decode_value_entry,
+use crate::chain_entries::{
+    MANIFEST_PREFIX, decode_chain_length, decode_value_entry, deserialize_key_manifest,
+    encode_chain_length,
 };
 
 /// One write operation queued during rollback. Used by [`SmtRollback::apply_atomic`]
@@ -21,7 +27,12 @@ pub enum RollbackOp {
     Delete(Vec<u8>),
 }
 
-/// Trait for rolling back SMT data during blockchain reorganizations
+/// Trait for rolling back versioned-chain data during blockchain reorganizations.
+///
+/// Named `SmtRollback` for historical reasons (the v9 storage layer kept a
+/// Sparse Merkle Tree alongside the chains) — only the append-only chain
+/// rollback survives in v10. The trait name is preserved to avoid churn in
+/// downstream adapter impls; rename freely if/when those impls move.
 pub trait SmtRollback {
     /// Iterate over all keys in storage (streaming, memory-efficient)
     fn iter_keys<F>(&self, callback: F) -> Result<()>
@@ -51,45 +62,44 @@ pub trait SmtRollback {
     }
 }
 
-/// Parse height from a v10 SMT update entry.
+/// Parse the height field from a v10 chain entry.
 ///
-/// SMT keys are stored as: `base_key/index`.
-/// SMT values are stored as v10 binary entries: `[u32 LE height | value_bytes]`.
-///
-/// Returns `None` only if the entry is malformed (shorter than 4 bytes).
-fn parse_height_from_smt_value(value: &[u8]) -> Option<u32> {
+/// Chain entries are stored as `[u32 LE height | value bytes]`. Returns
+/// `None` only when the entry is malformed (shorter than 4 bytes).
+fn parse_height_from_chain_entry(value: &[u8]) -> Option<u32> {
     decode_value_entry(value).ok().map(|(h, _)| h)
 }
 
-/// Roll back SMT data to a specific height
+/// Roll back the append-only chain data to a specific height (slow path).
 ///
-/// This is the correct implementation that BOTH RocksDB and MemStore should use.
+/// Used as a fallback when `rollback_with_manifests` returns `false` because
+/// the per-height key manifests are missing for some block in the rollback
+/// range (typically databases indexed before manifests existed).
 ///
 /// The rollback process:
-/// 1. Delete metadata keys (block_hash_*, state_root_*, smt:root:*) for heights > rollback_height
-/// 2. Roll back append-only SMT data structures (keys with /length suffix)
-/// 3. This ensures all WASM-indexed data is properly cleaned up during reorgs
+/// 1. Delete per-height metadata keys (`block_hash_*`,
+///    `/__INTERNAL/height-to-hash/*`) for heights > rollback_height.
+/// 2. Trim every append-only chain (`{key}/length` + `{key}/{i}` entries)
+///    above the rollback height.
 ///
 /// Memory profile: collects all `/length` base-key paths in memory before
-/// processing. The previous implementation silently truncated this list at
-/// 100k entries, which produced an incomplete (and therefore divergent)
-/// rollback on any database with more than 100k tracked keys. The cap is
-/// removed; on extremely large databases the operator may briefly see high
-/// RSS during reorg, but the database stays consistent. The fast manifest
-/// path (`rollback_with_manifests`) is preferred for any non-genesis reorg.
+/// processing. On extremely large databases the operator may briefly see
+/// high RSS during reorg, but the database stays consistent. The fast
+/// manifest path (`rollback_with_manifests`) is preferred for any
+/// non-genesis reorg.
 pub fn rollback_smt_data<S: SmtRollback>(
     storage: &mut S,
     rollback_height: u32,
     current_height: u32,
 ) -> Result<()> {
-    info!("Starting SMT rollback from height {} to height {}", current_height, rollback_height);
+    info!("Starting chain-entry rollback from height {} to height {}", current_height, rollback_height);
 
     if rollback_height >= current_height {
         debug!("Rollback height {} >= current height {}, nothing to do", rollback_height, current_height);
         return Ok(());
     }
 
-    // --- Step 1: Single scan — collect metadata keys to delete and SMT base keys.
+    // --- Step 1: Single scan — collect metadata keys to delete and chain base keys.
     let length_suffix = b"/length";
     let mut metadata_keys_to_delete = Vec::new();
     let mut base_keys: Vec<Vec<u8>> = Vec::new();
@@ -98,10 +108,6 @@ pub fn rollback_smt_data<S: SmtRollback>(
         let key_str = String::from_utf8_lossy(key);
 
         let metadata_height = if let Some(stripped) = key_str.strip_prefix("block_hash_") {
-            stripped.parse::<u32>().ok()
-        } else if let Some(stripped) = key_str.strip_prefix("state_root_") {
-            stripped.parse::<u32>().ok()
-        } else if let Some(stripped) = key_str.strip_prefix("smt:root:") {
             stripped.parse::<u32>().ok()
         } else {
             None
@@ -132,14 +138,14 @@ pub fn rollback_smt_data<S: SmtRollback>(
     base_keys.sort_unstable();
     base_keys.dedup();
     info!(
-        "Collected {} unique SMT structures to process",
+        "Collected {} unique chain structures to process",
         base_keys.len()
     );
 
-    // Each SMT structure's read/modify/write ops commit atomically per
-    // structure. A crash between structures leaves earlier ones rolled back,
-    // later ones intact — all idempotent on retry.
-    let mut smt_structures_rolled_back = 0;
+    // Each chain's read/modify/write ops commit atomically per chain. A crash
+    // between chains leaves earlier ones rolled back, later ones intact — all
+    // idempotent on retry.
+    let mut chains_rolled_back = 0;
 
     for base_key in &base_keys {
         let mut length_key = base_key.clone();
@@ -159,11 +165,11 @@ pub fn rollback_smt_data<S: SmtRollback>(
             update_key.extend_from_slice(update_key_suffix.as_bytes());
 
             if let Some(update_data) = storage.get_value(&update_key)? {
-                if let Some(update_height) = parse_height_from_smt_value(&update_data) {
+                if let Some(update_height) = parse_height_from_chain_entry(&update_data) {
                     if update_height <= rollback_height {
                         valid_updates.push((i, update_data));
                     } else {
-                        debug!("Removing SMT update at height {} (> {})", update_height, rollback_height);
+                        debug!("Removing chain update at height {} (> {})", update_height, rollback_height);
                     }
                 }
             }
@@ -192,7 +198,7 @@ pub fn rollback_smt_data<S: SmtRollback>(
                 encode_chain_length(new_length).to_vec(),
             ));
             debug!(
-                "SMT structure {} compacted from {} to {} entries",
+                "Chain {} compacted from {} to {} entries",
                 String::from_utf8_lossy(base_key),
                 old_length,
                 new_length
@@ -200,25 +206,25 @@ pub fn rollback_smt_data<S: SmtRollback>(
         } else {
             ops.push(RollbackOp::Delete(length_key.clone()));
             debug!(
-                "SMT structure {} completely removed (no valid entries)",
+                "Chain {} completely removed (no valid entries)",
                 String::from_utf8_lossy(base_key)
             );
         }
 
         storage.apply_atomic(&ops)?;
-        smt_structures_rolled_back += 1;
+        chains_rolled_back += 1;
 
-        if smt_structures_rolled_back % 1000 == 0 {
+        if chains_rolled_back % 1000 == 0 {
             info!(
-                "Rolled back {} SMT structures so far...",
-                smt_structures_rolled_back
+                "Rolled back {} chains so far...",
+                chains_rolled_back
             );
         }
     }
 
     info!(
-        "Successfully rolled back {} SMT data structures to height {}",
-        smt_structures_rolled_back, rollback_height
+        "Successfully rolled back {} chains to height {}",
+        chains_rolled_back, rollback_height
     );
     Ok(())
 }
@@ -283,7 +289,7 @@ pub fn rollback_with_manifests<S: SmtRollback>(
                     let update_key =
                         [key.as_slice(), b"/", i.to_string().as_bytes()].concat();
                     if let Some(update_data) = storage.get_value(&update_key)? {
-                        if let Some(entry_height) = parse_height_from_smt_value(&update_data) {
+                        if let Some(entry_height) = parse_height_from_chain_entry(&update_data) {
                             if entry_height > rollback_height {
                                 ops.push(RollbackOp::Delete(update_key));
                                 new_length = i;
@@ -312,11 +318,7 @@ pub fn rollback_with_manifests<S: SmtRollback>(
         // atomic batch — so the manifest is never gone until the trims are
         // also committed.
         ops.push(RollbackOp::Delete(manifest_key));
-        ops.push(RollbackOp::Delete(
-            format!("{}{}", SMT_ROOT_PREFIX, h).into_bytes(),
-        ));
         ops.push(RollbackOp::Delete(format!("block_hash_{}", h).into_bytes()));
-        ops.push(RollbackOp::Delete(format!("state_root_{}", h).into_bytes()));
         // Sync-framework records written by `__flush` (atomic block-commit
         // path) live under different key names — clear them too.
         ops.push(RollbackOp::Delete(
@@ -379,9 +381,6 @@ mod tests {
         storage.data.insert(b"block_hash_3".to_vec(), b"hash3".to_vec());
         storage.data.insert(b"block_hash_4".to_vec(), b"hash4".to_vec());
         storage.data.insert(b"block_hash_5".to_vec(), b"hash5".to_vec());
-        storage.data.insert(b"smt:root:3".to_vec(), b"root3".to_vec());
-        storage.data.insert(b"smt:root:4".to_vec(), b"root4".to_vec());
-        storage.data.insert(b"smt:root:5".to_vec(), b"root5".to_vec());
 
         // Rollback to height 3
         rollback_smt_data(&mut storage, 3, 5).unwrap();
@@ -390,28 +389,24 @@ mod tests {
         assert!(storage.data.contains_key(b"block_hash_3".as_ref()));
         assert!(!storage.data.contains_key(b"block_hash_4".as_ref()));
         assert!(!storage.data.contains_key(b"block_hash_5".as_ref()));
-        assert!(storage.data.contains_key(b"smt:root:3".as_ref()));
-        assert!(!storage.data.contains_key(b"smt:root:4".as_ref()));
-        assert!(!storage.data.contains_key(b"smt:root:5".as_ref()));
     }
 
     #[test]
-    fn test_parse_height_from_smt_value() {
-        use crate::smt::encode_value_entry;
+    fn test_parse_height_from_chain_entry() {
+        use crate::chain_entries::encode_value_entry;
         let entry_123 = encode_value_entry(123, b"data");
-        assert_eq!(parse_height_from_smt_value(&entry_123), Some(123));
+        assert_eq!(parse_height_from_chain_entry(&entry_123), Some(123));
         let entry_0 = encode_value_entry(0, b"data");
-        assert_eq!(parse_height_from_smt_value(&entry_0), Some(0));
+        assert_eq!(parse_height_from_chain_entry(&entry_0), Some(0));
         // Entries shorter than the 4-byte header are malformed → None.
-        assert_eq!(parse_height_from_smt_value(b"abc"), None);
-        assert_eq!(parse_height_from_smt_value(b""), None);
+        assert_eq!(parse_height_from_chain_entry(b"abc"), None);
+        assert_eq!(parse_height_from_chain_entry(b""), None);
     }
 
     #[test]
     fn test_manifest_rollback_basic() {
-        use crate::smt::{
+        use crate::chain_entries::{
             encode_chain_length, encode_value_entry, serialize_key_manifest, MANIFEST_PREFIX,
-            SMT_ROOT_PREFIX,
         };
 
         let mut storage = MockStorage {
@@ -426,7 +421,6 @@ mod tests {
         storage.data.insert(b"key_b/0".to_vec(), encode_value_entry(1, b"bb"));
         let manifest1 = serialize_key_manifest(&[b"key_a", b"key_b"]);
         storage.data.insert(format!("{}1", MANIFEST_PREFIX).into_bytes(), manifest1);
-        storage.data.insert(format!("{}1", SMT_ROOT_PREFIX).into_bytes(), b"root1".to_vec());
         storage.data.insert(b"block_hash_1".to_vec(), b"hash1".to_vec());
 
         // Block 2: modifies key_a, key_c
@@ -436,7 +430,6 @@ mod tests {
         storage.data.insert(b"key_c/0".to_vec(), encode_value_entry(2, b"cc"));
         let manifest2 = serialize_key_manifest(&[b"key_a", b"key_c"]);
         storage.data.insert(format!("{}2", MANIFEST_PREFIX).into_bytes(), manifest2);
-        storage.data.insert(format!("{}2", SMT_ROOT_PREFIX).into_bytes(), b"root2".to_vec());
         storage.data.insert(b"block_hash_2".to_vec(), b"hash2".to_vec());
 
         // Block 3: modifies key_b
@@ -444,7 +437,6 @@ mod tests {
         storage.data.insert(b"key_b/1".to_vec(), encode_value_entry(3, b"bb3"));
         let manifest3 = serialize_key_manifest(&[b"key_b"]);
         storage.data.insert(format!("{}3", MANIFEST_PREFIX).into_bytes(), manifest3);
-        storage.data.insert(format!("{}3", SMT_ROOT_PREFIX).into_bytes(), b"root3".to_vec());
         storage.data.insert(b"block_hash_3".to_vec(), b"hash3".to_vec());
 
         // Rollback to height 1 (undo blocks 2 and 3)
@@ -472,13 +464,10 @@ mod tests {
         assert!(!storage.data.contains_key(b"key_c/0".as_ref()));
 
         // Metadata for heights 2 and 3 should be gone
-        assert!(!storage.data.contains_key(format!("{}2", SMT_ROOT_PREFIX).as_bytes()));
-        assert!(!storage.data.contains_key(format!("{}3", SMT_ROOT_PREFIX).as_bytes()));
         assert!(!storage.data.contains_key(b"block_hash_2".as_ref()));
         assert!(!storage.data.contains_key(b"block_hash_3".as_ref()));
 
         // Height 1 metadata should remain
-        assert!(storage.data.contains_key(format!("{}1", SMT_ROOT_PREFIX).as_bytes()));
         assert!(storage.data.contains_key(b"block_hash_1".as_ref()));
 
         // Manifests for 2 and 3 should be deleted

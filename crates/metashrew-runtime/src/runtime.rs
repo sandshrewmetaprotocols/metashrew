@@ -56,10 +56,6 @@
 //!     // Process a block
 //!     runtime.process_block(height, block_data).await?;
 //!
-//!     // Query the resulting state
-//!     let state_root = runtime.get_state_root(height).await?;
-//!     println!("State root: {}", hex::encode(state_root));
-//!
 //!     Ok(())
 //! }
 //! ```
@@ -75,7 +71,6 @@ use std::sync::RwLock;
 use wasmtime::{Caller, Linker, Store, StoreLimits, StoreLimitsBuilder};
 
 use crate::context::MetashrewRuntimeContext;
-use crate::smt::SMTHelper;
 use crate::traits::{BatchLike, KeyValueStoreLike};
 
 /// Internal key used to store the current blockchain tip height
@@ -1303,19 +1298,12 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             );
 
             let mut db = self.context.read().unwrap().db.clone();
-            let mut smt_helper = SMTHelper::new(db.clone());
             let mut batch = db.create_batch();
 
-            // Delete orphaned SMT roots
-            for h in (context_height..=db_tip_height).rev() {
-                let root_key = format!("{}{}", crate::smt::SMT_ROOT_PREFIX, h).into_bytes();
-                batch.delete(&root_key);
-            }
+            // Rollback all chains to the target height.
+            crate::chain_entries::rollback_all_keys_to_batch(&db, &mut batch, target_height)?;
 
-            // Rollback state to the target height
-            smt_helper.rollback_to_height_batched(&mut batch, target_height)?;
-
-            // Update the tip height
+            // Update the runtime-side tip pointer.
             batch.put(
                 &TIP_HEIGHT_KEY.as_bytes().to_vec(),
                 &target_height.to_le_bytes(),
@@ -1340,8 +1328,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
             let guard = context.read().unwrap();
             guard.db.clone()
         };
-        let smt_helper = SMTHelper::new(db);
-        match smt_helper.get_at_height(key, height) {
+        match crate::chain_entries::get_at_height(&db, key, height) {
             Ok(Some(value)) => Ok(value),
             Ok(None) => Ok(Vec::new()),
             Err(e) => Err(anyhow!("Append-only query error: {}", e)),
@@ -2156,23 +2143,27 @@ pub async fn setup_linker_view(
                         binding.read().unwrap().state.store(1, std::sync::atomic::Ordering::SeqCst);
                         let mut ctx = binding.write().unwrap();
 
-                        // Use append-only store for preview operations with batching
+                        // Use append-only store for preview operations with batching.
+                        // Preview writes to an isolated DB clone, so we commit the
+                        // batch immediately (no atomic-commit slot).
                         let mut batch = ctx.db.create_batch();
-                        let smt_helper = crate::smt::SMTHelper::new(ctx.db.clone());
-                        
-                        // Write all operations to a single batch for atomicity
+
                         for (k, v) in decoded.list.iter().tuples() {
                             let k_owned = <Vec<u8> as Clone>::clone(k);
                             let v_owned = <Vec<u8> as Clone>::clone(v);
 
-                            // Add to batch using append-only logic
-                            if let Err(_) = smt_helper.put_to_batch(&mut batch, &k_owned, &v_owned, height) {
+                            if let Err(_) = crate::chain_entries::append_value_to_batch(
+                                &ctx.db,
+                                &mut batch,
+                                &k_owned,
+                                &v_owned,
+                                height,
+                            ) {
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
                         }
 
-                        // Write the entire batch atomically
                         if let Err(_) = ctx.db.write(batch) {
                             caller.data_mut().had_failure = true;
                             return;
@@ -2337,7 +2328,6 @@ pub async fn setup_linker_view(
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
 
-                    let mut batched_smt = crate::smt::BatchedSMTHelper::new(db.clone());
                     for (k, v) in &key_values {
                         db.track_kv_update(k.clone(), v.clone());
                     }
@@ -2351,16 +2341,17 @@ pub async fn setup_linker_view(
                     // all-or-nothing.
                     //
                     // LEGACY PATH (`process_block()` no-block-hash, tests): when the slot
-                    // is `None`, fall through to the old "build and write immediately"
-                    // helper. Preserves behavior for non-atomic callers.
+                    // is `None`, fall through to the "build and write immediately" helper.
+                    // Preserves behavior for non-atomic callers.
                     let armed_for_atomic = pending_slot.lock().unwrap().is_some();
                     if armed_for_atomic {
-                        match batched_smt.build_state_root_batch_unwritten(
+                        match crate::chain_entries::build_block_write_batch(
+                            &db,
                             height,
                             &key_values,
                             &block_hash,
                         ) {
-                            Ok((_state_root, batch)) => {
+                            Ok(batch) => {
                                 use crate::traits::BatchLike;
                                 let bytes = batch.to_bytes();
                                 *pending_slot.lock().unwrap() = Some(bytes);
@@ -2377,14 +2368,14 @@ pub async fn setup_linker_view(
                                 return;
                             }
                         }
-                        batched_smt.clear_caches();
                     } else {
-                        match batched_smt.calculate_and_store_state_root_batched(
+                        match crate::chain_entries::write_block_batch(
+                            &mut db,
                             height,
                             &key_values,
                             &block_hash,
                         ) {
-                            Ok(_) => {},
+                            Ok(()) => {}
                             Err(e) => {
                                 log::error!(
                                     "flush atomic write failed at height {}: {:?} \
@@ -2438,8 +2429,7 @@ pub async fn setup_linker_view(
                         Ok(key_vec) => {
                             let lookup = {
                                 let target_height = if height > 0 { height - 1 } else { 0 };
-                                let smt_helper = crate::smt::SMTHelper::new(db);
-                                match smt_helper.get_at_height(&key_vec, target_height) {
+                                match crate::chain_entries::get_at_height(&db, &key_vec, target_height) {
                                     Ok(Some(v)) => Ok(v),
                                     Ok(None) => Ok(Vec::new()),
                                     Err(e) => Err(anyhow::anyhow!("Append-only query error: {}", e)),
@@ -2492,8 +2482,7 @@ pub async fn setup_linker_view(
                     match key_vec_result {
                         Ok(key_vec) => {
                             let target_height = if height > 0 { height - 1 } else { 0 };
-                            let smt_helper = crate::smt::SMTHelper::new(db);
-                            match smt_helper.get_at_height(&key_vec, target_height) {
+                            match crate::chain_entries::get_at_height(&db, &key_vec, target_height) {
                                 Ok(Some(v)) => v.len() as i32,
                                 _ => 0,
                             }
@@ -2528,33 +2517,6 @@ pub async fn setup_linker_view(
         Ok(Vec::new())
     }
 
-    /// Get the current state root (merkle root of entire state)
-    pub async fn get_current_state_root(
-        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
-    ) -> Result<[u8; 32]> {
-        let db = {
-            let guard = context.read().unwrap();
-            guard.db.clone()
-        };
-
-        let smt_helper = SMTHelper::new(db);
-        smt_helper.get_current_state_root()
-    }
-
-    /// Get the state root at a specific height
-    pub async fn get_state_root_at_height(
-        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
-        height: u32,
-    ) -> Result<[u8; 32]> {
-        let db = {
-            let guard = context.read().unwrap();
-            guard.db.clone()
-        };
-
-        let smt_helper = SMTHelper::new(db);
-        smt_helper.get_smt_root_at_height(height)
-    }
-
     /// Perform a complete rollback to a specific height
     pub fn rollback_to_height(
         _context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
@@ -2574,19 +2536,6 @@ pub async fn setup_linker_view(
         // For now, return an empty list
         // In a full implementation, we would scan for all heights where this key was modified
         Ok(Vec::new())
-    }
-
-    /// Calculate the state root for the current state
-    /// This is used by the atomic block processing to get the state root after execution
-    pub async fn calculate_state_root(&self) -> Result<Vec<u8>> {
-        let db = {
-            let guard = self.context.read().unwrap();
-            guard.db.clone()
-        };
-
-        let smt_helper = SMTHelper::new(db);
-        let state_root = smt_helper.get_current_state_root()?;
-        Ok(state_root.to_vec())
     }
 
     /// Get the accumulated database operations as a serialized batch
@@ -2684,30 +2633,26 @@ pub async fn setup_linker_view(
             }
         };
 
-        // Calculate the state root and batch data before memory refresh.
-        // The batch_data is the SERIALIZED RocksDB-WriteBatch bytes that
-        // __flush built and stashed in `pending_atomic_batch`. We DISARM
-        // the slot here (set to None) regardless of success/failure so the
-        // retry loop in `Sync::process_block` starts each attempt from a
-        // clean slate — process_block_atomic re-arms it on the next call.
-        let (state_root, batch_data) = match execution_result {
+        // Extract the batch data before memory refresh. The batch_data is the
+        // SERIALIZED RocksDB-WriteBatch bytes that __flush built and stashed in
+        // `pending_atomic_batch`. We DISARM the slot here (set to None) regardless
+        // of success/failure so the retry loop in `Sync::process_block` starts
+        // each attempt from a clean slate — process_block_atomic re-arms it on
+        // the next call.
+        let batch_data = match execution_result {
             Ok(_) => {
-                let state_root = self.calculate_state_root().await?;
-                // Extract and disarm the pending atomic batch slot.
                 let batch_data = {
                     let mut slot = pending_slot.lock().unwrap();
                     slot.take().unwrap_or_default()
                 };
 
-                // Log the state root for atomic block processing
                 log::info!(
-                    "processed block {} atomically, state root: {} ({} batch bytes)",
+                    "processed block {} atomically ({} batch bytes)",
                     height,
-                    hex::encode(&state_root),
                     batch_data.len()
                 );
 
-                (state_root, batch_data)
+                batch_data
             }
             Err(e) => {
                 // Disarm slot on failure so the next retry starts clean.
@@ -2732,7 +2677,6 @@ pub async fn setup_linker_view(
 
         // Return the atomic result
         Ok(crate::traits::AtomicBlockResult {
-            state_root,
             batch_data,
             height,
             block_hash: block_hash.to_vec(),
@@ -2758,11 +2702,5 @@ pub async fn setup_linker_view(
 
         // Execute the block processing - run() now handles memory refresh automatically
         self.run().await
-    }
-
-    /// Get the state root for a specific height
-    pub async fn get_state_root(&self, height: u32) -> Result<Vec<u8>> {
-        let state_root = Self::get_state_root_at_height(self.context.clone(), height).await?;
-        Ok(state_root.to_vec())
     }
 }

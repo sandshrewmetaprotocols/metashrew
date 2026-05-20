@@ -129,7 +129,7 @@ where
             }
         };
 
-        let mut storage = self.storage.write().await;
+        let storage = self.storage.read().await;
         let indexed_height = storage.get_indexed_height().await.unwrap_or(0);
         let start_height = if self.config.start_block > 0 && self.config.start_block > indexed_height {
             self.config.start_block
@@ -144,14 +144,6 @@ where
                 "startup-heal: post-heal indexed_height ({}) != healed_tip ({}); using indexed_height",
                 indexed_height, healed_tip
             );
-        }
-
-        if indexed_height == 0 && self.config.start_block > 0 {
-            let prev_height = self.config.start_block.saturating_sub(1);
-            if let Ok(None) = storage.get_state_root(prev_height).await {
-                let empty_state_root = vec![0u8; 32];
-                storage.store_state_root(prev_height, &empty_state_root).await.unwrap();
-            }
         }
 
         self.current_height.store(start_height, Ordering::SeqCst);
@@ -412,7 +404,7 @@ where
                     let commit_res = {
                         let mut storage = self.storage.write().await;
                         storage
-                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
+                            .commit_atomic(height, &result.block_hash, &result.batch_data)
                             .await
                     };
                     match commit_res {
@@ -532,9 +524,6 @@ where
                     storage
                         .store_block_hash(best_snapshot.height, &best_snapshot.block_hash)
                         .await?;
-                    storage
-                        .store_state_root(best_snapshot.height, &best_snapshot.state_root)
-                        .await?;
                 }
 
                 info!(
@@ -600,7 +589,7 @@ where
                     let commit_res = {
                         let mut storage = self.storage.write().await;
                         storage
-                            .commit_atomic(height, &result.block_hash, &result.state_root, &result.batch_data)
+                            .commit_atomic(height, &result.block_hash, &result.batch_data)
                             .await
                     };
                     match commit_res {
@@ -1110,23 +1099,6 @@ where
             Some(hash) => Ok(format!("0x{}", hex::encode(hash))),
             None => Err(SyncError::Storage(format!(
                 "Block hash not found for height {}",
-                height
-            ))),
-        }
-    }
-
-    async fn metashrew_stateroot(&self, height: String) -> SyncResult<String> {
-        let height = if height == "latest" {
-            self.current_height.load(Ordering::SeqCst).saturating_sub(1)
-        } else {
-            parse_height_string(&height)?
-        };
-
-        let storage = self.storage.read().await;
-        match storage.get_state_root(height).await? {
-            Some(root) => Ok(format!("0x{}", hex::encode(root))),
-            None => Err(SyncError::Storage(format!(
-                "State root not found for height {}",
                 height
             ))),
         }

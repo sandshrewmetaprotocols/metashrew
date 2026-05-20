@@ -111,28 +111,27 @@ pub struct MetashrewRuntimeContext<T: KeyValueStoreLike> {
     pub state: std::sync::atomic::AtomicU32,
 
     /// Block hash for the current block, set by the sync framework before
-    /// WASM execution. Bundled into the same atomic batch as SMT writes so
-    /// that the indexer's height pointer, state-root marker, manifest, and
-    /// block-hash record either all commit or all abort. See
-    /// `BatchedSMTHelper::calculate_and_store_state_root_batched`.
+    /// WASM execution. Bundled into the same atomic batch as the chain
+    /// writes so that the indexer's height pointer, manifest, and block-hash
+    /// record either all commit or all abort.
     pub current_block_hash: Vec<u8>,
 
     /// Single-batch atomic-commit slot.
     ///
     /// When `Some`, the WASM `__flush` host function builds the per-block
-    /// batch (SMT updates, length counters, state-root marker, manifest,
-    /// runtime tip pointer, block-hash record) into a `WriteBatch`, then
-    /// instead of calling `storage.write(batch)` and committing immediately,
-    /// it serializes the batch bytes via `BatchLike::to_bytes()` and stashes
-    /// them HERE for `process_block_atomic` to extract and package into
+    /// batch (chain-entry writes, length counters, manifest, runtime tip
+    /// pointer) into a `WriteBatch`, then instead of calling
+    /// `storage.write(batch)` and committing immediately, serializes the
+    /// batch bytes via `BatchLike::to_bytes()` and stashes them HERE for
+    /// `process_block_atomic` to extract and package into
     /// `AtomicBlockResult::batch_data`.
     ///
     /// The storage-adapter's `commit_atomic` then reconstructs the batch,
-    /// APPENDS the indexed-height / block-hash / state-root metadata writes
-    /// into the SAME batch, and submits exactly ONE `db.write_opt(batch,
-    /// sync=true)` — true all-or-nothing atomicity across the WASM-side
-    /// writes AND the sync-framework-side metadata writes. No more
-    /// two-phase commit. No more partial state on crash.
+    /// APPENDS the indexed-height / block-hash metadata writes into the
+    /// SAME batch, and submits exactly ONE `db.write_opt(batch, sync=true)`
+    /// — true all-or-nothing atomicity across the WASM-side writes AND the
+    /// sync-framework-side metadata writes. No more two-phase commit. No
+    /// more partial state on crash.
     ///
     /// When `None`, `__flush` falls back to the legacy "write batch
     /// immediately" path used by the non-atomic `process_block()` call.

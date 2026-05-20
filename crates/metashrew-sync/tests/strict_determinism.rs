@@ -86,12 +86,6 @@ impl StorageAdapter for FaultyStorage {
     async fn get_block_hash(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
         self.inner.get_block_hash(height).await
     }
-    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
-        self.inner.store_state_root(height, root).await
-    }
-    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        self.inner.get_state_root(height).await
-    }
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         self.inner.rollback_to_height(height).await
     }
@@ -106,7 +100,6 @@ impl StorageAdapter for FaultyStorage {
         &mut self,
         height: u32,
         block_hash: &[u8],
-        state_root: &[u8],
         _batch_data: &[u8],
     ) -> SyncResult<()> {
         {
@@ -126,7 +119,7 @@ impl StorageAdapter for FaultyStorage {
         }
         // Delegate to the in-memory atomic commit — same strict-in-order
         // semantics the production RocksDB adapter has.
-        self.inner.commit_atomic(height, block_hash, state_root, _batch_data).await
+        self.inner.commit_atomic(height, block_hash, _batch_data).await
     }
 }
 
@@ -139,12 +132,12 @@ async fn retry_commit<S: StorageAdapter + ?Sized>(
     storage: &mut S,
     height: u32,
     block_hash: &[u8],
-    state_root: &[u8],
+    _state_root: &[u8],
     max_retries: u32,
 ) -> Result<u32, SyncError> {
     let mut last_err: Option<SyncError> = None;
     for attempt in 1..=max_retries {
-        match storage.commit_atomic(height, block_hash, state_root, &[]).await {
+        match storage.commit_atomic(height, block_hash, &[]).await {
             Ok(()) => return Ok(attempt),
             Err(e) => {
                 last_err = Some(e);
@@ -167,7 +160,7 @@ async fn retry_commit_forever<S: StorageAdapter + ?Sized>(
     storage: &mut S,
     height: u32,
     block_hash: &[u8],
-    state_root: &[u8],
+    _state_root: &[u8],
     use_real_backoff: bool,
 ) -> u32 {
     let mut attempt: u32 = 0;
@@ -179,7 +172,7 @@ async fn retry_commit_forever<S: StorageAdapter + ?Sized>(
                 tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
             }
         }
-        match storage.commit_atomic(height, block_hash, state_root, &[]).await {
+        match storage.commit_atomic(height, block_hash, &[]).await {
             Ok(()) => return attempt,
             Err(_e) => {
                 // Tight loop when backoff is disabled — we're testing
@@ -202,7 +195,7 @@ async fn commit_atomic_rejects_out_of_order() {
     // Fresh DB — first commit at height 100 is allowed (matches the
     // configured-start-block scenario in production).
     storage
-        .commit_atomic(100, &[0xaa; 32], &[0xbb; 32], &[])
+        .commit_atomic(100, &[0xaa; 32], &[])
         .await
         .expect("first commit on fresh DB must succeed");
     assert_eq!(storage.get_indexed_height().await.unwrap(), 100);
@@ -210,21 +203,21 @@ async fn commit_atomic_rejects_out_of_order() {
     // Next commit MUST be exactly 101.
     assert!(
         storage
-            .commit_atomic(102, &[0xcc; 32], &[0xdd; 32], &[])
+            .commit_atomic(102, &[0xcc; 32], &[])
             .await
             .is_err(),
         "commit_atomic must reject height 102 when tip is 100"
     );
     assert!(
         storage
-            .commit_atomic(100, &[0xcc; 32], &[0xdd; 32], &[])
+            .commit_atomic(100, &[0xcc; 32], &[])
             .await
             .is_err(),
         "commit_atomic must reject re-writing the current tip height"
     );
     assert!(
         storage
-            .commit_atomic(50, &[0xcc; 32], &[0xdd; 32], &[])
+            .commit_atomic(50, &[0xcc; 32], &[])
             .await
             .is_err(),
         "commit_atomic must reject committing below the current tip"
@@ -243,7 +236,7 @@ async fn commit_atomic_rejects_out_of_order() {
 
     // The correct next height succeeds.
     storage
-        .commit_atomic(101, &[0xee; 32], &[0xff; 32], &[])
+        .commit_atomic(101, &[0xee; 32], &[])
         .await
         .expect("in-order commit at tip+1 must succeed");
     assert_eq!(storage.get_indexed_height().await.unwrap(), 101);
@@ -331,10 +324,6 @@ async fn retry_on_commit_failure_is_bit_for_bit_idempotent() {
         let b_hash = baseline.get_block_hash(h).await.unwrap();
         let f_hash = faulty.get_block_hash(h).await.unwrap();
         assert_eq!(b_hash, f_hash, "block hash mismatch at height {}", h);
-
-        let b_root = baseline.get_state_root(h).await.unwrap();
-        let f_root = faulty.get_state_root(h).await.unwrap();
-        assert_eq!(b_root, f_root, "state root mismatch at height {}", h);
     }
 
     // 4. Sanity-check the fault-injection accounting: 3 attempts per block
@@ -371,12 +360,10 @@ async fn exhausted_retry_leaves_storage_at_previous_tip() {
     .await;
     assert!(res.is_err(), "exhausted retry budget must return an error");
 
-    // Storage is at the fresh-DB state: no block-hash record, no state-root
-    // record, height still 0. The user's invariant: "either the block is
-    // committed or it isn't."
+    // Storage is at the fresh-DB state: no block-hash record, height still 0.
+    // The user's invariant: "either the block is committed or it isn't."
     assert_eq!(storage.get_indexed_height().await.unwrap(), 0);
     assert!(storage.get_block_hash(h).await.unwrap().is_none());
-    assert!(storage.get_state_root(h).await.unwrap().is_none());
 
     // We attempted exactly `budget` times.
     assert_eq!(storage.attempts().await, 3);
@@ -384,28 +371,27 @@ async fn exhausted_retry_leaves_storage_at_previous_tip() {
 
 /// `commit_atomic` is observably all-or-nothing under contention: a caller
 /// that issues an out-of-order commit cannot leave behind a partial
-/// block-hash or state-root record that a subsequent in-order caller would
-/// then trip over.
+/// block-hash record that a subsequent in-order caller would then trip over.
 #[tokio::test]
 async fn rejected_commit_leaves_no_partial_writes() {
     let mut storage = MockStorage::new();
     // Establish tip at 100.
     storage
-        .commit_atomic(100, &[1u8; 32], &[2u8; 32], &[])
+        .commit_atomic(100, &[1u8; 32], &[])
         .await
         .unwrap();
 
     // Try a series of bogus out-of-order commits.
     for bad_h in [99, 100, 102, 105, 200] {
         let _ = storage
-            .commit_atomic(bad_h, &[0xff; 32], &[0xff; 32], &[])
+            .commit_atomic(bad_h, &[0xff; 32], &[])
             .await;
     }
 
     // The legit in-order next commit succeeds, and crucially the storage
     // never contains any of the bogus values.
     storage
-        .commit_atomic(101, &[3u8; 32], &[4u8; 32], &[])
+        .commit_atomic(101, &[3u8; 32], &[])
         .await
         .unwrap();
 
@@ -470,7 +456,7 @@ async fn production_retry_loop_eventually_succeeds_after_20_failures() {
 
     // Baseline: zero faults, single attempt.
     let mut baseline = MockStorage::new();
-    baseline.commit_atomic(HEIGHT, &block_hash, &state_root, &[]).await.unwrap();
+    baseline.commit_atomic(HEIGHT, &block_hash, &[]).await.unwrap();
 
     // Faulty: 20 injected failures before the commit succeeds.
     let mut faulty = FaultyStorage::new(20);
@@ -495,10 +481,6 @@ async fn production_retry_loop_eventually_succeeds_after_20_failures() {
     assert_eq!(
         baseline.get_block_hash(HEIGHT).await.unwrap(),
         faulty.get_block_hash(HEIGHT).await.unwrap(),
-    );
-    assert_eq!(
-        baseline.get_state_root(HEIGHT).await.unwrap(),
-        faulty.get_state_root(HEIGHT).await.unwrap(),
     );
 }
 

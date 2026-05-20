@@ -596,10 +596,6 @@ where
                     let height = params_owned.get(0).and_then(|v| v.as_u64()).unwrap_or_default() as u32;
                     state_clone.sync_engine.read().await.metashrew_getblockhash(height).await
                 }
-                "metashrew_stateroot" => {
-                    let height = params_owned.get(0).and_then(|v| v.as_str()).unwrap_or("latest").to_string();
-                    state_clone.sync_engine.read().await.metashrew_stateroot(height).await
-                }
                 "metashrew_snapshot" => state_clone.sync_engine.read().await.metashrew_snapshot().await.map(|v| v.to_string()),
                 _ => Err(anyhow::anyhow!("Method not found").into()),
             }

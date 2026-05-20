@@ -11,7 +11,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use log::{info, warn};
 use memshrew_runtime::MemStoreAdapter;
-use metashrew_runtime::smt::SMTHelper;
+use metashrew_runtime::chain_entries::get_at_height;
 use metashrew_sync::{
     adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip, RuntimeAdapter, AtomicBlockResult, ViewCall, PreviewCall, ViewResult, SyncConfig, SyncEngine, SyncError, SyncResult, RuntimeStats,
 };
@@ -103,9 +103,8 @@ impl BitcoinNodeAdapter for RetryingMockNode {
 }
 
 fn get_indexed_block(adapter: &MemStoreAdapter, height: u32) -> Result<Option<Vec<u8>>> {
-    let smt_helper = SMTHelper::new(adapter.clone());
     let key = format!("/blocks/{}", height).into_bytes();
-    smt_helper.get_at_height(&key, height)
+    get_at_height(adapter, &key, height)
 }
 
 #[tokio::test]
@@ -306,10 +305,6 @@ impl<T: RuntimeAdapter + Clone + Send + Sync> RuntimeAdapter for CountingRuntime
         self.inner.process_block_atomic(height, block_data, block_hash).await
     }
 
-    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        self.inner.get_state_root(height).await
-    }
-    
     async fn execute_view(&self, call: ViewCall) -> SyncResult<ViewResult> {
         self.inner.execute_view(call).await
     }
@@ -377,15 +372,10 @@ impl RuntimeAdapter for CrashingRuntimeAdapter {
             processed.push(height);
         }
         Ok(AtomicBlockResult {
-            state_root: vec![0; 32],
             batch_data: vec![],
             height,
             block_hash: block_hash.to_vec(),
         })
-    }
-
-    async fn get_state_root(&self, _height: u32) -> SyncResult<Vec<u8>> {
-        Ok(vec![0; 32])
     }
     
     async fn execute_view(&self, _call: ViewCall) -> SyncResult<ViewResult> {

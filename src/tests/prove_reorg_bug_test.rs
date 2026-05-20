@@ -12,7 +12,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use log::info;
 use memshrew_runtime::{BuggyMemStoreAdapter, MemStoreAdapter};
-use metashrew_runtime::smt::SMTHelper;
+use metashrew_runtime::chain_entries::get_at_height;
 use metashrew_sync::{
     adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip,
     SyncConfig, SyncEngine, SyncResult,
@@ -133,8 +133,8 @@ async fn test_buggy_rollback_leaves_old_data() -> Result<()> {
     info!("✓ Chain A indexed: blocks 0-4");
 
     // Verify Chain A block 3 hash is stored
-    let smt_helper = SMTHelper::new(shared_storage.inner().clone());
-    let chain_a_hash_3_stored = smt_helper.get_at_height(&"/block-hashes/3".as_bytes().to_vec(), 4)?;
+    
+    let chain_a_hash_3_stored = get_at_height(&shared_storage, &"/block-hashes/3".as_bytes().to_vec(), 4)?;
     assert!(chain_a_hash_3_stored.is_some());
 
     let chain_a_hash_3 = chain_a.get_block(3).unwrap().block_hash();
@@ -189,10 +189,10 @@ async fn test_buggy_rollback_leaves_old_data() -> Result<()> {
 
     // Phase 4: PROVE THE BUG - Old data is STILL there!
     info!("\n--- Phase 4: PROVING THE BUG - Old Data Still Present ---");
-    let smt_helper = SMTHelper::new(shared_storage.inner().clone());
+    
 
     // Check the blocktracker - this is an append-only structure where the bug is most visible
-    let blocktracker_after = smt_helper.get_at_height(&"/blocktracker".as_bytes().to_vec(), 5)?;
+    let blocktracker_after = get_at_height(&shared_storage, &"/blocktracker".as_bytes().to_vec(), 5)?;
     if let Some(tracker) = blocktracker_after {
         info!("  Blocktracker length after reorg: {} bytes", tracker.len());
         info!("  First bytes: {:?}", &tracker[..tracker.len().min(10)]);
@@ -210,7 +210,7 @@ async fn test_buggy_rollback_leaves_old_data() -> Result<()> {
     }
 
     // Also check the block hash
-    let stored_hash_3 = smt_helper.get_at_height(&"/block-hashes/3".as_bytes().to_vec(), 5)?;
+    let stored_hash_3 = get_at_height(&shared_storage, &"/block-hashes/3".as_bytes().to_vec(), 5)?;
 
     if let Some(hash_bytes) = stored_hash_3 {
         let stored = bitcoin::BlockHash::from_byte_array(hash_bytes.try_into().unwrap());
@@ -322,10 +322,10 @@ async fn test_fixed_rollback_cleans_up_old_data() -> Result<()> {
 
     // Phase 4: PROVE THE FIX - Only Chain B's data is present!
     info!("\n--- Phase 4: PROVING THE FIX - Only Chain B Data Present ---");
-    let smt_helper = SMTHelper::new(shared_storage.clone());
+    
 
     // Check the blocktracker - should be properly compacted
-    let blocktracker_after = smt_helper.get_at_height(&"/blocktracker".as_bytes().to_vec(), 5)?;
+    let blocktracker_after = get_at_height(&shared_storage, &"/blocktracker".as_bytes().to_vec(), 5)?;
     if let Some(tracker) = blocktracker_after {
         info!("  Blocktracker length after reorg: {} bytes", tracker.len());
         info!("  First bytes: {:?}", &tracker[..tracker.len().min(10)]);
@@ -338,7 +338,7 @@ async fn test_fixed_rollback_cleans_up_old_data() -> Result<()> {
         }
     }
 
-    let stored_hash_3 = smt_helper.get_at_height(&"/block-hashes/3".as_bytes().to_vec(), 5)?;
+    let stored_hash_3 = get_at_height(&shared_storage, &"/block-hashes/3".as_bytes().to_vec(), 5)?;
 
     assert!(stored_hash_3.is_some());
     let stored = bitcoin::BlockHash::from_byte_array(stored_hash_3.unwrap().try_into().unwrap());

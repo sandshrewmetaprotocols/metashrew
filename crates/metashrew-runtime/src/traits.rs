@@ -441,43 +441,17 @@ pub type KVTrackerFn = Box<dyn Fn(Vec<u8>, Vec<u8>) + Send + Sync>;
 ///
 /// # Fields
 ///
-/// * `state_root` - The cryptographic hash representing the complete state after processing
 /// * `batch_data` - Serialized database operations that can be applied atomically
 /// * `height` - The Bitcoin block height that was processed
 /// * `block_hash` - The Bitcoin block hash for verification and tracking
 ///
 /// # Usage
 ///
-/// This is returned by `MetashrewRuntime::process_block_atomic` and can be used to:
-/// - Verify state consistency before committing changes
-/// - Create snapshots with verified state roots
-/// - Implement rollback functionality for chain reorganizations
-/// - Audit block processing results
-///
-/// # Example
-///
-/// ```rust
-/// use metashrew_runtime::traits::AtomicBlockResult;
-///
-/// fn verify_block_result(result: &AtomicBlockResult) -> bool {
-///     // Verify the state root matches expected value
-///     !result.state_root.is_empty() &&
-///     result.height > 0 &&
-///     !result.block_hash.is_empty()
-/// }
-/// ```
+/// This is returned by `MetashrewRuntime::process_block_atomic` and is consumed
+/// by `StorageAdapter::commit_atomic` to land all writes in a single
+/// `WriteBatch`.
 #[derive(Debug, Clone)]
 pub struct AtomicBlockResult {
-    /// The calculated state root after block processing
-    ///
-    /// This is a cryptographic hash (typically SHA-256) that represents
-    /// the complete state of the database after processing the block.
-    /// It can be used for:
-    /// - State verification and consistency checks
-    /// - Snapshot metadata and integrity verification
-    /// - Chain reorganization detection and handling
-    pub state_root: Vec<u8>,
-    
     /// Serialized batch data containing all database operations
     ///
     /// This contains all the key-value operations that were performed
@@ -485,13 +459,13 @@ pub struct AtomicBlockResult {
     /// applied atomically to the database. The exact format depends
     /// on the storage implementation.
     pub batch_data: Vec<u8>,
-    
+
     /// The block height that was processed
     ///
     /// This is the Bitcoin block height (block number) that was processed
     /// to generate this result. Used for ordering and verification.
     pub height: u32,
-    
+
     /// The block hash
     ///
     /// This is the Bitcoin block hash (32 bytes) that uniquely identifies

@@ -52,7 +52,6 @@ struct ThreePointerStorage {
     indexed_height: Arc<TokioMutex<u32>>,
     runtime_tip: Arc<TokioMutex<u32>>,
     block_hashes: Arc<TokioMutex<HashMap<u32, Vec<u8>>>>,
-    state_roots: Arc<TokioMutex<HashMap<u32, Vec<u8>>>>,
     available: Arc<RwLock<bool>>,
     /// Cumulative write counter. Bumped on every mutator. Lets a test
     /// assert "no writes happened during heal" without needing a
@@ -70,7 +69,6 @@ impl ThreePointerStorage {
             indexed_height: Arc::new(TokioMutex::new(0)),
             runtime_tip: Arc::new(TokioMutex::new(0)),
             block_hashes: Arc::new(TokioMutex::new(HashMap::new())),
-            state_roots: Arc::new(TokioMutex::new(HashMap::new())),
             available: Arc::new(RwLock::new(true)),
             write_counter: Arc::new(AtomicU32::new(0)),
             rollback_counter: Arc::new(AtomicU32::new(0)),
@@ -85,10 +83,8 @@ impl ThreePointerStorage {
         *self.indexed_height.lock().await = tip;
         *self.runtime_tip.lock().await = tip;
         let mut hashes = self.block_hashes.lock().await;
-        let mut roots = self.state_roots.lock().await;
         for h in 0..=tip {
             hashes.insert(h, synthetic_hash(h));
-            roots.insert(h, synthetic_root(h));
         }
     }
 
@@ -113,15 +109,6 @@ fn synthetic_hash(height: u32) -> Vec<u8> {
         h[i] = b[i % 4].wrapping_add(i as u8);
     }
     h
-}
-
-fn synthetic_root(height: u32) -> Vec<u8> {
-    let mut r = vec![0u8; 32];
-    let b = height.to_le_bytes();
-    for i in 0..32 {
-        r[i] = b[i % 4] ^ ((i as u8).wrapping_mul(7));
-    }
-    r
 }
 
 /// Distinct "garbage" hash used in the bitcoind-disagrees test to
@@ -154,21 +141,10 @@ impl StorageAdapter for ThreePointerStorage {
         Ok(self.block_hashes.lock().await.get(&height).cloned())
     }
 
-    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
-        self.write_counter.fetch_add(1, Ordering::SeqCst);
-        self.state_roots.lock().await.insert(height, root.to_vec());
-        Ok(())
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        Ok(self.state_roots.lock().await.get(&height).cloned())
-    }
-
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         self.rollback_counter.fetch_add(1, Ordering::SeqCst);
         self.write_counter.fetch_add(1, Ordering::SeqCst);
         self.block_hashes.lock().await.retain(|&h, _| h <= height);
-        self.state_roots.lock().await.retain(|&h, _| h <= height);
         *self.indexed_height.lock().await = height;
         Ok(())
     }

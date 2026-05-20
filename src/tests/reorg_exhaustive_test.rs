@@ -47,7 +47,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::{BlockHash, Transaction, Txid};
 use log::info;
 use memshrew_runtime::MemStoreAdapter;
-use metashrew_runtime::smt::SMTHelper;
+use metashrew_runtime::chain_entries::get_at_height;
 use metashrew_sync::{
     adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip, SyncConfig,
     SyncEngine, SyncResult,
@@ -186,16 +186,14 @@ fn get_outpoint(
     vout: u32,
     at_height: u32,
 ) -> Result<Option<Vec<u8>>> {
-    let smt = SMTHelper::new(adapter.clone());
     let key = format!("/outpoint/{}:{}", hex::encode(txid.as_byte_array()), vout).into_bytes();
-    smt.get_at_height(&key, at_height)
+    get_at_height(adapter, &key, at_height)
 }
 
 /// Read the trace bytes the WASM stored for `txid` as of the given height.
 fn get_trace(adapter: &MemStoreAdapter, txid: Txid, at_height: u32) -> Result<Option<Vec<u8>>> {
-    let smt = SMTHelper::new(adapter.clone());
     let key = format!("/trace/{}", hex::encode(txid.as_byte_array())).into_bytes();
-    smt.get_at_height(&key, at_height)
+    get_at_height(adapter, &key, at_height)
 }
 
 /// Read the ordered txid list for a given height as the WASM saw it.
@@ -204,9 +202,8 @@ fn get_txids_at_height(
     height: u32,
     snapshot_height: u32,
 ) -> Result<Option<Vec<u8>>> {
-    let smt = SMTHelper::new(adapter.clone());
     let key = format!("/txids-at-height/{}", height).into_bytes();
-    smt.get_at_height(&key, snapshot_height)
+    get_at_height(adapter, &key, snapshot_height)
 }
 
 /// Convenience: build a chain by walking a list of `(height -> txs)` callbacks.

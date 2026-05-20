@@ -63,19 +63,6 @@ pub fn make_height_index_key(prefix: &[u8], height: u32, key: &[u8]) -> Vec<u8> 
     result
 }
 
-/// Optimized key builder for SMT node keys
-/// Stores keys as raw bytes without hex encoding to prevent database explosion
-#[inline]
-pub fn make_smt_node_key(prefix: &[u8], hash: &[u8; 32]) -> Vec<u8> {
-    let mut result = Vec::with_capacity(prefix.len() + 1 + 32);
-    result.extend_from_slice(prefix);
-    result.push(b':');
-    result.extend_from_slice(hash);
-    result
-}
-
-// Removed make_smt_value_key - SMT should not store values, only tree structure
-
 /// Optimized key builder for generic prefix + key patterns
 /// Stores keys as raw bytes without hex encoding to prevent database explosion
 #[inline]
@@ -103,8 +90,6 @@ pub struct KeyPrefixes {
     pub historical_value: &'static [u8],
     pub height_index: &'static [u8],
     pub keys_at_height: &'static [u8],
-    pub smt_node: &'static [u8],
-    pub smt_root: &'static [u8],
 }
 
 impl KeyPrefixes {
@@ -114,8 +99,6 @@ impl KeyPrefixes {
             historical_value: b"hist:",
             height_index: b"height:",
             keys_at_height: b"keys:",
-            smt_node: b"smt:node:",
-            smt_root: b"smt:root:",
         }
     }
 }
@@ -161,17 +144,6 @@ mod tests {
         assert_eq!(expected, actual);
     }
 
-    #[test]
-    fn test_smt_node_key_correctness() {
-        let prefix = b"smt:node:";
-        let hash = [0u8; 32];
-        let mut expected = Vec::new();
-        expected.extend_from_slice(prefix);
-        expected.push(b':');
-        expected.extend_from_slice(&hash);
-        let actual = make_smt_node_key(prefix, &hash);
-        assert_eq!(expected, actual);
-    }
 
     #[test]
     fn test_performance_improvement() {

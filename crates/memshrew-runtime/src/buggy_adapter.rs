@@ -4,7 +4,6 @@
 //! not the actual SMT data. We use this to prove the bug exists before fixing it.
 
 use crate::adapter::MemStoreAdapter;
-use metashrew_runtime::to_labeled_key;
 use metashrew_sync::{StorageAdapter, SyncResult};
 use async_trait::async_trait;
 
@@ -108,15 +107,7 @@ impl StorageAdapter for BuggyMemStoreAdapter {
         self.inner.get_block_hash(height).await
     }
 
-    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
-        self.inner.store_state_root(height, root).await
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        self.inner.get_state_root(height).await
-    }
-
-    /// BUGGY IMPLEMENTATION - Only deletes metadata, NOT SMT data!
+    /// BUGGY IMPLEMENTATION - Only deletes metadata, NOT chain data!
     /// This mimics the old RocksDB bug.
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         use metashrew_runtime::{to_labeled_key, KeyValueStoreLike};
@@ -131,29 +122,19 @@ impl StorageAdapter for BuggyMemStoreAdapter {
         let mut db_guard = db.lock().unwrap();
 
         // Only delete metadata for heights > rollback height
-        // This mimics RocksDB's storage_adapter.rs lines 93-102 (OLD BUGGY VERSION)
+        // (mimics the old RocksDB bug — does NOT trim the append-only chains)
         for h in (height + 1)..=current_height {
             // Delete block hash metadata
             let blockhash_key = to_labeled_key(&format!("block_hash_{}", h).as_bytes().to_vec());
             db_guard.remove(&blockhash_key);
-
-            // Delete state root metadata
-            let state_root_key = to_labeled_key(&format!("state_root_{}", h).as_bytes().to_vec());
-            db_guard.remove(&state_root_key);
-            let smt_root_key = to_labeled_key(&format!("smt:root:{}", h).as_bytes().to_vec());
-            db_guard.remove(&smt_root_key);
         }
 
-        // CRITICAL BUG: We do NOT delete the actual SMT data written by the WASM indexer
-        // This means keys like:
-        //   - /blocks/{height}
-        //   - /block-hashes/{height}
-        //   - /blocktracker updates
-        //   - Any other WASM-indexed data
-        // ...are NOT cleaned up during rollback!
-        //
-        // This causes reorg failures because when we try to index a different block
-        // at the same height, the old data is still present in the SMT.
+        // CRITICAL BUG: We do NOT delete the actual chain data written by the
+        // WASM indexer. This means keys like /blocks/{height},
+        // /block-hashes/{height}, /blocktracker updates, etc. are NOT cleaned
+        // up during rollback! This causes reorg failures because when we try
+        // to index a different block at the same height, the old data is
+        // still present in the database.
 
         drop(db_guard);
         self.inner.set_height(height);

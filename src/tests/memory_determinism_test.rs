@@ -119,15 +119,13 @@ async fn run_memory_stress_test(config: MemoryStressConfig) -> Result<String> {
                 }));
             }
 
-            // Check what result the WASM stored using SMT helper
-            use metashrew_runtime::smt::SMTHelper;
-            let smt_helper = SMTHelper::new(storage.clone());
+            // Check what result the WASM stored via the v10 chain reader.
+            use metashrew_runtime::chain_entries::get_at_height;
 
             let result_key = format!("/memory-stress-result/{}", config.height).into_bytes();
             info!("Looking for result at key: {:?}", String::from_utf8_lossy(&result_key));
 
-            // Use SMT helper to get data at this height
-            let result_data = smt_helper.get_at_height(&result_key, config.height)?;
+            let result_data = get_at_height(&storage, &result_key, config.height)?;
             info!("Result data (SMT at height {}): {:?}", config.height, result_data.as_ref().map(|d| d.len()));
 
             if let Some(data) = result_data {

@@ -122,7 +122,6 @@ impl RuntimeAdapter for InMemoryRuntime {
 
     async fn process_block_atomic(&self, height: u32, block_data: &[u8], block_hash: &[u8]) -> SyncResult<AtomicBlockResult> {
         self.runtime.process_block_atomic(height, block_data, block_hash).await.map(|res| AtomicBlockResult {
-            state_root: res.state_root,
             batch_data: res.batch_data,
             height: res.height,
             block_hash: res.block_hash,
@@ -138,10 +137,6 @@ impl RuntimeAdapter for InMemoryRuntime {
             eprintln!("Preview execution error: {:?}", e);
             SyncError::Runtime(format!("Preview failed: {:?}", e))
         })
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        self.runtime.get_state_root(height).await.map_err(|e| SyncError::Runtime(e.to_string()))
     }
 
     async fn refresh_memory(&self) -> SyncResult<()> {

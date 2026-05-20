@@ -3,13 +3,13 @@
 use anyhow::Result;
 
 // Core modules
+pub mod chain_entries;
 pub mod context;
 pub mod helpers;
 pub mod key_utils;
 pub mod proto;
 pub mod rollback;
 pub mod runtime;
-pub mod smt;
 pub mod traits;
 pub mod view_cache;
 pub mod view_limits;
@@ -27,8 +27,14 @@ pub use view_limits::{
     DEFAULT_VIEW_MEMORY_FLOOR_MB, DEFAULT_VIEW_MEMORY_MB,
 };
 
-// Re-export helper types
-pub use smt::{BatchedSMTHelper, SMTHelper, SMTNode};
+// Re-export v10 chain-entry primitives for downstream crates that pin
+// against this module path (e.g. alkanes-v220-alpha).
+pub use chain_entries::{
+    append_value_to_batch, build_block_write_batch, chain_entry_key, decode_chain_length,
+    decode_value_entry, deserialize_key_manifest, encode_chain_length, encode_value_entry,
+    get_at_height, rollback_all_keys_to_batch, rollback_key_to_batch, serialize_key_manifest,
+    write_block_batch, MANIFEST_PREFIX,
+};
 
 // Utility functions that are storage-backend agnostic
 static mut _LABEL: Option<String> = None;

@@ -205,12 +205,6 @@ pub trait StorageAdapter: Send + Sync {
     /// Get a stored block hash for a given height
     async fn get_block_hash(&self, height: u32) -> SyncResult<Option<Vec<u8>>>;
 
-    /// Store a state root for a given height
-    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()>;
-
-    /// Get a state root for a given height
-    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>>;
-
     /// Rollback storage to a specific height (remove data after this height)
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()>;
 
@@ -309,9 +303,8 @@ pub trait StorageAdapter: Send + Sync {
     /// Atomically commit a block in a SINGLE underlying write: the WASM-side
     /// per-block batch (`batch_data`, produced by `process_block_atomic` and
     /// shipped through `AtomicBlockResult::batch_data`) AND the sync-framework
-    /// metadata writes (indexed-height pointer, block-hash record, state-root
-    /// record) are submitted together — one `db.write_opt(batch, sync=true)`,
-    /// one fsync.
+    /// metadata writes (indexed-height pointer, block-hash record) are
+    /// submitted together — one `db.write_opt(batch, sync=true)`, one fsync.
     ///
     /// # Invariants enforced by the implementation
     ///
@@ -335,7 +328,6 @@ pub trait StorageAdapter: Send + Sync {
         &mut self,
         height: u32,
         block_hash: &[u8],
-        state_root: &[u8],
         _batch_data: &[u8],
     ) -> SyncResult<()> {
         // Strict in-order check (default impl): refuse to commit out of sequence.
@@ -352,7 +344,6 @@ pub trait StorageAdapter: Send + Sync {
             )));
         }
         self.store_block_hash(height, block_hash).await?;
-        self.store_state_root(height, state_root).await?;
         self.set_indexed_height(height).await?;
         Ok(())
     }
@@ -387,9 +378,6 @@ pub trait RuntimeAdapter: Send + Sync {
     /// Execute a preview function (with block data)
     async fn execute_preview(&self, call: PreviewCall) -> SyncResult<ViewResult>;
 
-    /// Get the state root at a specific height
-    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>>;
-
     /// Refresh the runtime memory (cleanup/reset)
     async fn refresh_memory(&self) -> SyncResult<()>;
 
@@ -411,8 +399,6 @@ pub trait RuntimeAdapter: Send + Sync {
 /// Result of atomic block processing containing all operations to be committed
 #[derive(Debug, Clone)]
 pub struct AtomicBlockResult {
-    /// The state root calculated after processing
-    pub state_root: Vec<u8>,
     /// All database operations as a serialized batch
     pub batch_data: Vec<u8>,
     /// Block height that was processed
@@ -454,9 +440,6 @@ pub trait JsonRpcProvider: Send + Sync {
 
     /// Get a block hash by height
     async fn metashrew_getblockhash(&self, height: u32) -> SyncResult<String>;
-
-    /// Get a state root by height
-    async fn metashrew_stateroot(&self, height: String) -> SyncResult<String>;
 
     /// Get snapshot information
     async fn metashrew_snapshot(&self) -> SyncResult<serde_json::Value>;

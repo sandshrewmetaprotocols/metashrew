@@ -12,7 +12,7 @@ use bitcoin::hashes::Hash;
 use bitcoin::BlockHash;
 use log::info;
 use memshrew_runtime::MemStoreAdapter;
-use metashrew_runtime::smt::SMTHelper;
+use metashrew_runtime::chain_entries::get_at_height;
 use metashrew_sync::{
     adapters::MetashrewRuntimeAdapter, BitcoinNodeAdapter, BlockInfo, ChainTip,
     SyncConfig, SyncEngine, SyncResult,
@@ -135,8 +135,7 @@ async fn test_reorg_with_proper_smt_rollback() -> Result<()> {
     info!("✓ Chain A indexed: blocks 0-4");
 
     // Verify Chain A block 3 is stored
-    let smt_helper = SMTHelper::new(shared_storage.clone());
-    let chain_a_hash_3_stored = smt_helper.get_at_height(&"/block-hashes/3".as_bytes().to_vec(), 4)?;
+    let chain_a_hash_3_stored = get_at_height(&shared_storage, &"/block-hashes/3".as_bytes().to_vec(), 4)?;
     assert!(chain_a_hash_3_stored.is_some(), "Chain A block 3 should be indexed");
     info!("  Chain A block 3 hash stored: {:?}", bitcoin::BlockHash::from_byte_array(chain_a_hash_3_stored.clone().unwrap().try_into().unwrap()));
 
@@ -189,9 +188,8 @@ async fn test_reorg_with_proper_smt_rollback() -> Result<()> {
     syncer.start().await?;
 
     // Phase 4: Verify rollback worked
-    info!("\n--- Phase 4: Verify SMT Rollback Worked ---");
-    let smt_helper = SMTHelper::new(shared_storage.clone());
-    let stored_hash_3 = smt_helper.get_at_height(&"/block-hashes/3".as_bytes().to_vec(), 5)?;
+    info!("\n--- Phase 4: Verify Chain Rollback Worked ---");
+    let stored_hash_3 = get_at_height(&shared_storage, &"/block-hashes/3".as_bytes().to_vec(), 5)?;
 
     assert!(stored_hash_3.is_some(), "Block 3 hash should be stored");
 
@@ -260,8 +258,7 @@ async fn test_reorg_demonstrates_proper_cleanup() -> Result<()> {
     syncer.start().await?;
 
     // Manually check storage for Chain A data
-    let smt_helper = SMTHelper::new(shared_storage.clone());
-    let block_3_data_before = smt_helper.get_at_height(&"/blocks/3".as_bytes().to_vec(), 4)?;
+    let block_3_data_before = get_at_height(&shared_storage, &"/blocks/3".as_bytes().to_vec(), 4)?;
     assert!(block_3_data_before.is_some(), "Chain A block 3 data should exist");
     info!("  Chain A block 3 data present: {} bytes", block_3_data_before.as_ref().unwrap().len());
 
@@ -306,8 +303,7 @@ async fn test_reorg_demonstrates_proper_cleanup() -> Result<()> {
 
     // Verify Chain A data was REPLACED (not just appended)
     info!("\n--- Verifying proper cleanup ---");
-    let smt_helper = SMTHelper::new(shared_storage.clone());
-    let block_3_data_after = smt_helper.get_at_height(&"/blocks/3".as_bytes().to_vec(), 5)?;
+    let block_3_data_after = get_at_height(&shared_storage, &"/blocks/3".as_bytes().to_vec(), 5)?;
     assert!(block_3_data_after.is_some(), "Block 3 data should exist after reorg");
 
     // The data should be different (Chain B's block, not Chain A's)

@@ -283,13 +283,6 @@ impl StorageAdapter for MemStoreAdapter {
     async fn get_block_hash(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
         Ok(self.get_immutable(format!("block_hash_{}", height).as_bytes()).unwrap())
     }
-    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
-        self.put(format!("state_root_{}", height).as_bytes(), root).unwrap();
-        Ok(())
-    }
-    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        Ok(self.get_immutable(format!("state_root_{}", height).as_bytes()).unwrap())
-    }
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         use metashrew_runtime::rollback::rollback_smt_data;
 

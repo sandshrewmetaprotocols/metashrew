@@ -2,16 +2,12 @@
 
 use async_trait::async_trait;
 use log::{info, warn};
-use metashrew_runtime::{
-    rollback::{RollbackOp, SmtRollback},
-    KeyValueStoreLike,
-};
+use metashrew_runtime::rollback::{RollbackOp, SmtRollback};
 use metashrew_sync::{StorageAdapter, StorageStats, SyncError, SyncResult};
 use rocksdb::{WriteBatch, WriteOptions, DB};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
-use crate::adapter::RocksDBRuntimeAdapter;
 
 /// v10: switch `commit_atomic` to `WriteOptions::disable_wal()` once the
 /// indexer is more than this many blocks behind the bitcoind tip. Below
@@ -182,25 +178,6 @@ impl StorageAdapter for RocksDBStorageAdapter {
         }
     }
 
-    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
-        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
-        let mut smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
-        let root_key = format!("smt:root:{}", height).into_bytes();
-        smt_helper
-            .storage
-            .put(&root_key, root)
-            .map_err(|e| SyncError::Storage(format!("Failed to store state root: {}", e)))
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        let adapter = RocksDBRuntimeAdapter::new(self.db.clone());
-        let smt_helper = metashrew_runtime::smt::SMTHelper::new(adapter);
-        match smt_helper.get_smt_root_at_height(height) {
-            Ok(root) => Ok(Some(root.to_vec())),
-            Err(_) => Ok(None),
-        }
-    }
-
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         use metashrew_runtime::rollback::{rollback_smt_data, rollback_with_manifests};
 
@@ -361,21 +338,20 @@ impl StorageAdapter for RocksDBStorageAdapter {
     /// Commit block `height` atomically: reconstruct the WASM-side `WriteBatch`
     /// from `batch_data` (serialized by `BatchLike::to_bytes()` inside
     /// `process_block_atomic`'s __flush hook), APPEND the sync-framework metadata
-    /// writes (block-hash record, state-root record, indexed-height pointer)
-    /// into the SAME batch, and submit exactly ONE
+    /// writes (block-hash record, indexed-height pointer) into the SAME batch,
+    /// and submit exactly ONE
     /// `db.write_opt(batch, WriteOptions::set_sync(true))` call.
     ///
     /// This is the single point of database commit for block-apply. Pre-rc.4 had
-    /// two writes — `RocksDBRuntimeAdapter::write` for the WASM batch and this
-    /// `commit_atomic` for the three metadata writes — which meant a process
-    /// crash between the two fsyncs could leave the DB in a partial state:
-    /// WASM-side state for block N committed (alkanes balances, totalsupply, etc.)
-    /// but the indexed-height pointer / block-hash / state-root metadata missing
-    /// or stale, so on restart the indexer would re-apply block N on top of
-    /// already-applied state, double-counting append-only updates and producing
-    /// the supply drift we saw on g/h. With this single-batch design, RocksDB's
-    /// `WriteBatch` atomicity primitive guarantees that's not a representable
-    /// outcome.
+    /// two writes — one for the WASM batch and one for the metadata writes —
+    /// which meant a process crash between the two fsyncs could leave the DB
+    /// in a partial state: WASM-side state for block N committed (alkanes
+    /// balances, totalsupply, etc.) but the indexed-height pointer / block-hash
+    /// metadata missing or stale, so on restart the indexer would re-apply
+    /// block N on top of already-applied state, double-counting append-only
+    /// updates and producing the supply drift we saw on g/h. With this
+    /// single-batch design, RocksDB's `WriteBatch` atomicity primitive
+    /// guarantees that's not a representable outcome.
     ///
     /// Strict in-order check: refuses to commit unless `height == tip + 1`,
     /// matching the user-stated invariant that we never skip or rewrite a
@@ -389,7 +365,6 @@ impl StorageAdapter for RocksDBStorageAdapter {
         &mut self,
         height: u32,
         block_hash: &[u8],
-        state_root: &[u8],
         batch_data: &[u8],
     ) -> SyncResult<()> {
         // Strict in-order progression check. Reads the on-disk tip — the
@@ -438,15 +413,12 @@ impl StorageAdapter for RocksDBStorageAdapter {
             WriteBatch::from_data(batch_data)
         };
 
-        // APPEND the three metadata records into the SAME batch. After this
-        // step, the batch holds every write for block `height` — WASM
-        // state changes AND sync-framework metadata — ready to commit as
-        // a single RocksDB transaction.
+        // APPEND the sync-framework metadata records into the SAME batch.
+        // After this step, the batch holds every write for block `height` —
+        // WASM state changes AND sync-framework metadata — ready to commit
+        // as a single RocksDB transaction.
         let blockhash_key = format!("/__INTERNAL/height-to-hash/{}", height).into_bytes();
         batch.put(&blockhash_key, block_hash);
-
-        let root_key = format!("smt:root:{}", height).into_bytes();
-        batch.put(&root_key, state_root);
 
         let height_bytes = height.to_le_bytes();
         batch.put(&height_key, &height_bytes);

@@ -158,7 +158,6 @@ where
         match self.runtime.process_block_atomic(height, block_data, block_hash).await {
             Ok(result) => {
                 Ok(AtomicBlockResult {
-                    state_root: result.state_root,
                     batch_data: result.batch_data,
                     height: result.height,
                     block_hash: result.block_hash,
@@ -197,13 +196,6 @@ where
             .map_err(|e| SyncError::ViewFunction(format!("Preview function failed: {}", e)))?;
         
         Ok(ViewResult { data: result })
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        self.runtime
-            .get_state_root(height)
-            .await
-            .map_err(|e| SyncError::Runtime(format!("Failed to get state root for height {}: {}", height, e)))
     }
 
     async fn refresh_memory(&self) -> SyncResult<()> {

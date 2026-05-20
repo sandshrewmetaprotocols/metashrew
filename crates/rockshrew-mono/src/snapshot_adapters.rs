@@ -72,23 +72,13 @@ impl SnapshotProvider for RockshrewSnapshotProvider {
     async fn create_snapshot(&mut self, height: u32) -> SyncResult<GenericMetadata> {
         info!("Creating snapshot at height {}", height);
 
-        // Get state root from storage, with fallback to direct database access
-        let state_root = {
-            let storage = self.storage.read().await;
-            match storage.get_state_root(height).await? {
-                Some(root) => root,
-                None => {
-                    // Fallback: try to get state root directly from database
-                    let db = storage.get_db_handle().await?;
-                    let root_key = format!("smt:root:{}", height).into_bytes();
-                    db.get(&root_key)
-                        .map_err(|e| SyncError::Runtime(format!("Database error: {}", e)))?
-                        .ok_or_else(|| {
-                            SyncError::Runtime(format!("No state root found for height {} (tried both storage adapter and direct DB access)", height))
-                        })?
-                }
-            }
-        };
+        // metashrew no longer computes or stores a database-wide state root
+        // (the SMT was removed; future per-table root tracking lives inside
+        // the WASM indexer). The snapshot file format retains a state_root
+        // field for downstream compatibility, but we emit a zeroed placeholder
+        // here — consumers that need a real root will compute it from the
+        // contents themselves.
+        let state_root: Vec<u8> = vec![0u8; 32];
 
         // Get tracked changes from the runtime adapter if available
         let actual_size = if let Some(runtime_adapter) = &self.runtime_adapter {

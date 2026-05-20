@@ -4,11 +4,11 @@
 //! in `metashrew-sync/tests/strict_determinism.rs` cannot reach. The key
 //! invariants pinned here:
 //!
-//! 1. `commit_atomic` writes all three metadata keys (indexed-height pointer,
-//!    block-hash record, state-root record) into a single underlying RocksDB
-//!    batch. After a successful call, all three are visible. When `batch_data`
-//!    is non-empty (the production atomic-block-apply path), the WASM-side
-//!    writes packaged inside `batch_data` ALSO land in the same atomic batch.
+//! 1. `commit_atomic` writes both metadata keys (indexed-height pointer and
+//!    block-hash record) into a single underlying RocksDB batch. After a
+//!    successful call, both are visible. When `batch_data` is non-empty (the
+//!    production atomic-block-apply path), the WASM-side writes packaged
+//!    inside `batch_data` ALSO land in the same atomic batch.
 //!
 //! 2. The strict-in-order rule (`height == tip + 1` after the first
 //!    commit) is enforced even when the underlying RocksDB is fresh.
@@ -33,7 +33,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 #[tokio::test]
-async fn commit_atomic_writes_all_three_keys_atomically() {
+async fn commit_atomic_writes_metadata_keys_atomically() {
     let dir = tempdir().unwrap();
     let adapter = RocksDBRuntimeAdapter::open_optimized(
         dir.path().to_str().unwrap().to_string(),
@@ -44,24 +44,18 @@ async fn commit_atomic_writes_all_three_keys_atomically() {
 
     let h: u32 = 850_000;
     let block_hash = [0xaa_u8; 32];
-    let state_root = [0xbb_u8; 32];
 
     storage
-        .commit_atomic(h, &block_hash, &state_root, &[])
+        .commit_atomic(h, &block_hash, &[])
         .await
         .expect("first commit on fresh DB must succeed");
 
-    // All three keys are visible.
+    // Metadata keys are visible.
     assert_eq!(storage.get_indexed_height().await.unwrap(), h);
     assert_eq!(
         storage.get_block_hash(h).await.unwrap(),
         Some(block_hash.to_vec())
     );
-    // get_state_root uses SMTHelper, so just verify the underlying raw key
-    // is set instead.
-    let root_key = format!("smt:root:{}", h).into_bytes();
-    let raw = db.get(&root_key).unwrap();
-    assert_eq!(raw, Some(state_root.to_vec()));
 }
 
 #[tokio::test]
@@ -74,21 +68,21 @@ async fn commit_atomic_rejects_out_of_order_on_rocksdb() {
     let mut storage = RocksDBStorageAdapter::new(adapter.db.clone());
 
     storage
-        .commit_atomic(100, &[1u8; 32], &[2u8; 32], &[])
+        .commit_atomic(100, &[1u8; 32], &[])
         .await
         .expect("first commit succeeds");
 
     // Out-of-order attempts fail.
     assert!(storage
-        .commit_atomic(102, &[3u8; 32], &[4u8; 32], &[])
+        .commit_atomic(102, &[3u8; 32], &[])
         .await
         .is_err());
     assert!(storage
-        .commit_atomic(100, &[3u8; 32], &[4u8; 32], &[])
+        .commit_atomic(100, &[3u8; 32], &[])
         .await
         .is_err());
     assert!(storage
-        .commit_atomic(50, &[3u8; 32], &[4u8; 32], &[])
+        .commit_atomic(50, &[3u8; 32], &[])
         .await
         .is_err());
 
@@ -97,7 +91,7 @@ async fn commit_atomic_rejects_out_of_order_on_rocksdb() {
 
     // In-order commit succeeds.
     storage
-        .commit_atomic(101, &[5u8; 32], &[6u8; 32], &[])
+        .commit_atomic(101, &[5u8; 32], &[])
         .await
         .expect("in-order commit at tip+1 succeeds");
     assert_eq!(storage.get_indexed_height().await.unwrap(), 101);
@@ -113,7 +107,7 @@ async fn commit_atomic_survives_reopen() {
         let adapter = RocksDBRuntimeAdapter::open_optimized(path.clone()).unwrap();
         let mut storage = RocksDBStorageAdapter::new(adapter.db.clone());
         storage
-            .commit_atomic(123_456, &[0x42u8; 32], &[0x43u8; 32], &[])
+            .commit_atomic(123_456, &[0x42u8; 32], &[])
             .await
             .unwrap();
         // Drop adapter — releases the DB handle.
@@ -156,13 +150,13 @@ async fn commit_atomic_single_batch_includes_wasm_and_metadata() {
     let mut wasm_batch = WriteBatch::default();
     wasm_batch.put(b"alkanes:1:balance:addr_a", b"100");
     wasm_batch.put(b"alkanes:1:totalsupply", b"100");
-    wasm_batch.put(b"smt:1234:abc", b"xyz");
+    wasm_batch.put(b"chain:1234:abc", b"xyz");
     wasm_batch.put(b"/__INTERNAL/tip-height", &1234u32.to_le_bytes());
     let batch_bytes = wasm_batch.data().to_vec();
 
     // Commit at height 1234 (fresh DB → first-commit branch).
     storage
-        .commit_atomic(1234, &[0x77u8; 32], &[0x88u8; 32], &batch_bytes)
+        .commit_atomic(1234, &[0x77u8; 32], &batch_bytes)
         .await
         .expect("single-batch atomic commit must succeed");
 
@@ -178,9 +172,9 @@ async fn commit_atomic_single_batch_includes_wasm_and_metadata() {
         "WASM-side totalsupply must be visible"
     );
     assert_eq!(
-        db.get(b"smt:1234:abc").unwrap(),
+        db.get(b"chain:1234:abc").unwrap(),
         Some(b"xyz".to_vec()),
-        "WASM-side SMT key must be visible"
+        "WASM-side chain key must be visible"
     );
     assert_eq!(
         db.get(b"/__INTERNAL/tip-height").unwrap(),
@@ -194,8 +188,6 @@ async fn commit_atomic_single_batch_includes_wasm_and_metadata() {
         storage.get_block_hash(1234).await.unwrap(),
         Some(vec![0x77u8; 32])
     );
-    let root_key = format!("smt:root:{}", 1234).into_bytes();
-    assert_eq!(db.get(&root_key).unwrap(), Some(vec![0x88u8; 32]));
 
     // 3. Durability across reopen.
     drop(storage);
@@ -239,7 +231,7 @@ async fn no_partial_state_when_commit_atomic_not_called() {
 
     // First, commit block 999 to establish a clean tip.
     storage
-        .commit_atomic(999, &[0x11u8; 32], &[0x22u8; 32], &[])
+        .commit_atomic(999, &[0x11u8; 32], &[])
         .await
         .unwrap();
     assert_eq!(storage.get_indexed_height().await.unwrap(), 999);
@@ -313,7 +305,7 @@ async fn commit_atomic_retry_produces_identical_state() {
         wasm_batch.put(b"k2", b"v2");
         let bytes = wasm_batch.data().to_vec();
         storage
-            .commit_atomic(7, &[0xaau8; 32], &[0xbbu8; 32], &bytes)
+            .commit_atomic(7, &[0xaau8; 32], &bytes)
             .await
             .unwrap();
     }
@@ -337,7 +329,7 @@ async fn commit_atomic_retry_produces_identical_state() {
         prep_batch.put(b"k2", b"v2");
         let prep_bytes = prep_batch.data().to_vec();
         storage
-            .commit_atomic(7, &[0xaau8; 32], &[0xbbu8; 32], &prep_bytes)
+            .commit_atomic(7, &[0xaau8; 32], &prep_bytes)
             .await
             .unwrap();
 
@@ -351,13 +343,13 @@ async fn commit_atomic_retry_produces_identical_state() {
         // hit disk (RocksDB never even saw the batch because we returned Err
         // before write_opt).
         let bogus = storage
-            .commit_atomic(999, &[0xccu8; 32], &[0xddu8; 32], &bytes)
+            .commit_atomic(999, &[0xccu8; 32], &bytes)
             .await;
         assert!(bogus.is_err(), "out-of-order commit must be rejected");
 
         // Attempt #2: correct height (tip+1). Must succeed.
         storage
-            .commit_atomic(8, &[0xccu8; 32], &[0xddu8; 32], &bytes)
+            .commit_atomic(8, &[0xccu8; 32], &bytes)
             .await
             .unwrap();
     }
@@ -374,7 +366,7 @@ async fn commit_atomic_retry_produces_identical_state() {
         wasm_batch.put(b"k3", b"v3");
         let bytes = wasm_batch.data().to_vec();
         storage
-            .commit_atomic(8, &[0xccu8; 32], &[0xddu8; 32], &bytes)
+            .commit_atomic(8, &[0xccu8; 32], &bytes)
             .await
             .unwrap();
     }

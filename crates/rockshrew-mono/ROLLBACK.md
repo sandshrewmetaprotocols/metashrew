@@ -107,14 +107,13 @@ rockshrew-rollback --db-path /data/.metashrew --height 925000 --yes
 
 The rollback operation removes:
 
-1. **Metadata keys**: Block hashes, state roots for heights > rollback height
-2. **SMT data structures**: All indexed data stored via IndexPointer
+1. **Metadata keys**: Block hashes for heights > rollback height
+2. **Append-only chain data**: All indexed data stored via IndexPointer
 3. **Height marker**: Updated to the rollback height
 
 Specifically:
 - Keys like `block_hash_925001`, `block_hash_925002`, etc. are deleted
-- Keys like `state_root_925001`, `smt:root:925001`, etc. are deleted
-- SMT append-only structures (`key/length`, `key/0`, `key/1`, etc.) are compacted
+- Append-only chain structures (`key/length`, `key/0`, `key/1`, etc.) are compacted
 - Internal height marker (`__INTERNAL/height`) is set to the rollback height
 
 ## After Rollback
@@ -245,12 +244,10 @@ Rockshrew uses RocksDB with the following key structure:
 
 **Metadata keys:**
 - `block_hash_{height}`: Block hash (legacy format)
-- `state_root_{height}`: State root hash
-- `smt:root:{height}`: SMT root at height
 
-**SMT data structures:**
-- `{key}/length`: Number of updates for this key
-- `{key}/{index}`: Update entry, format: `{height}:{hex_data}`
+**Append-only chain structures (v10):**
+- `{key}/length`: Number of updates for this key (u32 LE)
+- `{key}/{index}`: Update entry, format: `[u32 LE height | value bytes]`
 
 ### Implementation
 

@@ -132,7 +132,6 @@ impl BitcoinNodeAdapter for MockBitcoinNode {
 pub struct MockStorage {
     indexed_height: Arc<Mutex<u32>>,
     block_hashes: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
-    state_roots: Arc<Mutex<HashMap<u32, Vec<u8>>>>,
     available: Arc<RwLock<bool>>,
 }
 
@@ -141,7 +140,6 @@ impl MockStorage {
         Self {
             indexed_height: Arc::new(Mutex::new(0)),
             block_hashes: Arc::new(Mutex::new(HashMap::new())),
-            state_roots: Arc::new(Mutex::new(HashMap::new())),
             available: Arc::new(RwLock::new(true)),
         }
     }
@@ -187,23 +185,6 @@ impl StorageAdapter for MockStorage {
         Ok(hashes.get(&height).cloned())
     }
 
-    async fn store_state_root(&mut self, height: u32, root: &[u8]) -> SyncResult<()> {
-        if !*self.available.read().unwrap() {
-            return Err(SyncError::Storage("Storage not available".to_string()));
-        }
-        let mut roots = self.state_roots.lock().await;
-        roots.insert(height, root.to_vec());
-        Ok(())
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Option<Vec<u8>>> {
-        if !*self.available.read().unwrap() {
-            return Err(SyncError::Storage("Storage not available".to_string()));
-        }
-        let roots = self.state_roots.lock().await;
-        Ok(roots.get(&height).cloned())
-    }
-
     async fn rollback_to_height(&mut self, height: u32) -> SyncResult<()> {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
@@ -211,10 +192,6 @@ impl StorageAdapter for MockStorage {
         {
             let mut hashes = self.block_hashes.lock().await;
             hashes.retain(|&h, _| h <= height);
-        }
-        {
-            let mut roots = self.state_roots.lock().await;
-            roots.retain(|&h, _| h <= height);
         }
         let mut indexed = self.indexed_height.lock().await;
         *indexed = height;
@@ -231,8 +208,7 @@ impl StorageAdapter for MockStorage {
         }
         let indexed_height = *self.indexed_height.lock().await;
         let hashes = self.block_hashes.lock().await;
-        let roots = self.state_roots.lock().await;
-        let total_entries = hashes.len() + roots.len();
+        let total_entries = hashes.len();
         Ok(StorageStats {
             total_entries,
             indexed_height,
@@ -241,8 +217,8 @@ impl StorageAdapter for MockStorage {
     }
 
     /// Override the default sequential-write shim with an in-memory equivalent
-    /// of the RocksDB atomic commit: all three writes happen under one big
-    /// lock acquisition so they are observable as a unit, AND we enforce the
+    /// of the RocksDB atomic commit: the writes happen under one big lock
+    /// acquisition so they are observable as a unit, AND we enforce the
     /// strict-in-order rule (`height == tip + 1` except for the first commit
     /// on a fresh DB). This lets unit tests exercise the exact same invariant
     /// surface as the production RocksDB adapter.
@@ -250,17 +226,15 @@ impl StorageAdapter for MockStorage {
         &mut self,
         height: u32,
         block_hash: &[u8],
-        state_root: &[u8],
         _batch_data: &[u8],
     ) -> SyncResult<()> {
         if !*self.available.read().unwrap() {
             return Err(SyncError::Storage("Storage not available".to_string()));
         }
-        // Take all locks up front so the three "writes" are atomic w.r.t.
-        // any concurrent reader (the test harness might be poking at state).
+        // Take locks up front so the writes are atomic w.r.t. any concurrent
+        // reader (the test harness might be poking at state).
         let mut indexed = self.indexed_height.lock().await;
         let mut hashes = self.block_hashes.lock().await;
-        let mut roots = self.state_roots.lock().await;
 
         let current = *indexed;
         let is_fresh = current == 0 && !hashes.contains_key(&0);
@@ -272,7 +246,6 @@ impl StorageAdapter for MockStorage {
             )));
         }
         hashes.insert(height, block_hash.to_vec());
-        roots.insert(height, state_root.to_vec());
         *indexed = height;
         Ok(())
     }
@@ -322,7 +295,6 @@ impl RuntimeAdapter for MockRuntime {
         let mut processed = self.blocks_processed.lock().await;
         *processed += 1;
         Ok(AtomicBlockResult {
-            state_root: vec![0; 32],
             batch_data: vec![],
             height,
             block_hash: block_hash.to_vec(),
@@ -348,21 +320,6 @@ impl RuntimeAdapter for MockRuntime {
         result_data.extend_from_slice(&call.height.to_le_bytes());
         result_data.extend_from_slice(call.function_name.as_bytes());
         Ok(ViewResult { data: result_data })
-    }
-
-    async fn get_state_root(&self, height: u32) -> SyncResult<Vec<u8>> {
-        if !*self.ready.read().unwrap() {
-            return Err(SyncError::Runtime("Runtime not ready".to_string()));
-        }
-        let mut state_root = vec![0u8; 32];
-        let height_bytes = height.to_le_bytes();
-        for i in 0..8 {
-            state_root[i] = height_bytes[i % 4];
-            state_root[i + 8] = height_bytes[i % 4];
-            state_root[i + 16] = height_bytes[i % 4];
-            state_root[i + 24] = height_bytes[i % 4];
-        }
-        Ok(state_root)
     }
 
     async fn refresh_memory(&self) -> SyncResult<()> {

@@ -14,6 +14,7 @@ pub mod traits;
 pub mod view_cache;
 pub mod view_limits;
 pub mod view_syscall;
+pub mod view_threads;
 
 
 // Re-export core types and traits

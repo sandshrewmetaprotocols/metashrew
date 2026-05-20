@@ -128,6 +128,15 @@ pub struct State {
     /// can surface ENOSPC / I/O errors instead of a generic "had failure"
     /// message. Read by `process_block_atomic` after WASM execution returns.
     pub(crate) last_flush_error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+
+    /// Per-view-call thread registry. `Some(_)` only on view-runtime
+    /// stores; `None` on indexer stores. The `__flush` syscall dispatcher
+    /// pulls this out of `caller.data()` to spawn / join wasm threads.
+    /// Indexer paths never construct this and the threading proto ops
+    /// fail-closed (write empty response) when it's absent. Lives behind
+    /// `Arc` so the spawn closure can clone it into the spawned task
+    /// without borrowing the wasmtime store.
+    pub(crate) view_threads: Option<std::sync::Arc<crate::view_threads::ViewThreadRegistry>>,
 }
 
 impl State {
@@ -156,7 +165,23 @@ impl State {
                 .build(),
             had_failure: false,
             last_flush_error: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            // Indexer paths construct State::new() and never touch this;
+            // view paths replace it via `with_view_threads` before
+            // installing the store. See `runtime::new_with_db_async_limited`.
+            view_threads: None,
         }
+    }
+
+    /// Attach a view-thread registry. Called only from view-runtime
+    /// construction (`new_with_db_async_limited`). Indexer stores never
+    /// call this — their `view_threads` stays `None` so the `__flush`
+    /// syscall dispatcher's thread ops fail-closed.
+    pub(crate) fn with_view_threads(
+        mut self,
+        registry: std::sync::Arc<crate::view_threads::ViewThreadRegistry>,
+    ) -> Self {
+        self.view_threads = Some(registry);
+        self
     }
 }
 
@@ -481,10 +506,18 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                                   // Pre-allocate memory to maximum size
         config.memory_init_cow(false); // Disable copy-on-write to ensure consistent memory behavior
 
-        // Configure async engine with the same deterministic settings
+        // Configure async engine with the same deterministic settings.
+        //
+        // v10 view-syscall: the view runtime gets `wasm_threads(true)` so
+        // wasm built with shared memory + atomics can use the ThreadSpawn /
+        // ThreadJoin syscalls. The indexer engine (the outer `engine`
+        // param) must STAY single-threaded for consensus determinism;
+        // that's why threading is only flipped on `async_config`, not on
+        // the indexer config.
         let mut async_config = config.clone();
         async_config.consume_fuel(true);
         async_config.async_support(true);
+        async_config.wasm_threads(true);
 
         let async_engine = wasmtime::Engine::new(&async_config)?;
         let module = wasmtime::Module::from_file(&engine, indexer.clone().into_os_string())
@@ -541,10 +574,15 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                                   // Pre-allocate memory to maximum size
         config.memory_init_cow(false); // Disable copy-on-write to ensure consistent memory behavior
 
-        // Configure async engine with the same deterministic settings
+        // Configure async engine with the same deterministic settings.
+        //
+        // v10 view-syscall: see the same block in `load`. Threading is
+        // a view-only capability — flipped on `async_config`, NOT on the
+        // indexer `engine` config above.
         let mut async_config = config.clone();
         async_config.consume_fuel(true);
         async_config.async_support(true);
+        async_config.wasm_threads(true);
 
         let async_engine = wasmtime::Engine::new(&async_config)?;
         let module = wasmtime::Module::new(&engine, indexer)
@@ -716,7 +754,14 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                                 ctx.db.clone()
                             };
                             let mut linker = Linker::<State>::new(&self.engine);
-                            let mut wasmstore = Store::<State>::new(&self.engine, State::new());
+                            // Preview view shares the view-runtime contract:
+                            // give it a thread registry so `__flush` syscalls
+                            // can spawn / join. The registry is dropped with
+                            // the Store at end-of-preview.
+                            let preview_view_state = State::new().with_view_threads(
+                                std::sync::Arc::new(crate::view_threads::ViewThreadRegistry::new()),
+                            );
+                            let mut wasmstore = Store::<State>::new(&self.engine, preview_view_state);
                             let view_context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::new(
                                 MetashrewRuntimeContext::new(preview_db, preview_height, vec![]),
                             ));
@@ -1765,6 +1810,14 @@ pub async fn setup_linker_view(
         if let Some(limits) = store_limits {
             state.limits = limits;
         }
+        // v10 view-syscall: attach a fresh thread registry to this
+        // store's State. The registry's lifetime is tied to the Store —
+        // when the Store is dropped at end-of-view, the registry is
+        // dropped and its Drop impl aborts any still-pending spawned
+        // tasks. That's the cross-call cleanup guarantee.
+        state = state.with_view_threads(std::sync::Arc::new(
+            crate::view_threads::ViewThreadRegistry::new(),
+        ));
         let mut wasmstore = Store::<State>::new(&engine, state);
         let context = Arc::<RwLock<MetashrewRuntimeContext<T>>>::new(RwLock::<
             MetashrewRuntimeContext<T>,

@@ -176,7 +176,12 @@ impl State {
     /// construction (`new_with_db_async_limited`). Indexer stores never
     /// call this — their `view_threads` stays `None` so the `__flush`
     /// syscall dispatcher's thread ops fail-closed.
-    pub(crate) fn with_view_threads(
+    ///
+    /// Exposed `pub` for the integration test
+    /// (`tests/view_threads.rs`) to build a view runtime without the
+    /// full `MetashrewRuntime::new` 4 GB-pre-allocation path; production
+    /// callers should not touch this directly.
+    pub fn with_view_threads(
         mut self,
         registry: std::sync::Arc<crate::view_threads::ViewThreadRegistry>,
     ) -> Self {

@@ -26,6 +26,15 @@ lru-mem = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
+# Inline-WAT fixtures for the view-thread integration test. `wat` is
+# already a transitive dep through wasmtime, but we cite it explicitly
+# so the test target sees it.
+wat = "1"
+# In-memory KV adapter for end-to-end view-thread tests (build a real
+# MetashrewRuntime, invoke its view path, watch the spawn/join syscalls
+# fire). The adapter lives in memshrew-runtime which depends on us, so
+# we use a directed dev-dep cycle (only loaded for tests).
+memshrew-runtime = { path = "../memshrew-runtime" }
 
 [build-dependencies]
 prost-build.workspace = true

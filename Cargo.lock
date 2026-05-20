@@ -2868,6 +2868,7 @@ dependencies = [
  "itertools 0.12.1",
  "log",
  "lru-mem",
+ "memshrew-runtime",
  "prost",
  "prost-build",
  "sha2",
@@ -2875,6 +2876,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "wasmtime",
+ "wat",
 ]
 
 [[package]]

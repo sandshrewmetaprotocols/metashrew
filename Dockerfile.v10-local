@@ -1,0 +1,61 @@
+# Docker image for rockshrew-mono v10.0.0-alpha.1 — built from LOCAL source
+# (rsync'd from the developer box), NOT from a GitHub clone.
+#
+# Used to swap the meta k3s `rockshrew-v904-alkanes-fastpath-0` pod with
+# the v10 stack for a fresh-sync speed comparison vs nf (v9.0.5-rc.9).
+#
+# Build (on meta):
+#   cd /tmp/metashrew-v10
+#   docker build -t rockshrew-mono:v10.0.0-alpha.1 -f Dockerfile.v10-local .
+
+FROM rust:1.90-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    pkg-config \
+    clang \
+    libclang-dev \
+    libssl-dev \
+    protobuf-compiler \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build/metashrew
+# Copy the entire workspace. The .dockerignore in this repo excludes
+# `target/` and `.git/` so we don't ship the local build artifacts or
+# git history into the build context.
+COPY . .
+
+# Build only rockshrew-mono (the indexer entrypoint). All other workspace
+# members are pulled in via path deps and built transitively.
+RUN cargo build --release -p rockshrew-mono
+
+# === Runtime stage ===
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    libssl3 \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/metashrew/target/release/rockshrew-mono /usr/local/bin/
+
+# v10 image does NOT bake in a wasm. The fp pod template mounts wasm from
+# /zpool/espo-debug/indexer-wasm on the host — we keep that pattern so the
+# wasm can be swapped without rebuilding the image.
+
+RUN useradd -r -s /bin/false metashrew \
+    && mkdir -p /data /indexer \
+    && chown metashrew:metashrew /data /indexer
+
+USER metashrew
+VOLUME /data /indexer
+
+EXPOSE 8080
+
+ENV RUST_LOG=info \
+    HOST=0.0.0.0 \
+    PORT=8080
+
+CMD ["rockshrew-mono"]

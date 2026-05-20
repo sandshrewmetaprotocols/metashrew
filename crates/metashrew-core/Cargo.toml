@@ -32,4 +32,9 @@ test-utils = []
 panic-hook = []
 allocator = []
 debug-log = []
+# v10 view-syscall wasm-side wrapper. Off by default — wasm authors
+# opt in to the cache_get / cache_put / (future) spawn helpers by
+# building with `--features view-syscalls`. Pre-v10 wasm builds stay
+# byte-identical with the feature off.
+view-syscalls = []
 default = ["allocator"]

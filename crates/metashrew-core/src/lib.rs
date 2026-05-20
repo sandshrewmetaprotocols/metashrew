@@ -89,6 +89,8 @@ pub mod index_pointer;
 pub mod macros;
 pub mod stdio;
 pub mod proto;
+#[cfg(feature = "view-syscalls")]
+pub mod view;
 
 #[cfg(feature = "panic-hook")]
 use crate::compat::panic_hook;

@@ -57,6 +57,13 @@ pub struct RocksDBRuntimeAdapter {
     /// per-adapter-instance and dropped with it, so preview state never
     /// outlives the call.
     write_shadow: Option<WriteShadow>,
+    /// Process-wide cross-block length cache. Every clone of this
+    /// adapter shares the same Arc'd cache, so the block-apply path
+    /// and view-RPC reads both benefit from the same warmup. Populated
+    /// in `commit_atomic` after successful `db.write_opt`. See
+    /// [`metashrew_runtime::length_cache::LengthCache`] for the
+    /// consistency contract.
+    pub length_cache: metashrew_runtime::length_cache::LengthCache,
 }
 
 impl RocksDBRuntimeAdapter {
@@ -68,6 +75,7 @@ impl RocksDBRuntimeAdapter {
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
             write_shadow: None,
+            length_cache: metashrew_runtime::length_cache::LengthCache::new(),
         }
     }
 
@@ -84,6 +92,7 @@ impl RocksDBRuntimeAdapter {
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
             write_shadow: None,
+            length_cache: metashrew_runtime::length_cache::LengthCache::new(),
         })
     }
 
@@ -95,6 +104,7 @@ impl RocksDBRuntimeAdapter {
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
             write_shadow: None,
+            length_cache: metashrew_runtime::length_cache::LengthCache::new(),
         })
     }
 
@@ -124,6 +134,7 @@ impl RocksDBRuntimeAdapter {
             height: 0,
             kv_tracker: Arc::new(Mutex::new(None)),
             write_shadow: None,
+            length_cache: metashrew_runtime::length_cache::LengthCache::new(),
         }
     }
 
@@ -313,6 +324,10 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
                 }
             }
         }
+    }
+
+    fn length_cache(&self) -> Option<&metashrew_runtime::length_cache::LengthCache> {
+        Some(&self.length_cache)
     }
 
     /// Batched override: pipelines N point lookups into one `db.multi_get`
@@ -535,6 +550,11 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
             // Detach the kv_tracker — preview should not feed observability.
             kv_tracker: Arc::new(Mutex::new(None)),
             write_shadow: Some(Arc::new(RwLock::new(HashMap::new()))),
+            // Share the parent's length cache. Preview reads benefit
+            // from the same warmup; preview writes don't reach
+            // commit_atomic (they're shadowed) so they can't pollute
+            // the cache.
+            length_cache: self.length_cache.clone(),
         }
     }
 }

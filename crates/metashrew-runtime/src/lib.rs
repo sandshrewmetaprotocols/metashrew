@@ -7,6 +7,7 @@ pub mod chain_entries;
 pub mod context;
 pub mod helpers;
 pub mod key_utils;
+pub mod length_cache;
 pub mod proto;
 pub mod rollback;
 pub mod runtime;
@@ -20,6 +21,7 @@ pub mod view_threads;
 // Re-export core types and traits
 pub use context::MetashrewRuntimeContext;
 pub use runtime::{MetashrewRuntime, State, TIP_HEIGHT_KEY};
+pub use length_cache::LengthCache;
 pub use traits::{BatchLike, KVTrackerFn, KeyValueStoreLike};
 pub use view_limits::{
     MemoryFloor, ViewAcquireError, ViewLimiter, ViewLimitsConfig, ViewPermit,

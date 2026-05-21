@@ -1324,10 +1324,14 @@ pub async fn run_prod(args: Args) -> Result<()> {
         let engine = wasmtime::Engine::new(&config_engine)?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter, engine).await?;
         let storage_adapter = match runtime.context.read().unwrap().db {
-            ForkAdapter::Modern(ref modern_adapter) => {
-                RocksDBStorageAdapter::new(modern_adapter.db.clone())
-            }
+            ForkAdapter::Modern(ref modern_adapter) => RocksDBStorageAdapter::with_cache(
+                modern_adapter.db.clone(),
+                modern_adapter.length_cache.clone(),
+            ),
             ForkAdapter::Legacy(ref legacy_adapter) => {
+                // LegacyRocksDBRuntimeAdapter doesn't expose a length cache —
+                // fork-mode is rare in production and the cache only helps
+                // forward sync, so a fresh-empty cache here is fine.
                 RocksDBStorageAdapter::new(legacy_adapter.db.clone())
             }
         };
@@ -1350,7 +1354,12 @@ pub async fn run_prod(args: Args) -> Result<()> {
         config_engine.async_support(true);
         let engine = wasmtime::Engine::new(&config_engine)?;
         let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
-        let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
+        // Share the length cache with the runtime adapter so block-apply
+        // (which goes through `RocksDBRuntimeAdapter::multi_get_immutable` +
+        // chain_entries) and post-commit cache population (this adapter)
+        // see the same warmup.
+        let storage_adapter =
+            RocksDBStorageAdapter::with_cache(adapter.db.clone(), adapter.length_cache.clone());
         let runtime_adapter =
             MetashrewRuntimeAdapter::new(Arc::new(runtime))
                 .with_view_limits(view_limits_cfg.clone());

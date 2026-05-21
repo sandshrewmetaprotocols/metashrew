@@ -236,54 +236,63 @@ pub fn build_block_write_batch<T: KeyValueStoreLike>(
 ) -> Result<T::Batch> {
     let mut batch = storage.create_batch();
 
-    // Track lengths within this batch to handle multiple updates to the same
-    // key correctly — without this we'd read the stale on-disk length each
-    // iteration and clobber earlier updates with overlapping indices.
+    // Track lengths within this batch — handles multiple updates to the
+    // same key (each gets an incrementing chain index) without re-reading
+    // the stale on-disk length per iteration.
     let mut key_lengths: HashMap<Vec<u8>, u32> = HashMap::new();
 
-    // Pre-fetch every UNIQUE key's `/length` pointer in one batched call.
-    // Replaces what was previously N sequential RocksDB point lookups
-    // inside the per-key loop — at the mass-mint window (~10k unique
-    // keys/block) this is the load-bearing perf optimization on the
-    // indexer hot path. Backends without a real `multi_get_immutable`
-    // fall through to the trait default, which loops over
-    // `get_immutable`, so correctness is the same; only RocksDB gets
-    // the speedup.
-    //
-    // The `key_lengths` map is then seeded with the fetched values, so
-    // the loop below never touches storage for length reads — every
-    // entry hits the in-memory map. Duplicate keys within `key_values`
-    // (same key updated multiple times in one block) keep their
-    // incrementing-length-per-write semantics via the map updates at
-    // loop tail.
-    {
-        let mut unique: Vec<&[u8]> = key_values.iter().map(|(k, _)| k.as_slice()).collect();
-        unique.sort_unstable();
-        unique.dedup();
-        if !unique.is_empty() {
-            let length_keys: Vec<Vec<u8>> = unique
-                .iter()
-                .map(|k| [*k, b"/length".as_slice()].concat())
-                .collect();
-            let fetched = storage
-                .multi_get_immutable(&length_keys)
-                .map_err(|e| anyhow!("Storage error: {:?}", e))?;
-            for (k, opt) in unique.iter().zip(fetched.into_iter()) {
-                let len = opt
-                    .as_deref()
-                    .map(decode_chain_length)
-                    .unwrap_or(0);
-                key_lengths.insert(k.to_vec(), len);
+    // Stage 1: collect unique base keys, sorted (for cache-locality if
+    // we have to fall through to multi_get on misses).
+    let mut unique: Vec<&[u8]> = key_values.iter().map(|(k, _)| k.as_slice()).collect();
+    unique.sort_unstable();
+    unique.dedup();
+
+    // Stage 2: serve from the in-process length cache where possible.
+    // The cache is populated post-commit (see RocksDB adapter's
+    // `commit_atomic`), so reads here are durably-consistent: a failed
+    // commit leaves the cache untouched, so retry assigns the same
+    // chain indices the failed attempt built.
+    let cache = storage.length_cache();
+    let mut misses: Vec<&[u8]> = Vec::new();
+    if let Some(c) = cache {
+        for k in &unique {
+            match c.get(k) {
+                Some(len) => {
+                    key_lengths.insert(k.to_vec(), len);
+                }
+                None => misses.push(*k),
             }
+        }
+    } else {
+        // No cache available — every key is a miss.
+        misses.extend(unique.iter().copied());
+    }
+
+    // Stage 3: bulk-load the cache misses from disk via the batched
+    // `multi_get_immutable` API. After warmup this list is tiny
+    // (rare new keys), so the cost is dominated by the single
+    // RocksDB MultiGet call — much cheaper than the pre-cache
+    // pattern of N sequential point lookups per block.
+    if !misses.is_empty() {
+        let length_keys: Vec<Vec<u8>> = misses
+            .iter()
+            .map(|k| [*k, b"/length".as_slice()].concat())
+            .collect();
+        let fetched = storage
+            .multi_get_immutable(&length_keys)
+            .map_err(|e| anyhow!("Storage error: {:?}", e))?;
+        for (k, opt) in misses.iter().zip(fetched.into_iter()) {
+            let len = opt.as_deref().map(decode_chain_length).unwrap_or(0);
+            key_lengths.insert(k.to_vec(), len);
         }
     }
 
+    // Stage 4: emit the per-key writes. Every key now has its pre-block
+    // length seeded in `key_lengths`; the loop is pure in-memory work
+    // plus the batch.put calls. The cache is NOT updated here — that
+    // happens inside `commit_atomic` after `db.write_opt` succeeds, by
+    // walking the just-written batch.
     for (key, value) in key_values {
-        // After the pre-fetch above, every key has an entry in
-        // `key_lengths` (initialized to 0 for keys that didn't have an
-        // on-disk length). The `or_insert(0)` is defense-in-depth for
-        // any future call site that constructs `key_values` outside the
-        // pre-fetched set.
         let length = *key_lengths.entry(key.clone()).or_insert(0);
 
         let update_key = chain_entry_key(key, length);

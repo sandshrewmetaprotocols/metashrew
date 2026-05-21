@@ -226,6 +226,27 @@ pub trait KeyValueStoreLike {
         Ok(out)
     }
 
+    /// Optional cross-block length cache for v10 versioned-chain
+    /// `{key}/length` pointers. Backends that maintain one return
+    /// `Some(&cache)`; backends without one return `None` (the
+    /// default), and callers fall back to one disk read per length
+    /// pointer per block.
+    ///
+    /// Production RocksDB adapter overrides this to wire in
+    /// [`crate::length_cache::LengthCache`], which is populated after
+    /// every successful `commit_atomic` by walking the just-written
+    /// `WriteBatch` for `{key}/length` puts. Cache lookups in
+    /// `build_block_write_batch` then replace ~10k point lookups per
+    /// block (the mass-mint window cost) with in-memory HashMap reads.
+    ///
+    /// Consistency: the cache is durably-consistent with disk because
+    /// updates only happen post-commit. A failed commit + retry sees
+    /// the pre-commit cache state, so the retry's batch is byte-equal
+    /// to what the failed attempt built.
+    fn length_cache(&self) -> Option<&crate::length_cache::LengthCache> {
+        None
+    }
+
     /// Store a single key-value pair
     ///
     /// This is a convenience method for single operations. For multiple operations,

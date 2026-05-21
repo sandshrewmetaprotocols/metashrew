@@ -2,11 +2,42 @@
 
 use async_trait::async_trait;
 use log::{info, warn};
+use metashrew_runtime::chain_entries::decode_chain_length;
 use metashrew_runtime::rollback::{RollbackOp, SmtRollback};
 use metashrew_sync::{StorageAdapter, StorageStats, SyncError, SyncResult};
-use rocksdb::{WriteBatch, WriteOptions, DB};
+use rocksdb::{WriteBatch, WriteBatchIterator, WriteOptions, DB};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+
+/// Walks a `WriteBatch` extracting every `{key}/length` put as a
+/// `(base_key, new_length)` entry. Used by `commit_atomic` to populate
+/// the cross-block [`LengthCache`] AFTER the batch durably lands on
+/// disk — that ordering is what makes a failed commit a no-op for the
+/// cache (the cache stays untouched, retry sees pre-commit state).
+struct LengthExtractor {
+    out: HashMap<Vec<u8>, u32>,
+}
+
+impl WriteBatchIterator for LengthExtractor {
+    fn put(&mut self, key: Box<[u8]>, value: Box<[u8]>) {
+        // Only interested in keys ending with `/length` — those are the
+        // chain-length counters whose value is the new length post-write.
+        const SUFFIX: &[u8] = b"/length";
+        if key.len() > SUFFIX.len() && key.ends_with(SUFFIX) {
+            let base = &key[..key.len() - SUFFIX.len()];
+            self.out.insert(base.to_vec(), decode_chain_length(&value));
+        }
+    }
+
+    fn delete(&mut self, _key: Box<[u8]>) {
+        // No `{key}/length` deletes happen in the production path —
+        // chain rollback uses RollbackOp::Delete on indexed entries
+        // and rewrites the length pointer via put. If a delete ever
+        // landed here, we'd ignore it; the cache entry then stays
+        // stale until the next put for that key overwrites it.
+    }
+}
 
 
 /// v10: switch `commit_atomic` to `WriteOptions::disable_wal()` once the
@@ -65,6 +96,17 @@ pub struct RocksDBStorageAdapter {
     /// `SYNC_WAL_OFF_FLUSH_INTERVAL`, `commit_atomic` calls
     /// `db.flush()` to checkpoint and resets the counter.
     blocks_since_flush: Arc<AtomicU32>,
+    /// Process-wide length cache for v10 versioned-chain `{key}/length`
+    /// pointers. SHARED with the paired `RocksDBRuntimeAdapter` so the
+    /// block-apply hot path (via `chain_entries::build_block_write_batch`)
+    /// and post-commit cache population (via this adapter's
+    /// `commit_atomic`) both reference the same backing HashMap. Wire
+    /// via [`Self::with_cache`] at construction time.
+    ///
+    /// Default-constructed adapters get a fresh-empty cache (the
+    /// `new(db)` path used by tests + the rollback CLI). The pairing
+    /// is the production path in `rockshrew-mono::run`.
+    length_cache: metashrew_runtime::length_cache::LengthCache,
 }
 
 impl RocksDBStorageAdapter {
@@ -73,6 +115,23 @@ impl RocksDBStorageAdapter {
             db,
             bitcoind_tip: Arc::new(AtomicU32::new(0)),
             blocks_since_flush: Arc::new(AtomicU32::new(0)),
+            length_cache: metashrew_runtime::length_cache::LengthCache::new(),
+        }
+    }
+
+    /// Construct an adapter that shares its length cache with another
+    /// adapter (typically the paired `RocksDBRuntimeAdapter` so the
+    /// block-apply and view paths see the same warmup). The `LengthCache`
+    /// type is internally `Arc<RwLock<…>>`, so the clone is cheap.
+    pub fn with_cache(
+        db: Arc<DB>,
+        length_cache: metashrew_runtime::length_cache::LengthCache,
+    ) -> Self {
+        Self {
+            db,
+            bitcoind_tip: Arc::new(AtomicU32::new(0)),
+            blocks_since_flush: Arc::new(AtomicU32::new(0)),
+            length_cache,
         }
     }
 }
@@ -444,9 +503,33 @@ impl StorageAdapter for RocksDBStorageAdapter {
         } else {
             sync_write_options()
         };
+
+        // Walk the batch BEFORE write_opt to extract `{key}/length`
+        // updates. Doing it here (rather than after) means we don't
+        // hold the batch across the `write_opt` await — RocksDB's
+        // WriteBatch is move-into-write_opt, so the iteration must
+        // happen first. The extracted map is applied to the
+        // LengthCache only on successful write below; on error, the
+        // map is dropped and the cache stays at its pre-block state.
+        let length_updates = {
+            let mut extractor = LengthExtractor {
+                out: HashMap::new(),
+            };
+            batch.iterate(&mut extractor);
+            extractor.out
+        };
+
         self.db
             .write_opt(batch, &wo)
             .map_err(|e| SyncError::Storage(format!("commit_atomic write failed at height {}: {}", height, e)))?;
+
+        // Post-commit: durably-written, so the cache can be safely
+        // populated with the new lengths. Empty `length_updates` (no
+        // length keys in the batch — e.g. tests that pass empty
+        // batch_data) is a no-op `bulk_insert`.
+        if !length_updates.is_empty() {
+            self.length_cache.bulk_insert(length_updates);
+        }
 
         // Periodic checkpoint flush during the WAL-off window. Resets
         // the counter on flush. When WAL is on, we don't increment —

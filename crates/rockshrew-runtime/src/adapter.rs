@@ -315,6 +315,93 @@ impl KeyValueStoreLike for RocksDBRuntimeAdapter {
         }
     }
 
+    /// Batched override: pipelines N point lookups into one `db.multi_get`
+    /// call. Trait default would issue N sequential `db.get`s.
+    ///
+    /// Used by `chain_entries::build_block_write_batch` to fetch every
+    /// touched key's `/length` pointer in one round-trip per block. At
+    /// the mass-mint window's ~10k unique keys/block this turns ~10k
+    /// sequential RocksDB seeks into one batched call, which is the
+    /// load-bearing perf optimization on the indexer hot path.
+    ///
+    /// Behavior:
+    ///   - Honors `write_shadow` overrides + tombstones (same as the
+    ///     scalar `get_immutable`), so shadow-mode preview reads stay
+    ///     consistent.
+    ///   - Falls back to `fork_db` for keys not present in the main DB.
+    ///     The fallback is per-key (one extra `fork_db.get` per missing
+    ///     key); fork-mode is currently rare in production so the
+    ///     amortized cost is fine.
+    ///   - Preserves input ordering: result `[i]` corresponds to
+    ///     `keys[i]`.
+    fn multi_get_immutable<K: AsRef<[u8]>>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<Vec<u8>>>, Self::Error> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let labeled: Vec<Vec<u8>> = keys
+            .iter()
+            .map(|k| make_labeled_key_fast(k.as_ref()))
+            .collect();
+
+        // Capture shadow hits up front (no DB round-trip for these).
+        let shadow_hits: Vec<Option<Option<Vec<u8>>>> = if let Some(shadow) = &self.write_shadow {
+            let g = shadow.read().unwrap();
+            labeled
+                .iter()
+                .map(|k| g.get(k).cloned())
+                .collect()
+        } else {
+            vec![None; labeled.len()]
+        };
+
+        // Build a sub-list of keys that need a DB read (no shadow hit).
+        let to_fetch: Vec<&[u8]> = labeled
+            .iter()
+            .zip(shadow_hits.iter())
+            .filter_map(|(k, sh)| if sh.is_none() { Some(k.as_slice()) } else { None })
+            .collect();
+
+        let fetched: Vec<Result<Option<Vec<u8>>, rocksdb::Error>> = if to_fetch.is_empty() {
+            Vec::new()
+        } else {
+            self.db.multi_get(&to_fetch)
+        };
+
+        // Stitch results back into the original ordering. Index into
+        // `fetched` advances only when we consumed a non-shadow slot.
+        let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(labeled.len());
+        let mut fetched_iter = fetched.into_iter();
+        for (k, sh) in labeled.iter().zip(shadow_hits.into_iter()) {
+            if let Some(shadow_opt) = sh {
+                out.push(shadow_opt);
+                continue;
+            }
+            let main = match fetched_iter.next() {
+                Some(Ok(opt)) => opt,
+                Some(Err(e)) => return Err(e.into()),
+                None => unreachable!(
+                    "multi_get returned fewer results than non-shadow inputs (programming error)"
+                ),
+            };
+            match main {
+                Some(v) => out.push(Some(v)),
+                None => {
+                    // Fall back to fork_db for this key.
+                    if let Some(fork_db) = &self.fork_db {
+                        out.push(fork_db.get(k).map(|opt| opt.map(|v| v.to_vec()))?);
+                    } else {
+                        out.push(None);
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn delete<K: AsRef<[u8]>>(&mut self, key: K) -> Result<(), Self::Error> {
         let labeled_key = make_labeled_key_fast(key.as_ref());
         if let Some(shadow) = &self.write_shadow {

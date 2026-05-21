@@ -241,19 +241,50 @@ pub fn build_block_write_batch<T: KeyValueStoreLike>(
     // iteration and clobber earlier updates with overlapping indices.
     let mut key_lengths: HashMap<Vec<u8>, u32> = HashMap::new();
 
-    for (key, value) in key_values {
-        let length = if let Some(len) = key_lengths.get(key) {
-            *len
-        } else {
-            let length_key = [key.as_slice(), b"/length".as_slice()].concat();
-            match storage
-                .get_immutable(&length_key)
-                .map_err(|e| anyhow!("Storage error: {:?}", e))?
-            {
-                Some(length_bytes) => decode_chain_length(&length_bytes),
-                None => 0,
+    // Pre-fetch every UNIQUE key's `/length` pointer in one batched call.
+    // Replaces what was previously N sequential RocksDB point lookups
+    // inside the per-key loop — at the mass-mint window (~10k unique
+    // keys/block) this is the load-bearing perf optimization on the
+    // indexer hot path. Backends without a real `multi_get_immutable`
+    // fall through to the trait default, which loops over
+    // `get_immutable`, so correctness is the same; only RocksDB gets
+    // the speedup.
+    //
+    // The `key_lengths` map is then seeded with the fetched values, so
+    // the loop below never touches storage for length reads — every
+    // entry hits the in-memory map. Duplicate keys within `key_values`
+    // (same key updated multiple times in one block) keep their
+    // incrementing-length-per-write semantics via the map updates at
+    // loop tail.
+    {
+        let mut unique: Vec<&[u8]> = key_values.iter().map(|(k, _)| k.as_slice()).collect();
+        unique.sort_unstable();
+        unique.dedup();
+        if !unique.is_empty() {
+            let length_keys: Vec<Vec<u8>> = unique
+                .iter()
+                .map(|k| [*k, b"/length".as_slice()].concat())
+                .collect();
+            let fetched = storage
+                .multi_get_immutable(&length_keys)
+                .map_err(|e| anyhow!("Storage error: {:?}", e))?;
+            for (k, opt) in unique.iter().zip(fetched.into_iter()) {
+                let len = opt
+                    .as_deref()
+                    .map(decode_chain_length)
+                    .unwrap_or(0);
+                key_lengths.insert(k.to_vec(), len);
             }
-        };
+        }
+    }
+
+    for (key, value) in key_values {
+        // After the pre-fetch above, every key has an entry in
+        // `key_lengths` (initialized to 0 for keys that didn't have an
+        // on-disk length). The `or_insert(0)` is defense-in-depth for
+        // any future call site that constructs `key_values` outside the
+        // pre-fetched set.
+        let length = *key_lengths.entry(key.clone()).or_insert(0);
 
         let update_key = chain_entry_key(key, length);
         batch.put(&update_key, encode_value_entry(height, value));

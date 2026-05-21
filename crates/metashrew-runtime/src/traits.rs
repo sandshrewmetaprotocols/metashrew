@@ -201,6 +201,31 @@ pub trait KeyValueStoreLike {
     /// * `Err(error)` - If there was a storage error
     fn get_immutable<K: AsRef<[u8]>>(&self, key: K) -> Result<Option<Vec<u8>>, Self::Error>;
 
+    /// Batched immutable point lookups for `keys`. Returns one `Option<Vec<u8>>`
+    /// per input key, in the same order — `None` for missing keys.
+    ///
+    /// The default implementation loops over [`get_immutable`] so any
+    /// `KeyValueStoreLike` works unchanged. Storage backends that can pipeline
+    /// reads (notably RocksDB via `db.multi_get`) should override this — it's
+    /// the hot path used by [`crate::chain_entries::build_block_write_batch`]
+    /// to fetch all per-key length pointers in one round-trip, replacing
+    /// what was previously N sequential RocksDB point lookups per block.
+    ///
+    /// Override invariants:
+    /// - Result length MUST equal `keys.len()`.
+    /// - Result ordering MUST match input ordering (callers correlate by
+    ///   index, not by key, so reordering breaks consumers).
+    fn multi_get_immutable<K: AsRef<[u8]>>(
+        &self,
+        keys: &[K],
+    ) -> Result<Vec<Option<Vec<u8>>>, Self::Error> {
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            out.push(self.get_immutable(k)?);
+        }
+        Ok(out)
+    }
+
     /// Store a single key-value pair
     ///
     /// This is a convenience method for single operations. For multiple operations,

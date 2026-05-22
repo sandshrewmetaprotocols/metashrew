@@ -144,6 +144,17 @@ pub const ATOMIC_RETRY_ERROR_THRESHOLD: u32 = 30;
 pub const ATOMIC_RETRY_ERROR_SPAM_EVERY: u32 = 10;
 /// Cap on the per-attempt backoff (ms).
 pub const ATOMIC_RETRY_BACKOFF_CAP_MS: u64 = 30_000;
+/// Maximum total attempts the retry loop will make before giving up
+/// and surfacing the underlying error to the caller. Before this cap
+/// existed (rc.3 — `150abef` "never exit on atomic-write failure") the
+/// loop spun forever on persistent failures like RocksDB "Too many open
+/// files" (mork1e's pod 2026-05-21: block 892936 retried 600+ attempts
+/// before a manual restart cleared it). At the 30 s backoff cap, 30
+/// attempts is roughly 10-15 minutes of total retry time — enough to
+/// ride out a transient compaction-induced FD spike, but short enough
+/// that operators get a clear failure signal rather than hours of
+/// silent CPU-idle spinning.
+pub const MAX_ATOMIC_COMMIT_ATTEMPTS: u32 = 30;
 
 /// Returns the milliseconds to sleep *before* `attempt` (1-indexed). Attempt 1
 /// returns 0 — no sleep before the first try.
@@ -559,10 +570,24 @@ where
             block_data.len()
         );
 
-        // 2. Infinite-retry atomic apply. Block until commit succeeds.
+        // 2. Bounded-retry atomic apply. Block until commit succeeds OR
+        //    until we exceed MAX_ATOMIC_COMMIT_ATTEMPTS, in which case
+        //    surface the last error to the caller (previously this loop
+        //    was unbounded; see mork1e's 600-attempt wedge on block 892936
+        //    documented at MAX_ATOMIC_COMMIT_ATTEMPTS).
         let mut attempt: u32 = 0;
+        let mut last_err: Option<String> = None;
         loop {
             attempt = attempt.saturating_add(1);
+
+            if attempt > MAX_ATOMIC_COMMIT_ATTEMPTS {
+                let msg = last_err.unwrap_or_else(|| "no error captured".to_string());
+                return Err(SyncError::Storage(format!(
+                    "process_block: commit_atomic at height {} exceeded \
+                     max-retry budget ({} attempts): last error: {}",
+                    height, MAX_ATOMIC_COMMIT_ATTEMPTS, msg
+                )));
+            }
 
             // Backoff (no sleep before first attempt).
             if attempt > 1 {
@@ -602,22 +627,26 @@ where
                             return Ok(());
                         }
                         Err(commit_err) => {
+                            let msg = format!("{}", commit_err);
                             log_atomic_retry_failure(
                                 "atomic commit",
                                 height,
                                 attempt,
-                                &format!("{}", commit_err),
+                                &msg,
                             );
+                            last_err = Some(format!("commit_atomic: {}", msg));
                         }
                     }
                 }
                 Err(atomic_err) => {
+                    let msg = format!("{}", atomic_err);
                     log_atomic_retry_failure(
                         "atomic block execution",
                         height,
                         attempt,
-                        &format!("{}", atomic_err),
+                        &msg,
                     );
+                    last_err = Some(format!("process_block_atomic: {}", msg));
                 }
             }
 

@@ -56,12 +56,17 @@ use metashrew_sync::snapshot::SyncMode;
 use metashrew_sync::snapshot_sync::SnapshotMetashrewSync;
 use metashrew_sync::{MockBitcoinNode, MockRuntime, MockStorage, SnapshotSyncEngine, SyncConfig};
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::time::{self, timeout};
 
-/// Bound — even on a slow runner, an honest retry policy that respects
-/// the 30 s backoff cap should be DONE inside this window. With the
-/// bug present the loop spins forever and the timeout fires.
-const PROCESS_BLOCK_DEADLINE: Duration = Duration::from_secs(60);
+/// VIRTUAL-time deadline (tokio's `start_paused = true` mocks the clock,
+/// so the retry loop's backoff `sleep`s consume virtual time only).
+/// Honest bounded retry cap of 30 attempts at exponential backoff
+/// peaking at 30 s/attempt = ~10 minutes virtual time total. Set
+/// the test deadline a comfortable 2× above that. If the loop is
+/// unbounded (bug present), `auto-advance` runs virtual time forward
+/// inside the sleeps, this deadline fires, and the test asserts the
+/// failure with a clear message.
+const RETRY_LOOP_VIRTUAL_DEADLINE: Duration = Duration::from_secs(20 * 60);
 
 fn test_config() -> SyncConfig {
     SyncConfig {
@@ -74,8 +79,14 @@ fn test_config() -> SyncConfig {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn commit_atomic_persistent_failure_must_return_err_within_deadline() {
+    // start_paused = true → tokio's clock is virtual; `sleep()` calls
+    // inside the retry loop's backoff complete instantly (auto-advance
+    // applies once nothing else is runnable). 30 attempts × 30 s
+    // backoff caps becomes ~0 ms of real time. Without this, the test
+    // would take ~11 minutes to fail-fast when the fix is present.
+    let _ = time::pause;
     let runtime = MockRuntime::new();
     let storage = MockStorage::new();
 
@@ -109,7 +120,7 @@ async fn commit_atomic_persistent_failure_must_return_err_within_deadline() {
     // "same infinite-retry-with-exponential-backoff policy as
     // process_block"). Both code paths have the same bug.
     let outcome = timeout(
-        PROCESS_BLOCK_DEADLINE,
+        RETRY_LOOP_VIRTUAL_DEADLINE,
         sync.process_block_with_snapshots(1, &block_data),
     )
     .await;
@@ -133,14 +144,13 @@ async fn commit_atomic_persistent_failure_must_return_err_within_deadline() {
              the retry loop must NOT swallow persistent commit failures"
         ),
         Err(_elapsed) => panic!(
-            "process_block did not return within {:?} — the retry loop \
-             has no max-attempts bound and spun forever. This is the \
-             production bug: mork1e's node at block 892936 retried 600+ \
-             attempts on `Too many open files` with no operator-visible \
-             give-up. The fix: cap retries at N attempts (suggest 20-30, \
-             which at the 30 s backoff cap is 10-15 min before failing \
-             the block visibly).",
-            PROCESS_BLOCK_DEADLINE
+            "process_block did not return within {:?} (wall-clock) — the \
+             retry loop has no max-attempts bound and spun forever. This \
+             is the production bug: mork1e's node at block 892936 retried \
+             600+ attempts on `Too many open files` with no operator-visible \
+             give-up. The fix: cap retries at N attempts (see \
+             MAX_ATOMIC_COMMIT_ATTEMPTS in sync.rs).",
+            RETRY_LOOP_VIRTUAL_DEADLINE
         ),
     }
 }

@@ -1299,10 +1299,15 @@ pub async fn run_prod(args: Args) -> Result<()> {
             let modern_adapter = RocksDBRuntimeAdapter::open_fork(db_path, fork_path_str, opts)?;
             ForkAdapter::Modern(modern_adapter)
         };
-        let mut config_engine = wasmtime::Config::default();
-        config_engine.async_support(true);
-        let engine = wasmtime::Engine::new(&config_engine)?;
-        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter, engine).await?;
+        // Engine construction now lives inside MetashrewRuntime::load (see
+        // metashrew_runtime::indexer_config for the deterministic-flags
+        // rationale). Previously this site built a bare-defaults engine
+        // and passed it in, with the consequence that ONLY the view-side
+        // async engine got the deterministic flags — the indexer engine
+        // that actually wrote state was missing memory_reservation,
+        // NaN canonicalization, SIMD determinism, etc. Leading
+        // hypothesis for the g vs h 907-DIESEL drift at h=950299.
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter).await?;
         let storage_adapter = match runtime.context.read().unwrap().db {
             ForkAdapter::Modern(ref modern_adapter) => {
                 RocksDBStorageAdapter::new(modern_adapter.db.clone())
@@ -1318,10 +1323,15 @@ pub async fn run_prod(args: Args) -> Result<()> {
     } else {
         let adapter =
             RocksDBRuntimeAdapter::open_optimized(args.db_path.to_string_lossy().to_string())?;
-        let mut config_engine = wasmtime::Config::default();
-        config_engine.async_support(true);
-        let engine = wasmtime::Engine::new(&config_engine)?;
-        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone(), engine).await?;
+        // Engine construction now lives inside MetashrewRuntime::load (see
+        // metashrew_runtime::indexer_config for the deterministic-flags
+        // rationale). Previously this site built a bare-defaults engine
+        // and passed it in, with the consequence that ONLY the view-side
+        // async engine got the deterministic flags — the indexer engine
+        // that actually wrote state was missing memory_reservation,
+        // NaN canonicalization, SIMD determinism, etc. Leading
+        // hypothesis for the g vs h 907-DIESEL drift at h=950299.
+        let runtime = MetashrewRuntime::load(args.indexer.clone(), adapter.clone()).await?;
         let storage_adapter = RocksDBStorageAdapter::new(adapter.db.clone());
         let runtime_adapter =
             MetashrewRuntimeAdapter::new(Arc::new(runtime))

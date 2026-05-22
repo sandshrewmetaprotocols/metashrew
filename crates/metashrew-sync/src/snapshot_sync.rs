@@ -366,6 +366,7 @@ where
         }
 
         let mut attempt: u32 = 0;
+        let mut last_err: Option<String> = None;
         loop {
             attempt = attempt.saturating_add(1);
 
@@ -389,6 +390,23 @@ where
                     height, current, attempt
                 );
                 return Ok(());
+            }
+
+            // Max-attempts bound (companion to the staleness guard above):
+            // covers the OTHER way the retry loop wedged in production,
+            // where commit_atomic returns a non-staleness error every time
+            // (mork1e 2026-05-21: block 892936 retried 600+ attempts on
+            // "Too many open files"). See MAX_ATOMIC_COMMIT_ATTEMPTS in
+            // sync.rs for the rationale on the specific cap.
+            if attempt > crate::sync::MAX_ATOMIC_COMMIT_ATTEMPTS {
+                let msg = last_err.unwrap_or_else(|| "no error captured".to_string());
+                return Err(SyncError::Storage(format!(
+                    "snapshot-path: commit_atomic at height {} exceeded \
+                     max-retry budget ({} attempts): last error: {}",
+                    height,
+                    crate::sync::MAX_ATOMIC_COMMIT_ATTEMPTS,
+                    msg
+                )));
             }
 
             if attempt > 1 {
@@ -421,22 +439,26 @@ where
                             return Ok(());
                         }
                         Err(commit_err) => {
+                            let msg = format!("{}", commit_err);
                             crate::sync::log_atomic_retry_failure(
                                 "snapshot-path atomic commit",
                                 height,
                                 attempt,
-                                &format!("{}", commit_err),
+                                &msg,
                             );
+                            last_err = Some(format!("commit_atomic: {}", msg));
                         }
                     }
                 }
                 Err(atomic_err) => {
+                    let msg = format!("{}", atomic_err);
                     crate::sync::log_atomic_retry_failure(
                         "snapshot-path atomic block execution",
                         height,
                         attempt,
-                        &format!("{}", atomic_err),
+                        &msg,
                     );
+                    last_err = Some(format!("process_block_atomic: {}", msg));
                 }
             }
 
@@ -556,6 +578,7 @@ where
         let block_hash = self.node.get_block_hash(height).await?;
 
         let mut attempt: u32 = 0;
+        let mut last_err: Option<String> = None;
         loop {
             attempt = attempt.saturating_add(1);
 
@@ -573,6 +596,22 @@ where
                     height, current, attempt
                 );
                 return Ok(());
+            }
+
+            // Max-attempts bound: see MAX_ATOMIC_COMMIT_ATTEMPTS in sync.rs
+            // for the rationale (mork1e's 600-attempt wedge on block
+            // 892936 with persistent "Too many open files"). At this
+            // cap the loop has been retrying for ~10-15 minutes against
+            // a persistent failure — operator needs the signal.
+            if attempt > crate::sync::MAX_ATOMIC_COMMIT_ATTEMPTS {
+                let msg = last_err.unwrap_or_else(|| "no error captured".to_string());
+                return Err(SyncError::Storage(format!(
+                    "snapshot-loop: commit_atomic at height {} exceeded \
+                     max-retry budget ({} attempts): last error: {}",
+                    height,
+                    crate::sync::MAX_ATOMIC_COMMIT_ATTEMPTS,
+                    msg
+                )));
             }
 
             if attempt > 1 {
@@ -630,22 +669,26 @@ where
                             return Ok(());
                         }
                         Err(commit_err) => {
+                            let msg = format!("{}", commit_err);
                             crate::sync::log_atomic_retry_failure(
                                 "snapshot-loop atomic commit",
                                 height,
                                 attempt,
-                                &format!("{}", commit_err),
+                                &msg,
                             );
+                            last_err = Some(format!("commit_atomic: {}", msg));
                         }
                     }
                 }
                 Err(atomic_err) => {
+                    let msg = format!("{}", atomic_err);
                     crate::sync::log_atomic_retry_failure(
                         "snapshot-loop atomic execution",
                         height,
                         attempt,
-                        &format!("{}", atomic_err),
+                        &msg,
                     );
+                    last_err = Some(format!("process_block_atomic: {}", msg));
                 }
             }
 

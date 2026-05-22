@@ -326,11 +326,12 @@ assert no `__flush` partial-batch errors.
 
 | Bug | Test path | Status |
 |-----|-----------|--------|
-| 1: infinite retry on commit failure | `crates/metashrew-sync/tests/commit_atomic_persistent_failure_should_fail_visibly.rs` | RED ✗ |
-| 2: indexer engine missing determinism flags | TBD: `crates/metashrew-runtime/tests/indexer_engine_determinism.rs` | NOT WRITTEN |
-| 3: concurrent view-during-indexing drift | TBD: `crates/rockshrew-mono/tests/concurrent_view_index_determinism.rs` | NOT WRITTEN — heavyweight |
-| 4: StorageMap serialize order | TBD: in alkanes-rs `alkanes-support` crate | NOT WRITTEN — different repo |
-| 5: __flush partial-batch under memory pressure | subsumed by Bug 2 | — |
+| 1: infinite retry on commit failure | `crates/metashrew-sync/tests/commit_atomic_persistent_failure_should_fail_visibly.rs` | **GREEN ✓** — fix landed `970e074` (MAX_ATOMIC_COMMIT_ATTEMPTS = 30 across all three retry sites) |
+| 2: indexer engine missing determinism flags | (refactor + integration tests in `metashrew-runtime`/`rockshrew-mono`/`rockshrew-runtime`/`metashrew-sync`) | **FIXED ✓** — refactor landed `d95a0ea` (centralized `indexer_config()`; all 70+ tests pass) |
+| FD exhaustion under prod load | (no unit test; `rlimit::Resource::NOFILE.set(...)` in main) | **FIXED ✓** — rlimit bump at startup landed `49eba3a` (target 1_048_576, idempotent) |
+| 3: concurrent view-during-indexing drift | TBD: deterministic concurrent-load harness on lowbot via Docker | NOT WRITTEN — heavyweight; next session |
+| 4: StorageMap serialize order | (would be in `alkanes-support`) | NOT APPLICABLE — `alkanes_support::StorageMap` already uses `BTreeMap`, iteration is sorted; `metashrew-core::flush` iterates `TO_FLUSH` (a `Vec`, insertion-ordered) |
+| 5: __flush partial-batch under memory pressure | subsumed by Bug 2 | **FIXED ✓** — `memory_reservation(0x100000000)` now applies to the indexer engine |
 
 ---
 
@@ -338,11 +339,32 @@ assert no `__flush` partial-batch errors.
 
 | Patch | What it changed | Did it make things worse? |
 |-------|------------------|---------------------------|
-| rc.3 (`150abef`) "never exit on atomic-write failure" | retry loop became unbounded | YES — Bug 1 |
+| rc.3 (`150abef`) "never exit on atomic-write failure" | retry loop became unbounded | YES — Bug 1; **superseded by `970e074`** |
 | rc.5 (`02a769d`) single-batch atomic commit | strict in-order rejection | Combined with rc.3 → wedge on stale heights (separate fix: rc.9 staleness guard) |
 | rc.9 (snapshot_path_stale_retry_test.rs guard) | staleness guard | NO — fix for an interaction the previous rcs created |
-| v10 `LengthCache` (`0e32f48`) | process-wide chain-length cache | UNKNOWN — needs audit. Could interact with concurrent reads from views. |
+| `MetashrewRuntime::{load,new}` engine parameter | accepted engine from caller; caller (rockshrew-mono) built it bare-defaults | YES — Bug 2; **superseded by `d95a0ea`** |
+| v10 `LengthCache` (`0e32f48`) | process-wide chain-length cache | UNKNOWN — needs concurrent-read audit next session. View path doesn't read the cache; only `chain_entries::build_block_write_batch` does, and updates happen post-commit. Looks safe but worth verifying under load. |
 | v10 SMT removal (`c23b14f`) | removed dead SMT state-root code | NO — confirmed neutral perf-wise, removed footgun |
 | v10 multi_get optimization (`7f9a7bc` superseded by `0e32f48`) | bulk `/length` lookups via RocksDB MultiGet | Superseded; not in current code |
 | v10 view-syscall (`5b41ac9..00c8830`) | `__flush` dispatcher + ThreadSpawn/Join | View-only, NOT consensus. Should not affect indexer determinism. |
 | preview_isolation fix | `create_isolated_copy` actually isolates | NO — fixed a real bug, tested |
+
+## What's pushed where
+
+`kungfuflex/metashrew @ kungfuflex/v10.0.0-alpha.1`:
+- `970e074` cap retry attempts at MAX_ATOMIC_COMMIT_ATTEMPTS (Bug 1)
+- `d95a0ea` centralized `indexer_config()` for deterministic engine flags (Bug 2)
+- `49eba3a` raise RLIMIT_NOFILE at startup (FD-exhaustion mitigation)
+
+`kungfuflex/alkanes-rs @ kungfuflex/v3.0.0`:
+- `c2b18c26` direct-write `/upgrade_initialized` in fastpath test setups
+- earlier: `722b1e29..0afa0fd4` PrecompiledAlkane abstraction Phase 1-3
+
+## Next session
+
+1. Concurrent view-during-indexing harness on lowbot via Docker.
+   Stand up a deterministic minimal indexer + spam concurrent JSON-RPC
+   view requests during block apply; assert state determinism.
+2. LengthCache audit under that harness — verify reads from views
+   don't race with post-commit `bulk_insert`.
+3. Rebuild + redeploy v10 pod on meta to pick up `970e074..49eba3a`.

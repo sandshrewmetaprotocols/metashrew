@@ -2358,6 +2358,63 @@ pub async fn setup_linker_view(
                         }
                     };
 
+                    // v10 indexer syscall dispatch: peek byte 0 to
+                    // disambiguate a legacy KeyValueFlush payload from a
+                    // new-style IndexerSyscall payload. See
+                    // `indexer_syscall.rs` for the byte-peek rationale.
+                    // No allocation, no decode — just one comparison.
+                    use crate::indexer_syscall::{
+                        classify as classify_indexer_flush, dispatch_indexer_syscall,
+                        FlushKind, SyscallResult,
+                    };
+                    if classify_indexer_flush(&encoded_vec) == FlushKind::Syscall {
+                        let payload = &encoded_vec[1..];
+                        // Decode once to extract the wasm-provided
+                        // response buffer location (some opcodes need
+                        // it, some don't; we always extract so the per-
+                        // opcode handler doesn't have to re-decode).
+                        let (response_ptr, response_max) = match
+                            crate::proto::metashrew::IndexerSyscall::decode(payload)
+                        {
+                            Ok(s) => (s.response_ptr as usize, s.response_max as usize),
+                            Err(_e) => {
+                                // Magic byte was set but the payload
+                                // doesn't decode. Wasm bug or wire-
+                                // format skew — fail closed.
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        };
+                        match dispatch_indexer_syscall(payload) {
+                            SyscallResult::NoResponse => {}
+                            SyscallResult::Respond(value) => {
+                                write_syscall_response(
+                                    &mem, &mut caller,
+                                    response_ptr, response_max, &value,
+                                );
+                            }
+                            SyscallResult::UnsupportedOp => {
+                                // Deterministic miss marker: len=0 in
+                                // the response buffer. Wasm callers can
+                                // distinguish "op not wired" from
+                                // "op returned empty" via the proto
+                                // opcode they sent (it knows what it
+                                // asked for).
+                                write_syscall_response(
+                                    &mem, &mut caller,
+                                    response_ptr, response_max, &[],
+                                );
+                            }
+                            SyscallResult::DecodeFailure => {
+                                caller.data_mut().had_failure = true;
+                                return;
+                            }
+                        }
+                        // Syscall path is complete; do NOT fall through
+                        // into the legacy KeyValueFlush write path.
+                        return;
+                    }
+
                     let decoded = match KeyValueFlush::decode(&*encoded_vec) {
                         Ok(d) => d,
                         Err(_e) => {

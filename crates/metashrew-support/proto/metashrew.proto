@@ -93,3 +93,61 @@ message ThreadSpawn {
 message ThreadJoin {
   uint32 thread_id = 1;
 }
+
+// =============================================================================
+// Indexer-mode syscalls (v10).
+//
+// `__flush` in indexer mode normally accepts a `KeyValueFlush` protobuf
+// (legacy semantic: commit these k/v pairs to the version chain). To
+// add new host capabilities to the consensus-critical indexer path
+// without breaking the existing ABI, we multiplex the same `__flush`
+// entry point with a **byte-peek discriminator** scheme:
+//
+//   * Byte 0 == 0x01     ->  rest of buf is `IndexerSyscall` protobuf
+//   * Byte 0 >= 0x08     ->  whole buf is legacy `KeyValueFlush` protobuf
+//   * Byte 0 in [0..0x08) and != 0x01 -> reserved for future dispatch tags
+//
+// Why byte-peek instead of the view-side try-decode-fallback? Protobuf
+// field number 0 is forbidden, so any valid encoded protobuf starts at
+// byte >= 0x08 (lowest tag = field 1 wire-type 0 = 0x08). Reserving
+// bytes 0x00..0x08 as dispatch tags is unambiguous AND avoids field-
+// tag collision risk between KeyValueFlush (field 1) and any
+// IndexerSyscall payload that also uses field 1.
+//
+// Determinism: unlike ViewSyscall (perf-only), IndexerSyscall opcodes
+// directly affect on-chain state. Every opcode MUST be either
+// (a) byte-for-byte deterministic given the same inputs, or
+// (b) explicitly host-validated for deterministic merge (e.g. the
+//     Block-STM scheduler in syscall step 5 ensures parallel
+//     tx-execution produces the same final state as sequential).
+//
+// Wasm-side ergonomics: the wasm wrapper prepends the magic byte to
+// the encoded IndexerSyscall before invoking __flush. The host strips
+// the magic byte before decoding, so the proto payload itself is just
+// the IndexerSyscall message bytes.
+// =============================================================================
+
+message IndexerSyscall {
+  oneof request {
+    // Placeholder so the oneof has at least one variant during the
+    // skeleton commit. Real opcodes land in subsequent commits:
+    //   2  BatchGet         (multi_get via single syscall)
+    //   3  ThreadSpawn      (Block-STM tx-handler spawn)
+    //   4  ThreadJoin
+    //   5  ConflictRead     (instrumented __get for conflict tracking)
+    //   6  ConflictWrite    (instrumented __set for conflict tracking)
+    //   7  PipelineHint     (wasm-side advisory on commit pipelining)
+    Noop noop = 1;
+  }
+  // Pre-allocated response buffer in wasm linear memory. Host writes
+  // `[u32 LE: response_len | response_bytes]` starting at this offset.
+  // Many opcodes (e.g. ThreadSpawn) don't need a response; those should
+  // set response_ptr=0 and the host will skip the write.
+  uint32 response_ptr = 100;
+  uint32 response_max = 101;
+}
+
+// Trivial no-op opcode used by the skeleton tests to exercise the
+// dispatch path without any host-side side effects. Safe to leave in
+// the wire format permanently — wasm should never invoke it in prod.
+message Noop {}

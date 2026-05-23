@@ -42,3 +42,18 @@ message ThreadSpawn {
 message ThreadJoin {
   uint32 thread_id = 1;
 }
+
+// =============================================================================
+// Indexer-mode syscalls (v10) — see metashrew-support/proto/metashrew.proto
+// for the full doc-comment. Keep this lockstep with the support copy.
+// =============================================================================
+
+message IndexerSyscall {
+  oneof request {
+    Noop noop = 1;
+  }
+  uint32 response_ptr = 100;
+  uint32 response_max = 101;
+}
+
+message Noop {}

@@ -37,4 +37,10 @@ debug-log = []
 # building with `--features view-syscalls`. Pre-v10 wasm builds stay
 # byte-identical with the feature off.
 view-syscalls = []
+# v10 indexer-syscall wasm-side wrappers (BatchGet, ConflictRead/Write,
+# IndexerThreadSpawn/Join). Off by default — wasm authors opt in via
+# `--features indexer-syscalls` to access the Block-STM parallel
+# execution primitives. Sequential indexer builds stay byte-identical
+# with the feature off.
+indexer-syscalls = []
 default = ["allocator"]

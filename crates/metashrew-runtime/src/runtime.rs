@@ -199,6 +199,14 @@ pub struct State {
     /// all view stores. Required (along with `block_stm`) for
     /// ConflictRead/Write to take effect.
     pub(crate) tx_seq: Option<u32>,
+
+    /// Per-block thread registry for IndexerThreadSpawn/Join opcodes.
+    /// `Some(_)` only on the main indexer Store during parallel-block
+    /// execution. Spawned tx-handler Stores do NOT carry this (they
+    /// cannot themselves spawn grandchildren — keeps the spawn tree
+    /// flat for determinism).
+    pub(crate) indexer_threads:
+        Option<std::sync::Arc<crate::indexer_threads::IndexerThreadRegistry>>,
 }
 
 impl State {
@@ -233,6 +241,7 @@ impl State {
             view_threads: None,
             block_stm: None,
             tx_seq: None,
+            indexer_threads: None,
         }
     }
 
@@ -253,6 +262,17 @@ impl State {
     /// The main indexer Store never sets this.
     pub fn with_tx_seq(mut self, tx_seq: u32) -> Self {
         self.tx_seq = Some(tx_seq);
+        self
+    }
+
+    /// Attach an IndexerThreadRegistry to the main indexer Store.
+    /// Required for IndexerThreadSpawn/Join opcodes to function;
+    /// absent → opcodes return INVALID sentinels.
+    pub fn with_indexer_threads(
+        mut self,
+        registry: std::sync::Arc<crate::indexer_threads::IndexerThreadRegistry>,
+    ) -> Self {
+        self.indexer_threads = Some(registry);
         self
     }
 
@@ -638,7 +658,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         {
             Self::setup_linker(context.clone(), &mut linker).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup basic linker")?;
-            Self::setup_linker_indexer(context.clone(), &mut linker).await
+            Self::setup_linker_indexer(context.clone(), &mut linker, Some(module.clone())).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup indexer linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
@@ -690,7 +710,7 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         {
             Self::setup_linker(context.clone(), &mut linker).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup basic linker")?;
-            Self::setup_linker_indexer(context.clone(), &mut linker).await
+            Self::setup_linker_indexer(context.clone(), &mut linker, Some(module.clone())).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup indexer linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
@@ -1568,6 +1588,129 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         }
     }
 
+    /// Build a fresh indexer-runtime instance for a spawned tx-handler.
+    ///
+    /// Mirror of `run_spawned_view_thread_impl` but for the indexer
+    /// path. Key differences from the view side:
+    ///
+    /// 1. The child Store's `State` carries `block_stm` (cloned Arc)
+    ///    + `tx_seq` so ConflictRead/ConflictWrite opcodes route
+    ///    through the same per-block MvMemory as the parent's other
+    ///    tx-handlers.
+    /// 2. `indexer_threads` is NOT installed on the child Store.
+    ///    Children cannot themselves spawn grandchildren — keeps the
+    ///    spawn tree flat for determinism.
+    /// 3. `setup_linker_indexer` is called with `spawn_module=None`
+    ///    so the child's IndexerThreadSpawn opcode returns
+    ///    INVALID_THREAD_ID (it has no module to instantiate from).
+    ///
+    /// Returns the i32 return value of the tx-handler, or
+    /// `INVALID_EXIT_CODE` on any failure. Failures are logged but
+    /// never panic — the OS thread runs to completion and the join
+    /// path reads the exit code.
+    pub(crate) async fn run_spawned_indexer_tx_handler_impl(
+        engine: wasmtime::Engine,
+        module: wasmtime::Module,
+        context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
+        block_stm: std::sync::Arc<crate::block_stm::BlockStmCtx>,
+        tx_seq: u32,
+        fn_idx: u32,
+        arg: u32,
+    ) -> i32
+    where
+        <T as KeyValueStoreLike>::Batch: Send,
+    {
+        let mut linker = Linker::<State>::new(&engine);
+        let state = State::new()
+            .with_block_stm(block_stm)
+            .with_tx_seq(tx_seq);
+        let mut store = Store::<State>::new(&engine, state);
+        store.limiter(|s| &mut s.limits);
+
+        if let Err(e) = Self::setup_linker(context.clone(), &mut linker).await {
+            log::warn!("spawned indexer tx-handler: setup_linker failed: {:?}", e);
+            return crate::indexer_threads::INVALID_EXIT_CODE;
+        }
+        if let Err(e) =
+            Self::setup_linker_indexer(context.clone(), &mut linker, None).await
+        {
+            log::warn!(
+                "spawned indexer tx-handler: setup_linker_indexer failed: {:?}",
+                e
+            );
+            return crate::indexer_threads::INVALID_EXIT_CODE;
+        }
+        if let Err(e) = linker.define_unknown_imports_as_traps(&module) {
+            log::warn!(
+                "spawned indexer tx-handler: define_unknown_imports_as_traps failed: {:?}",
+                e
+            );
+            return crate::indexer_threads::INVALID_EXIT_CODE;
+        }
+
+        let instance = match linker.instantiate_async(&mut store, &module).await {
+            Ok(i) => i,
+            Err(e) => {
+                log::warn!("spawned indexer tx-handler: instantiate failed: {:?}", e);
+                return crate::indexer_threads::INVALID_EXIT_CODE;
+            }
+        };
+
+        let table = match instance
+            .get_export(&mut store, "__indirect_function_table")
+            .and_then(|e| e.into_table())
+        {
+            Some(t) => t,
+            None => {
+                log::warn!(
+                    "spawned indexer tx-handler: wasm has no __indirect_function_table export"
+                );
+                return crate::indexer_threads::INVALID_EXIT_CODE;
+            }
+        };
+
+        let funcref = match table.get(&mut store, fn_idx as u64) {
+            Some(wasmtime::Ref::Func(Some(f))) => f,
+            _ => {
+                log::warn!(
+                    "spawned indexer tx-handler: fn_idx {} not present in indirect table",
+                    fn_idx
+                );
+                return crate::indexer_threads::INVALID_EXIT_CODE;
+            }
+        };
+
+        // (i32) -> i32 ABI. Same convention as view-side spawn.
+        let typed: Result<wasmtime::TypedFunc<i32, i32>, _> = funcref.typed(&store);
+        let result = match typed {
+            Ok(tf) => tf.call_async(&mut store, arg as i32).await,
+            Err(_) => {
+                let mut results = [wasmtime::Val::I32(0)];
+                match funcref
+                    .call_async(
+                        &mut store,
+                        &[wasmtime::Val::I32(arg as i32)],
+                        &mut results,
+                    )
+                    .await
+                {
+                    Ok(()) => match results[0] {
+                        wasmtime::Val::I32(v) => Ok(v),
+                        _ => return crate::indexer_threads::INVALID_EXIT_CODE,
+                    },
+                    Err(e) => Err(e),
+                }
+            }
+        };
+        match result {
+            Ok(v) => v,
+            Err(e) => {
+                log::warn!("spawned indexer tx-handler: call failed: {:?}", e);
+                crate::indexer_threads::INVALID_EXIT_CODE
+            }
+        }
+    }
+
     pub async fn setup_linker(
         context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
@@ -2059,7 +2202,7 @@ pub async fn setup_linker_view(
         {
             Self::setup_linker(context.clone(), &mut linker).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup basic linker")?;
-            Self::setup_linker_indexer(context.clone(), &mut linker).await
+            Self::setup_linker_indexer(context.clone(), &mut linker, Some(module.clone())).await
                 .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to setup indexer linker")?;
             linker.define_unknown_imports_as_traps(&module)?;
         }
@@ -2349,13 +2492,25 @@ pub async fn setup_linker_view(
         Ok(())
     }
 
+    /// Wire the indexer-mode host fns onto `linker`.
+    ///
+    /// `spawn_module`: pass `Some(module)` on the main indexer Store
+    /// to enable the v10 IndexerThreadSpawn opcode (the closure
+    /// captures the module + caller's engine so spawned tx-handlers
+    /// can instantiate fresh child Stores). `None` disables spawn
+    /// — the IndexerThreadSpawn opcode returns INVALID_THREAD_ID
+    /// instead. Use `None` on child Stores (children can't spawn
+    /// grandchildren) and on legacy non-parallel callers that don't
+    /// need Block-STM.
     pub async fn setup_linker_indexer(
         context: Arc<RwLock<MetashrewRuntimeContext<T>>>,
         linker: &mut Linker<State>,
+        spawn_module: Option<wasmtime::Module>,
     ) -> Result<()> where <T as KeyValueStoreLike>::Batch: Send {
         let context_ref = context.clone();
         let context_get = context.clone();
         let context_get_len = context.clone();
+        let spawn_module_for_flush = spawn_module.clone();
 
         linker
             .func_wrap(
@@ -2525,26 +2680,86 @@ pub async fn setup_linker_view(
                                 );
                                 // No response payload for writes.
                             }
-                            SyscallResult::NeedsIndexerThreadSpawn(_req) => {
-                                // Wired in commit #4b. For now write the
-                                // INVALID_THREAD_ID marker (0 as u32 LE)
-                                // so wasm's spawn wrapper sees a
-                                // deterministic failure and doesn't try
-                                // to join a non-existent handle.
-                                let invalid_id: u32 = 0;
+                            SyscallResult::NeedsIndexerThreadSpawn(req) => {
+                                // Spawn requires:
+                                //  - a captured `spawn_module` (set on
+                                //    the parent indexer Store at
+                                //    setup_linker_indexer time)
+                                //  - an `indexer_threads` registry on
+                                //    the Store's State (for handle
+                                //    registration)
+                                //  - a `block_stm` context on the
+                                //    Store's State (cloned into the
+                                //    child Store so ConflictRead/Write
+                                //    route through the same MvMemory)
+                                // Any missing piece → INVALID_THREAD_ID
+                                // (0) — wasm sees failed spawn and
+                                // skips the corresponding join.
+                                let module = match spawn_module_for_flush.clone() {
+                                    Some(m) => m,
+                                    None => {
+                                        let invalid_id: u32 = 0;
+                                        write_syscall_response(
+                                            &mem, &mut caller,
+                                            response_ptr, response_max,
+                                            &invalid_id.to_le_bytes(),
+                                        );
+                                        return;
+                                    }
+                                };
+                                let (registry, block_stm) = {
+                                    let data = caller.data();
+                                    match (&data.indexer_threads, &data.block_stm) {
+                                        (Some(r), Some(b)) => (r.clone(), b.clone()),
+                                        _ => {
+                                            let invalid_id: u32 = 0;
+                                            write_syscall_response(
+                                                &mem, &mut caller,
+                                                response_ptr, response_max,
+                                                &invalid_id.to_le_bytes(),
+                                            );
+                                            return;
+                                        }
+                                    }
+                                };
+                                let engine = caller.engine().clone();
+                                let ctx_clone = context_ref.clone();
+                                // Convention: spawn `arg` == tx_seq.
+                                // The wasm passes the tx-handler's
+                                // sequence number so its ConflictRead/
+                                // Write opcodes register reads + stage
+                                // writes under that seq.
+                                let tx_seq = req.arg;
+                                let handle = crate::indexer_threads::
+                                    spawn_indexer_tx_handler_blocking::<T>(
+                                        engine, module, ctx_clone, block_stm,
+                                        tx_seq, req.fn_idx, req.arg,
+                                    );
+                                let tid = registry.register(handle);
                                 write_syscall_response(
                                     &mem, &mut caller,
                                     response_ptr, response_max,
-                                    &invalid_id.to_le_bytes(),
+                                    &tid.to_le_bytes(),
                                 );
                             }
-                            SyscallResult::NeedsIndexerThreadJoin(_req) => {
-                                // Wired in commit #4b. Write
-                                // INVALID_EXIT_CODE (i32::MIN as i32 LE).
+                            SyscallResult::NeedsIndexerThreadJoin(req) => {
+                                // Join is sync — blocks the current
+                                // wasm host call. Multi-thread tokio
+                                // runtime handles this; the wasmtime
+                                // host call is itself running on a
+                                // worker thread.
+                                let exit = match caller
+                                    .data()
+                                    .indexer_threads
+                                    .clone()
+                                {
+                                    Some(registry) => registry.join(req.thread_id),
+                                    None => crate::indexer_threads::INVALID_EXIT_CODE,
+                                };
                                 write_syscall_response(
                                     &mem, &mut caller,
                                     response_ptr, response_max,
-                                    &i32::MIN.to_le_bytes(),
+                                    &exit.to_le_bytes(),
                                 );
                             }
                         }

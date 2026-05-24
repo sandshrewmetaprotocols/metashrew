@@ -9,6 +9,7 @@ pub mod chain_entries;
 pub mod context;
 pub mod helpers;
 pub mod indexer_syscall;
+pub mod indexer_threads;
 pub mod key_utils;
 pub mod length_cache;
 pub mod proto;

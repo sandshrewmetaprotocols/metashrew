@@ -5,14 +5,25 @@
 //! syscalls are **consensus-critical**: opcodes that touch state must
 //! produce deterministic results across every replica indexing the
 //! same block. The dispatcher itself is opcode-agnostic; per-opcode
-//! determinism guarantees live in their respective handlers (added in
-//! subsequent commits — see the proto for the opcode-vs-commit map).
+//! determinism guarantees live in their respective handlers.
 //!
-//! Dispatch: byte-peek on buffer[0]. See `metashrew.proto`'s
-//! IndexerSyscall doc-comment for the rationale.
+//! Dispatch is a two-stage process:
+//!
+//!   1. `classify()` peeks `buf[0]` to disambiguate a legacy
+//!      `KeyValueFlush` payload from an `IndexerSyscall` payload.
+//!      Cost: one comparison, zero allocation, zero decode.
+//!
+//!   2. For syscall payloads, `dispatch_indexer_syscall()` decodes the
+//!      `IndexerSyscall` proto once and returns a structured result
+//!      that the wasmtime binding can pattern-match on. Storage-needing
+//!      opcodes (e.g. `BatchGet`) are surfaced as typed variants so
+//!      the binding can pass the runtime's storage handle.
 
 use crate::proto::metashrew::indexer_syscall::Request as IndexerReq;
-use crate::proto::metashrew::IndexerSyscall;
+use crate::proto::metashrew::{
+    BatchGet, BatchGetEntry, BatchGetResponse, IndexerSyscall,
+};
+use crate::traits::KeyValueStoreLike;
 use prost::Message;
 
 /// Magic byte at buffer[0] indicating the rest is an `IndexerSyscall`
@@ -41,55 +52,117 @@ pub fn classify(buf: &[u8]) -> FlushKind {
     }
 }
 
-/// Result of dispatching one indexer syscall.
-#[derive(Debug, PartialEq, Eq)]
+/// What the wasmtime binding should do with this syscall.
+#[derive(Debug, PartialEq)]
 pub enum SyscallResult {
-    /// The payload didn't decode as a valid `IndexerSyscall`. Indicates
-    /// either a wasm bug (set the magic byte but emitted garbage) or
-    /// a wire-format incompatibility (host older than the wasm).
-    /// Caller should set `had_failure` and abort the block.
-    DecodeFailure,
-    /// No response payload needed. Caller does not write to the wasm
-    /// response buffer.
+    /// No response payload needed. Binding does not write to the
+    /// wasm response buffer.
     NoResponse,
-    /// Write these bytes to the wasm response buffer at
-    /// `response_ptr` as `[u32 LE: len | bytes]`.
+    /// Write these bytes to the wasm response buffer.
     Respond(Vec<u8>),
-    /// Op exists in the proto but isn't wired in this build. Caller
+    /// Op exists in the proto but isn't wired in this build. Binding
     /// should write a `len=0` marker so wasm sees a deterministic
     /// not-supported response.
     UnsupportedOp,
+    /// Storage-needing opcode: binding must call
+    /// [`handle_batch_get`] with its `&T` storage handle plus the
+    /// indexer's read height, then write the resulting bytes via
+    /// the response writer.
+    NeedsBatchGet(BatchGet),
 }
 
-/// Decode + dispatch the syscall payload. `payload` is the bytes
-/// AFTER the magic byte (caller has already classified and stripped).
-///
-/// Opcodes are added in subsequent commits; for now only `Noop` is
-/// wired so the dispatch path is end-to-end testable.
-pub fn dispatch_indexer_syscall(payload: &[u8]) -> SyscallResult {
-    let syscall = match IndexerSyscall::decode(payload) {
-        Ok(s) => s,
-        Err(_) => return SyscallResult::DecodeFailure,
-    };
+/// What the dispatcher extracted from the raw syscall payload.
+#[derive(Debug, PartialEq)]
+pub struct DispatchedSyscall {
+    /// Wasm-allocated response buffer offset (0 = no response wanted).
+    pub response_ptr: u32,
+    /// Wasm-allocated response buffer capacity (must be >= 4 to fit
+    /// the length prefix; smaller is treated as "no response wanted").
+    pub response_max: u32,
+    /// What the binding should do next.
+    pub result: SyscallResult,
+}
 
-    match syscall.request {
+/// Caller-side error signal when an opcode payload fails to decode.
+/// Wraps as `Err` so the binding can short-circuit to `had_failure`
+/// without entangling decode errors with the routed result.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SyscallDecodeError;
+
+/// Decode the `IndexerSyscall` payload + route to a `SyscallResult`.
+/// `payload` is the bytes AFTER the magic byte — caller has classified
+/// and stripped already.
+///
+/// Single decode of the whole `IndexerSyscall` message: the binding
+/// pulls `response_ptr` / `response_max` from the returned struct
+/// without needing to re-decode.
+pub fn dispatch_indexer_syscall(
+    payload: &[u8],
+) -> Result<DispatchedSyscall, SyscallDecodeError> {
+    let syscall = IndexerSyscall::decode(payload).map_err(|_| SyscallDecodeError)?;
+    let result = match syscall.request {
         Some(IndexerReq::Noop(_)) => SyscallResult::NoResponse,
+        Some(IndexerReq::BatchGet(req)) => SyscallResult::NeedsBatchGet(req),
         None => SyscallResult::NoResponse,
+    };
+    Ok(DispatchedSyscall {
+        response_ptr: syscall.response_ptr,
+        response_max: syscall.response_max,
+        result,
+    })
+}
+
+/// Handle a `BatchGet` opcode against the runtime's storage handle.
+/// Reads each requested key at `target_height` (binding passes
+/// `height - 1` to match `__get`'s per-block semantic), packs the
+/// results into a `BatchGetResponse`, and returns the encoded bytes.
+///
+/// Storage errors are surfaced as `Err` rather than coalesced to
+/// "all keys missing" — a transient backend failure during block
+/// apply must not silently produce a successful-looking empty
+/// response (would diverge the indexer from a healthy replica).
+///
+/// Determinism: same `(db_state, target_height, keys)` -> same bytes
+/// out, byte-for-byte. The version-chain walk in `get_at_height` is
+/// deterministic (binary search on monotonic versions).
+pub fn handle_batch_get<T: KeyValueStoreLike>(
+    db: &T,
+    target_height: u32,
+    req: &BatchGet,
+) -> anyhow::Result<Vec<u8>> {
+    let mut entries = Vec::with_capacity(req.keys.len());
+    for k in &req.keys {
+        let entry = match crate::chain_entries::get_at_height(db, k, target_height)? {
+            Some(v) => BatchGetEntry { present: true, value: v },
+            None => BatchGetEntry { present: false, value: Vec::new() },
+        };
+        entries.push(entry);
     }
+    Ok(BatchGetResponse { entries }.encode_to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proto::metashrew::indexer_syscall::Request as IndexerReq;
-    use crate::proto::metashrew::{IndexerSyscall, KeyValueFlush, Noop};
+    use crate::proto::metashrew::{
+        BatchGet, IndexerSyscall, KeyValueFlush, Noop,
+    };
+
+    fn encode_syscall(req: IndexerReq, response_ptr: u32, response_max: u32) -> Vec<u8> {
+        IndexerSyscall {
+            request: Some(req),
+            response_ptr,
+            response_max,
+        }
+        .encode_to_vec()
+    }
 
     #[test]
     fn proto_tag_safety_invariant() {
         // Foundational invariant: protobuf field number 0 is forbidden,
-        // so the smallest valid encoded protobuf first byte is 0x08
-        // (field 1, wire type 0). Reserving 0x01 as the magic byte is
-        // therefore unambiguous — no valid protobuf can start with it.
+        // so the smallest valid encoded protobuf first byte is 0x08.
+        // Reserving 0x01 as the magic byte is therefore unambiguous.
         assert!(INDEXER_SYSCALL_MAGIC < 0x08);
     }
 
@@ -99,16 +172,12 @@ mod tests {
             list: vec![b"k".to_vec(), b"v".to_vec()],
         };
         let bytes = kvf.encode_to_vec();
-        // First byte should be 0x0a (field 1, wire type 2 = LEN).
-        assert_eq!(bytes[0], 0x0a);
+        assert_eq!(bytes[0], 0x0a); // field 1, wire type 2 (LEN)
         assert_eq!(classify(&bytes), FlushKind::Legacy);
     }
 
     #[test]
     fn empty_kvflush_classifies_as_legacy() {
-        // An empty KeyValueFlush encodes to 0 bytes. Empty buffer must
-        // route to the legacy path so wasm that emits a no-op flush
-        // sees no change.
         let kvf = KeyValueFlush { list: vec![] };
         let bytes = kvf.encode_to_vec();
         assert!(bytes.is_empty());
@@ -122,23 +191,16 @@ mod tests {
 
     #[test]
     fn magic_byte_then_proto_classifies_as_syscall() {
-        let s = IndexerSyscall {
-            request: Some(IndexerReq::Noop(Noop {})),
-            response_ptr: 0,
-            response_max: 0,
-        };
         let mut buf = vec![INDEXER_SYSCALL_MAGIC];
-        buf.extend(s.encode_to_vec());
+        buf.extend(encode_syscall(IndexerReq::Noop(Noop {}), 0, 0));
         assert_eq!(classify(&buf), FlushKind::Syscall);
     }
 
     #[test]
     fn reserved_dispatch_tags_route_to_legacy_for_now() {
-        // 0x00, 0x02..0x07 are reserved but not yet assigned. Until
-        // they are, the classifier routes them to Legacy (which will
-        // then fail KeyValueFlush::decode and set had_failure). That's
-        // the safe default — better to fail loudly than to silently
-        // accept an unknown dispatch tag.
+        // 0x00, 0x02..0x07 are reserved. Until assigned, they classify
+        // as Legacy and will fail KeyValueFlush::decode — failing loudly
+        // is safer than silent accept of an unknown dispatch tag.
         for tag in [0x00u8, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07] {
             assert_eq!(classify(&[tag]), FlushKind::Legacy);
         }
@@ -146,52 +208,56 @@ mod tests {
 
     #[test]
     fn noop_dispatches_to_no_response() {
-        let s = IndexerSyscall {
-            request: Some(IndexerReq::Noop(Noop {})),
-            response_ptr: 0,
-            response_max: 0,
-        };
-        assert_eq!(
-            dispatch_indexer_syscall(&s.encode_to_vec()),
-            SyscallResult::NoResponse,
-        );
+        let payload = encode_syscall(IndexerReq::Noop(Noop {}), 0, 0);
+        let d = dispatch_indexer_syscall(&payload).unwrap();
+        assert_eq!(d.result, SyscallResult::NoResponse);
+        assert_eq!(d.response_ptr, 0);
+        assert_eq!(d.response_max, 0);
     }
 
     #[test]
     fn empty_syscall_proto_dispatches_to_no_response() {
         // 0-byte payload decodes as IndexerSyscall with request: None.
-        assert_eq!(
-            dispatch_indexer_syscall(&[]),
-            SyscallResult::NoResponse,
-        );
+        let d = dispatch_indexer_syscall(&[]).unwrap();
+        assert_eq!(d.result, SyscallResult::NoResponse);
     }
 
     #[test]
-    fn garbage_payload_is_decode_failure() {
-        // 0xff bytes use field number 31 with wire type 7 (invalid).
+    fn garbage_payload_is_decode_error() {
+        // 0xff bytes use field 31 with wire type 7 (invalid).
         let garbage = vec![0xff, 0xff, 0xff];
-        assert_eq!(
-            dispatch_indexer_syscall(&garbage),
-            SyscallResult::DecodeFailure,
-        );
+        assert_eq!(dispatch_indexer_syscall(&garbage), Err(SyscallDecodeError));
     }
 
     #[test]
-    fn kvflush_payload_misrouted_to_syscall_dispatcher_is_decode_failure_or_norequest() {
-        // Belt-and-suspenders: even if a KeyValueFlush were somehow
-        // routed here, the dispatcher should not silently accept it.
-        // Proto3 forgives unknown fields, so it likely decodes to an
-        // IndexerSyscall with request: None — which we return as
-        // NoResponse. That's still safe (no state change), and the
-        // classifier prevents this from happening in practice.
-        let kvf = KeyValueFlush {
-            list: vec![b"k".to_vec(), b"v".to_vec()],
+    fn batch_get_routes_to_needs_storage_variant() {
+        let req = BatchGet {
+            keys: vec![b"key1".to_vec(), b"key2".to_vec()],
         };
-        let result = dispatch_indexer_syscall(&kvf.encode_to_vec());
-        assert!(
-            matches!(result, SyscallResult::NoResponse | SyscallResult::DecodeFailure),
-            "misrouted KVFlush must not be silently accepted as a real opcode; got {:?}",
-            result
+        let payload = encode_syscall(
+            IndexerReq::BatchGet(req.clone()),
+            0xdeadbeef,
+            1024,
         );
+        let d = dispatch_indexer_syscall(&payload).unwrap();
+        assert_eq!(d.response_ptr, 0xdeadbeef);
+        assert_eq!(d.response_max, 1024);
+        match d.result {
+            SyscallResult::NeedsBatchGet(got) => {
+                assert_eq!(got.keys, req.keys);
+            }
+            other => panic!("expected NeedsBatchGet, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn batch_get_with_no_keys_round_trips() {
+        let req = BatchGet { keys: vec![] };
+        let payload = encode_syscall(IndexerReq::BatchGet(req), 100, 100);
+        let d = dispatch_indexer_syscall(&payload).unwrap();
+        match d.result {
+            SyscallResult::NeedsBatchGet(got) => assert!(got.keys.is_empty()),
+            other => panic!("expected NeedsBatchGet, got {:?}", other),
+        }
     }
 }

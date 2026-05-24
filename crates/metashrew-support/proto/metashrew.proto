@@ -129,15 +129,14 @@ message ThreadJoin {
 
 message IndexerSyscall {
   oneof request {
-    // Placeholder so the oneof has at least one variant during the
-    // skeleton commit. Real opcodes land in subsequent commits:
-    //   2  BatchGet         (multi_get via single syscall)
+    Noop      noop      = 1;
+    BatchGet  batch_get = 2;
+    // Future opcodes:
     //   3  ThreadSpawn      (Block-STM tx-handler spawn)
     //   4  ThreadJoin
     //   5  ConflictRead     (instrumented __get for conflict tracking)
     //   6  ConflictWrite    (instrumented __set for conflict tracking)
     //   7  PipelineHint     (wasm-side advisory on commit pipelining)
-    Noop noop = 1;
   }
   // Pre-allocated response buffer in wasm linear memory. Host writes
   // `[u32 LE: response_len | response_bytes]` starting at this offset.
@@ -147,7 +146,37 @@ message IndexerSyscall {
   uint32 response_max = 101;
 }
 
-// Trivial no-op opcode used by the skeleton tests to exercise the
-// dispatch path without any host-side side effects. Safe to leave in
-// the wire format permanently — wasm should never invoke it in prod.
+// Trivial no-op opcode used by tests to exercise the dispatch path
+// without any host-side side effects. Safe to leave in the wire format
+// permanently — wasm should never invoke it in prod.
 message Noop {}
+
+// Batch point-read at the indexer's read height (H-1 if processing
+// block H, mirroring __get's per-block semantics — see
+// setup_linker_indexer's __get handler in runtime.rs).
+//
+// Win: collapses N (wasm -> host __get) round-trips into one
+// (wasm -> host __flush) round-trip. The host still walks the version
+// chain once per key (binary search via get_at_height) — true I/O
+// pipelining lands in a follow-up via a multi_get_at_height trait
+// method that backends like RocksDB can override.
+//
+// Determinism: read at the indexer block's start-of-block snapshot is
+// deterministic by construction (same chain, same key, same height).
+message BatchGet {
+  repeated bytes keys = 1;
+}
+
+// One entry per request key (response.entries.len() == request.keys.len()).
+message BatchGetEntry {
+  // True if the key had a value at the read height. False = miss.
+  // Distinguishes "present but empty value" from "missing"; the
+  // `value` field alone is ambiguous.
+  bool  present = 1;
+  // The stored value. Always empty bytes when !present.
+  bytes value   = 2;
+}
+
+message BatchGetResponse {
+  repeated BatchGetEntry entries = 1;
+}

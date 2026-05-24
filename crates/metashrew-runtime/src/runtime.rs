@@ -2365,27 +2365,23 @@ pub async fn setup_linker_view(
                     // No allocation, no decode — just one comparison.
                     use crate::indexer_syscall::{
                         classify as classify_indexer_flush, dispatch_indexer_syscall,
-                        FlushKind, SyscallResult,
+                        handle_batch_get, FlushKind, SyscallResult,
                     };
                     if classify_indexer_flush(&encoded_vec) == FlushKind::Syscall {
                         let payload = &encoded_vec[1..];
-                        // Decode once to extract the wasm-provided
-                        // response buffer location (some opcodes need
-                        // it, some don't; we always extract so the per-
-                        // opcode handler doesn't have to re-decode).
-                        let (response_ptr, response_max) = match
-                            crate::proto::metashrew::IndexerSyscall::decode(payload)
-                        {
-                            Ok(s) => (s.response_ptr as usize, s.response_max as usize),
-                            Err(_e) => {
-                                // Magic byte was set but the payload
-                                // doesn't decode. Wasm bug or wire-
-                                // format skew — fail closed.
+                        let dispatched = match dispatch_indexer_syscall(payload) {
+                            Ok(d) => d,
+                            Err(_) => {
+                                // Magic byte set but the payload didn't
+                                // decode. Wasm bug or wire-format skew
+                                // — fail closed.
                                 caller.data_mut().had_failure = true;
                                 return;
                             }
                         };
-                        match dispatch_indexer_syscall(payload) {
+                        let response_ptr = dispatched.response_ptr as usize;
+                        let response_max = dispatched.response_max as usize;
+                        match dispatched.result {
                             SyscallResult::NoResponse => {}
                             SyscallResult::Respond(value) => {
                                 write_syscall_response(
@@ -2397,17 +2393,38 @@ pub async fn setup_linker_view(
                                 // Deterministic miss marker: len=0 in
                                 // the response buffer. Wasm callers can
                                 // distinguish "op not wired" from
-                                // "op returned empty" via the proto
-                                // opcode they sent (it knows what it
-                                // asked for).
+                                // "op returned empty" via the opcode
+                                // they sent (it knows what it asked for).
                                 write_syscall_response(
                                     &mem, &mut caller,
                                     response_ptr, response_max, &[],
                                 );
                             }
-                            SyscallResult::DecodeFailure => {
-                                caller.data_mut().had_failure = true;
-                                return;
+                            SyscallResult::NeedsBatchGet(req) => {
+                                // Mirror __get's per-block read semantic
+                                // (`setup_linker_indexer`'s __get handler
+                                // reads at height H-1 when processing
+                                // block H). BatchGet must agree byte-
+                                // for-byte with N sequential __get calls.
+                                let target_height = if height > 0 { height - 1 } else { 0 };
+                                let response = match handle_batch_get(
+                                    &db, target_height, &req,
+                                ) {
+                                    Ok(bytes) => bytes,
+                                    Err(e) => {
+                                        log::error!(
+                                            "BatchGet handler failed at height {}: {:?} \
+                                             (block NOT committed, indexer will retry)",
+                                            height, e
+                                        );
+                                        caller.data_mut().had_failure = true;
+                                        return;
+                                    }
+                                };
+                                write_syscall_response(
+                                    &mem, &mut caller,
+                                    response_ptr, response_max, &response,
+                                );
                             }
                         }
                         // Syscall path is complete; do NOT fall through

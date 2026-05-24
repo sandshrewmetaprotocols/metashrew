@@ -50,10 +50,24 @@ message ThreadJoin {
 
 message IndexerSyscall {
   oneof request {
-    Noop noop = 1;
+    Noop      noop      = 1;
+    BatchGet  batch_get = 2;
   }
   uint32 response_ptr = 100;
   uint32 response_max = 101;
 }
 
 message Noop {}
+
+message BatchGet {
+  repeated bytes keys = 1;
+}
+
+message BatchGetEntry {
+  bool  present = 1;
+  bytes value   = 2;
+}
+
+message BatchGetResponse {
+  repeated BatchGetEntry entries = 1;
+}

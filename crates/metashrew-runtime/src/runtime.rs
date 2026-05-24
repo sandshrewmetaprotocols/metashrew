@@ -184,6 +184,21 @@ pub struct State {
     /// `Arc` so the spawn closure can clone it into the spawned task
     /// without borrowing the wasmtime store.
     pub(crate) view_threads: Option<std::sync::Arc<crate::view_threads::ViewThreadRegistry>>,
+
+    /// Per-block Block-STM context. `Some(_)` on the main indexer Store
+    /// when the block is being indexed in parallel mode, and `Some(_)`
+    /// (cloned Arc to the same context) on every spawned tx-handler
+    /// Store. `None` on legacy non-parallel indexer paths and on all
+    /// view stores. ConflictRead/Write opcodes require this to be
+    /// `Some(_)`; absent → opcodes fail-closed (write empty response).
+    pub(crate) block_stm: Option<std::sync::Arc<crate::block_stm::BlockStmCtx>>,
+
+    /// The tx_seq this Store is currently executing as. `Some(_)` only
+    /// on spawned tx-handler Stores; `None` on the main indexer Store
+    /// (which runs `index_block` / `_start`, not a specific tx) and on
+    /// all view stores. Required (along with `block_stm`) for
+    /// ConflictRead/Write to take effect.
+    pub(crate) tx_seq: Option<u32>,
 }
 
 impl State {
@@ -216,7 +231,29 @@ impl State {
             // view paths replace it via `with_view_threads` before
             // installing the store. See `runtime::new_with_db_async_limited`.
             view_threads: None,
+            block_stm: None,
+            tx_seq: None,
         }
+    }
+
+    /// Attach a Block-STM context to this Store. Called on the main
+    /// indexer Store at the start of a parallel block, and on each
+    /// spawned tx-handler Store (with the same `Arc<BlockStmCtx>` —
+    /// they share state through it).
+    pub fn with_block_stm(
+        mut self,
+        ctx: std::sync::Arc<crate::block_stm::BlockStmCtx>,
+    ) -> Self {
+        self.block_stm = Some(ctx);
+        self
+    }
+
+    /// Set the tx_seq this Store will execute as. Called only on
+    /// spawned tx-handler Stores by the spawn machinery (commit #4b).
+    /// The main indexer Store never sets this.
+    pub fn with_tx_seq(mut self, tx_seq: u32) -> Self {
+        self.tx_seq = Some(tx_seq);
+        self
     }
 
     /// Attach a view-thread registry. Called only from view-runtime
@@ -2365,7 +2402,8 @@ pub async fn setup_linker_view(
                     // No allocation, no decode — just one comparison.
                     use crate::indexer_syscall::{
                         classify as classify_indexer_flush, dispatch_indexer_syscall,
-                        handle_batch_get, FlushKind, SyscallResult,
+                        handle_batch_get, handle_conflict_read, handle_conflict_write,
+                        FlushKind, SyscallResult,
                     };
                     if classify_indexer_flush(&encoded_vec) == FlushKind::Syscall {
                         let payload = &encoded_vec[1..];
@@ -2424,6 +2462,89 @@ pub async fn setup_linker_view(
                                 write_syscall_response(
                                     &mem, &mut caller,
                                     response_ptr, response_max, &response,
+                                );
+                            }
+                            SyscallResult::NeedsConflictRead(req) => {
+                                // ConflictRead requires both block_stm
+                                // context AND tx_seq set on this Store.
+                                // If either is missing the caller is
+                                // misusing the opcode (running it from
+                                // a non-tx-handler Store). Fail-closed
+                                // with a 0-length response — wasm
+                                // sees the same "no data" marker as a
+                                // legitimate miss-on-empty value.
+                                let (block_stm, tx_seq) = {
+                                    let data = caller.data();
+                                    match (&data.block_stm, data.tx_seq) {
+                                        (Some(bs), Some(seq)) => (bs.clone(), seq),
+                                        _ => {
+                                            write_syscall_response(
+                                                &mem, &mut caller,
+                                                response_ptr, response_max, &[],
+                                            );
+                                            return;
+                                        }
+                                    }
+                                };
+                                let target_height = if height > 0 { height - 1 } else { 0 };
+                                let value = match handle_conflict_read(
+                                    &db, target_height, &block_stm, tx_seq, &req.key,
+                                ) {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        log::error!(
+                                            "ConflictRead failed at height {} tx_seq {}: {:?}",
+                                            height, tx_seq, e
+                                        );
+                                        caller.data_mut().had_failure = true;
+                                        return;
+                                    }
+                                };
+                                write_syscall_response(
+                                    &mem, &mut caller,
+                                    response_ptr, response_max, &value,
+                                );
+                            }
+                            SyscallResult::NeedsConflictWrite(req) => {
+                                let (block_stm, tx_seq) = {
+                                    let data = caller.data();
+                                    match (&data.block_stm, data.tx_seq) {
+                                        (Some(bs), Some(seq)) => (bs.clone(), seq),
+                                        _ => {
+                                            // Misuse from non-tx-handler
+                                            // Store. ConflictWrite has no
+                                            // response by design; just
+                                            // drop silently. No state
+                                            // change so no divergence.
+                                            return;
+                                        }
+                                    }
+                                };
+                                handle_conflict_write(
+                                    &block_stm, tx_seq, req.key, req.value,
+                                );
+                                // No response payload for writes.
+                            }
+                            SyscallResult::NeedsIndexerThreadSpawn(_req) => {
+                                // Wired in commit #4b. For now write the
+                                // INVALID_THREAD_ID marker (0 as u32 LE)
+                                // so wasm's spawn wrapper sees a
+                                // deterministic failure and doesn't try
+                                // to join a non-existent handle.
+                                let invalid_id: u32 = 0;
+                                write_syscall_response(
+                                    &mem, &mut caller,
+                                    response_ptr, response_max,
+                                    &invalid_id.to_le_bytes(),
+                                );
+                            }
+                            SyscallResult::NeedsIndexerThreadJoin(_req) => {
+                                // Wired in commit #4b. Write
+                                // INVALID_EXIT_CODE (i32::MIN as i32 LE).
+                                write_syscall_response(
+                                    &mem, &mut caller,
+                                    response_ptr, response_max,
+                                    &i32::MIN.to_le_bytes(),
                                 );
                             }
                         }

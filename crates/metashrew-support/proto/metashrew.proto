@@ -129,14 +129,14 @@ message ThreadJoin {
 
 message IndexerSyscall {
   oneof request {
-    Noop      noop      = 1;
-    BatchGet  batch_get = 2;
-    // Future opcodes:
-    //   3  ThreadSpawn      (Block-STM tx-handler spawn)
-    //   4  ThreadJoin
-    //   5  ConflictRead     (instrumented __get for conflict tracking)
-    //   6  ConflictWrite    (instrumented __set for conflict tracking)
-    //   7  PipelineHint     (wasm-side advisory on commit pipelining)
+    Noop                noop           = 1;
+    BatchGet            batch_get      = 2;
+    IndexerThreadSpawn  thread_spawn   = 3;
+    IndexerThreadJoin   thread_join    = 4;
+    ConflictRead        conflict_read  = 5;
+    ConflictWrite       conflict_write = 6;
+    // Reserved future opcodes:
+    //   7  PipelineHint   (wasm-side advisory on commit pipelining)
   }
   // Pre-allocated response buffer in wasm linear memory. Host writes
   // `[u32 LE: response_len | response_bytes]` starting at this offset.
@@ -179,4 +179,90 @@ message BatchGetEntry {
 
 message BatchGetResponse {
   repeated BatchGetEntry entries = 1;
+}
+
+// =============================================================================
+// Block-STM opcodes (v10 syscalls #3-#6). Lets alkanes-v3 opt into
+// per-tx parallel execution on the indexer worker pool.
+//
+// The wasm pattern is:
+//
+//   for tx in block.txs() {
+//       let tid = __idx_spawn(fn_idx=tx_handler, arg=tx_seq);
+//       handles.push(tid);
+//   }
+//   for tid in handles { __idx_join(tid); }
+//
+// Inside the spawned tx-handler, all storage I/O goes through
+// `__idx_conflict_read` / `__idx_conflict_write` instead of
+// `__get` / `__flush`. These are instrumented — reads register a
+// dependency in this tx's read-set, writes stage into the per-block
+// MvMemory at this tx's sequence number. The scheduler (separate
+// commit) validates read-sets, re-executes losers, and merges
+// the final write-sets into the block's WriteBatch in canonical
+// tx order.
+//
+// Determinism: same as ViewSyscall threads (each spawned handler
+// runs on a host-managed OS thread with its own wasmtime Store
+// and isolated linear memory). wasm_threads(true) STAYS OFF on the
+// indexer engine — there's no shared-memory wasm; threading is a
+// host-side orchestration concept and the wasm only sees the
+// thread_id u32.
+// =============================================================================
+
+// Schedule a tx-handler closure on the indexer worker pool.
+// `fn_idx` indexes into __indirect_function_table — the host spawns
+// a fresh Store, instantiates the module, calls fn_table[fn_idx](arg).
+// `arg` is opaque to the host; wasm typically passes tx_seq so the
+// handler can look up its tx-specific work in its own staging
+// structure.
+//
+// Returns: u32 thread_id, written to response_ptr as
+// `[u32 LE: 4 | thread_id_bytes]`. 0 = INVALID_THREAD_ID (spawn
+// failed; the registry isn't installed on this Store, or the engine
+// rejected the instantiation).
+//
+// Named `IndexerThreadSpawn` (not `ThreadSpawn`) to avoid
+// collision with the view-side `ThreadSpawn` message in the same
+// proto package. The wasm-side wrapper aliases the prost type to
+// a shorter name.
+message IndexerThreadSpawn {
+  uint32 fn_idx = 1;
+  uint32 arg    = 2;
+}
+
+// Block until the named handler finishes, return its exit code.
+// Returns: i32 exit_code as `[u32 LE: 4 | i32_le_bytes]`.
+// i32::MIN = INVALID_EXIT_CODE (unknown id, already joined,
+// panicked, or aborted).
+message IndexerThreadJoin {
+  uint32 thread_id = 1;
+}
+
+// Instrumented read: looks in MvMemory for a strictly-earlier-tx
+// write to `key`; falls back to disk via get_at_height(H-1) if
+// none. Records the resolved Version in this tx's ConflictTracker
+// so the scheduler can later re-validate.
+//
+// `tx_seq` is implicit: the host pulls it from the spawned Store's
+// State. Wasm doesn't need to pass it. (Belt-and-suspenders: if
+// the Store has no tx_seq set, the opcode falls back to a normal
+// __get to avoid silently dropping reads in non-parallel paths.)
+//
+// Returns: the value bytes, written as `[u32 LE: len | value]`.
+// len=0 distinguishes "key has no value at H-1" from "value is
+// empty bytes" via the wasm-side wrapper convention (wasm tracks
+// the request key, so it knows what it asked for).
+message ConflictRead {
+  bytes key = 1;
+}
+
+// Instrumented write: stages `value` at `key` in this tx's slot of
+// MvMemory. Does NOT touch the read-set (writes aren't validated;
+// only reads are). `tx_seq` is implicit (Store-attached).
+//
+// No response needed; binding sets `response_ptr = 0` typically.
+message ConflictWrite {
+  bytes key   = 1;
+  bytes value = 2;
 }

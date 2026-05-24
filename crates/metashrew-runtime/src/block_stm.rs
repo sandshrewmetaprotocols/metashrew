@@ -47,7 +47,7 @@
 //!    would produce.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// Where a value visible to a reader came from.
 ///
@@ -223,6 +223,61 @@ impl ConflictTracker {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// Per-block context shared between the main indexer Store and every
+/// spawned tx-handler Store. Holds the MvMemory plus a registry of
+/// per-tx ConflictTrackers.
+///
+/// Lifecycle: one `BlockStmCtx` per block being indexed in parallel
+/// mode. Set on the main indexer Store via `State::with_block_stm`,
+/// cloned (via the Arc on the outer wrapper) into each spawned tx-
+/// handler Store. Dropped at end of block.
+///
+/// Wrapped in `Arc` by the State holders so opcodes can grab a clone
+/// without holding the wasmtime caller across host-boundary work.
+#[derive(Debug, Default)]
+pub struct BlockStmCtx {
+    pub mv: MvMemory,
+    /// Per-tx trackers, indexed by tx_seq. Trackers are created lazily
+    /// on first read by `tracker_for`. The validator iterates this
+    /// map after each pass to decide which txs must re-execute.
+    trackers: RwLock<HashMap<u32, Arc<ConflictTracker>>>,
+}
+
+impl BlockStmCtx {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the tracker for `tx_seq`, creating it on first access.
+    /// Cheap when warm (single RwLock read); slightly more on first
+    /// touch (write lock to insert).
+    pub fn tracker_for(&self, tx_seq: u32) -> Arc<ConflictTracker> {
+        if let Some(t) = self.trackers.read().unwrap().get(&tx_seq) {
+            return t.clone();
+        }
+        let mut guard = self.trackers.write().unwrap();
+        guard
+            .entry(tx_seq)
+            .or_insert_with(|| Arc::new(ConflictTracker::new(tx_seq)))
+            .clone()
+    }
+
+    /// Snapshot of all tx_seq -> tracker pairs. Used by the scheduler
+    /// (next commit) to iterate validation in order.
+    pub fn all_trackers(&self) -> Vec<(u32, Arc<ConflictTracker>)> {
+        let guard = self.trackers.read().unwrap();
+        let mut out: Vec<_> = guard.iter().map(|(k, v)| (*k, v.clone())).collect();
+        out.sort_by_key(|x| x.0);
+        out
+    }
+
+    /// Number of tx_seqs that have at least one recorded read.
+    /// Used as a lower-bound count of parallel txs in a block.
+    pub fn tx_count(&self) -> usize {
+        self.trackers.read().unwrap().len()
     }
 }
 
@@ -467,6 +522,38 @@ mod tests {
         t.record_read(b"c".to_vec(), Version::Storage);
 
         assert!(validate_tx(&mv, &t));
+    }
+
+    // ---- BlockStmCtx ----
+
+    #[test]
+    fn block_stm_ctx_tracker_is_created_on_first_access() {
+        let ctx = BlockStmCtx::new();
+        assert_eq!(ctx.tx_count(), 0);
+        let t = ctx.tracker_for(7);
+        assert_eq!(t.tx_seq, 7);
+        assert_eq!(ctx.tx_count(), 1);
+    }
+
+    #[test]
+    fn block_stm_ctx_tracker_is_shared_across_accesses() {
+        let ctx = BlockStmCtx::new();
+        let a = ctx.tracker_for(3);
+        let b = ctx.tracker_for(3);
+        // Same Arc → record on `a` is visible on `b`.
+        a.record_read(b"k".to_vec(), Version::Storage);
+        assert_eq!(b.len(), 1);
+    }
+
+    #[test]
+    fn all_trackers_returns_sorted_by_tx_seq() {
+        let ctx = BlockStmCtx::new();
+        let _ = ctx.tracker_for(5);
+        let _ = ctx.tracker_for(2);
+        let _ = ctx.tracker_for(8);
+        let snap = ctx.all_trackers();
+        let seqs: Vec<u32> = snap.iter().map(|x| x.0).collect();
+        assert_eq!(seqs, vec![2, 5, 8]);
     }
 
     #[test]

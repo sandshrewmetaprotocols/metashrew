@@ -4,6 +4,7 @@ use anyhow::Result;
 
 // Core modules
 pub mod block_stm;
+pub mod block_stm_scheduler;
 pub mod chain_entries;
 pub mod context;
 pub mod helpers;

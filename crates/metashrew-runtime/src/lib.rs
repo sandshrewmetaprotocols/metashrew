@@ -3,6 +3,7 @@
 use anyhow::Result;
 
 // Core modules
+pub mod block_stm;
 pub mod chain_entries;
 pub mod context;
 pub mod helpers;

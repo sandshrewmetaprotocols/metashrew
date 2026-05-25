@@ -50,6 +50,7 @@ pub mod adapters;
 pub mod snapshot;
 pub mod snapshot_adapters;
 pub mod ssh_tunnel;
+pub mod cpu_isolation;
 
 #[cfg(test)]
 mod tests;
@@ -323,6 +324,46 @@ pub struct Args {
     /// indexer advance.
     #[arg(long, default_value_t = false)]
     pub no_startup_heal: bool,
+
+    /// v9.0.5-rc.11 CPU isolation: reserve N cores for the indexer
+    /// (block-processor thread + its dedicated tokio runtime). View
+    /// handler threads (actix-web workers + the main tokio runtime)
+    /// are pinned to the remaining cores, so a flood of view calls
+    /// can never starve indexing of CPU. Pod cgroup cpuset is read
+    /// from /proc/self/status to detect available cores. 0 = off
+    /// (no affinity changes). Default: 0.
+    ///
+    /// Example: pod with 16 CPU request, `--indexer-cores 4` →
+    /// indexer pool = cores 0-3, view pool = cores 4-15. Even at
+    /// 100% view load the indexer always has 4 dedicated cores.
+    /// Pair with `--indexer-nice` / `--view-nice` for additional
+    /// CFS-weight priority on the boundary case where threads share
+    /// a core.
+    #[arg(long, env = "ROCKSHREW_INDEXER_CORES", default_value_t = 0)]
+    pub indexer_cores: usize,
+
+    /// v9.0.5-rc.11 CPU isolation: Linux nice value for the indexer
+    /// thread and its runtime workers. Negative = higher priority
+    /// (gets more CPU time when contending). Range: -20 (max
+    /// priority) to 19 (min). Requires CAP_SYS_NICE in the container.
+    /// 0 = off. Default: 0.
+    ///
+    /// Combined with `--view-nice +5`, a -10 indexer nice gives the
+    /// indexer ~28× the CFS weight of view threads on any shared
+    /// core. On EPERM (missing cap) we log a warning and continue
+    /// without priority isolation rather than failing to start.
+    #[arg(long, env = "ROCKSHREW_INDEXER_NICE", default_value_t = 0,
+          value_parser = clap::value_parser!(i32).range(-20..=19))]
+    pub indexer_nice: i32,
+
+    /// v9.0.5-rc.11 CPU isolation: Linux nice value for HTTP/view
+    /// handler threads (actix-web workers + the main tokio runtime).
+    /// Positive = lower priority. Range: -20..19. Requires
+    /// CAP_SYS_NICE in the container. 0 = off. Default: 0.
+    /// See `--indexer-nice` for context.
+    #[arg(long, env = "ROCKSHREW_VIEW_NICE", default_value_t = 0,
+          value_parser = clap::value_parser!(i32).range(-20..=19))]
+    pub view_nice: i32,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -1054,6 +1095,29 @@ where
     // Block processor runs on a dedicated tokio runtime so it never competes
     // with RPC view calls for thread pool time. This ensures indexing progresses
     // steadily regardless of RPC load, and views are never starved by indexing.
+    //
+    // v9.0.5-rc.11: CPU isolation. When `--indexer-cores N > 0`, the
+    // detected pod cpuset is split — first N cores are the indexer pool,
+    // the rest are the view pool. The processor std::thread + its 4 tokio
+    // workers all get `sched_setaffinity` to the indexer pool, so they
+    // CAN'T be evicted from those cores by the actix-web/view threads
+    // (which the HTTP server setup further down pins to the complementary
+    // view pool). Combined with `--indexer-nice -10 --view-nice +5`, the
+    // kernel CFS scheduler gives the indexer a hard CPU floor.
+    let pod_cores = cpu_isolation::detect_pod_cpus();
+    let (indexer_cores_set, view_cores_set) =
+        cpu_isolation::split_cores(&pod_cores, args.indexer_cores);
+    if args.indexer_cores > 0 {
+        info!(
+            "CPU isolation: detected {} cores ({:?}); indexer pool = {:?}, view pool = {:?}",
+            pod_cores.len(),
+            pod_cores,
+            indexer_cores_set,
+            view_cores_set
+        );
+    }
+    let indexer_cores_for_processor = indexer_cores_set.clone();
+    let indexer_nice = args.indexer_nice;
     let processor_handle = std::thread::Builder::new()
         .name("block-processor".into())
         .spawn({
@@ -1061,9 +1125,30 @@ where
             let result_sender_clone = result_sender.clone();
 
             move || {
+                // Set affinity + nice for the processor driver thread.
+                if let Err(e) = cpu_isolation::set_thread_affinity(&indexer_cores_for_processor) {
+                    warn!("processor: set_thread_affinity failed: {}", e);
+                }
+                if let Err(e) = cpu_isolation::set_thread_nice(indexer_nice) {
+                    warn!("processor: set_thread_nice failed: {}", e);
+                }
+                // The runtime's worker threads each get the same
+                // isolation via on_thread_start. Clone the config into
+                // the closure so it stays alive for the runtime's
+                // lifetime.
+                let worker_cores = indexer_cores_for_processor.clone();
+                let worker_nice = indexer_nice;
                 let rt = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(4)
                     .thread_name("processor-worker")
+                    .on_thread_start(move || {
+                        if let Err(e) = cpu_isolation::set_thread_affinity(&worker_cores) {
+                            warn!("processor-worker: set_thread_affinity failed: {}", e);
+                        }
+                        if let Err(e) = cpu_isolation::set_thread_nice(worker_nice) {
+                            warn!("processor-worker: set_thread_nice failed: {}", e);
+                        }
+                    })
                     .enable_all()
                     .build()
                     .expect("Failed to create processor runtime");
@@ -1176,9 +1261,36 @@ where
         }
     }});
 
+    // v9.0.5-rc.11 CPU isolation: HTTP/view workers pinned to the
+    // complementary core pool + given a higher (more polite) nice
+    // value. actix-web invokes the factory closure once per worker
+    // thread to build that worker's App — we call sched_setaffinity +
+    // setpriority on entry so the worker's own thread is constrained
+    // before it serves any request. The remaining tokio main-runtime
+    // threads (fetcher dispatch, server accept loop) stay unpinned
+    // since they're IO-bound and don't compete with the indexer for
+    // CPU.
+    //
+    // worker count: when isolation is on, one worker per view-pool
+    // core. When off, leave actix's default (num_cpus).
+    let view_workers = if args.indexer_cores > 0 {
+        view_cores_set.len().max(1)
+    } else {
+        num_cpus::get()
+    };
+    let view_cores_for_workers = view_cores_set.clone();
+    let view_nice = args.view_nice;
     let server_handle = tokio::spawn({
         let args_clone = Arc::new(args.clone());
         HttpServer::new(move || {
+            // Per-worker thread setup. Idempotent across calls (the
+            // syscalls just re-set the same affinity / nice).
+            if let Err(e) = cpu_isolation::set_thread_affinity(&view_cores_for_workers) {
+                warn!("view-worker: set_thread_affinity failed: {}", e);
+            }
+            if let Err(e) = cpu_isolation::set_thread_nice(view_nice) {
+                warn!("view-worker: set_thread_nice failed: {}", e);
+            }
             let cors = match &args_clone.cors {
                 Some(cors_value) if cors_value == "*" => Cors::default()
                     .allow_any_origin()
@@ -1201,6 +1313,7 @@ where
                         .route(web::post().to(handle_jsonrpc::<N, S, R>))
                 )
         })
+        .workers(view_workers)
         .bind((args.host.as_str(), args.port))?
         .run()
     });

@@ -42,6 +42,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 console-subscriber = { version = "0.2", optional = true }
 num_cpus = "1.16.0"
+# Used by cpu_isolation.rs for sched_setaffinity / setpriority — the
+# kernel knobs that pin the indexer to its own cores and give it higher
+# scheduling weight than view-handler threads.
+libc = "0.2"
 url = "2.5.0"  # Added for URL parsing in SSH tunneling
 dirs = "5.0.1"  # Added for home directory detection
 bytes = "1.5.0"  # Added for handling binary data in responses

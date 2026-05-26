@@ -377,8 +377,20 @@ where
     }
 
     pub async fn get_next_block_data(&self) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
+        self.get_next_block_data_with_floor(None).await
+    }
+
+    /// v9.0.5-rc.13: `min_target_height` floor for the next-block-to-fetch
+    /// decision. See `SnapshotMetashrewSync::get_next_block_data_with_floor`
+    /// for the full motivation — the short version is "defend against
+    /// fetcher wedging when handle_reorg silently lowers current_height
+    /// past what the outer fetcher loop already enqueued".
+    pub async fn get_next_block_data_with_floor(
+        &self,
+        min_target_height: Option<u32>,
+    ) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
         let mut current_height = self.current_height.load(Ordering::SeqCst);
-        
+
         // Get remote tip
         let remote_tip = self.node.get_tip_height().await?;
 
@@ -407,35 +419,43 @@ where
             }
         }
 
+        // v9.0.5-rc.13: clamp the fetch target to >= min_target_height so
+        // the outer fetcher loop's `last_sent + 1` watermark always wins
+        // over a phantom-rolled-back current_height.
+        let fetch_height = match min_target_height {
+            Some(m) if m > current_height => m,
+            _ => current_height,
+        };
+
         // Check exit condition
         if let Some(exit_at) = self.config.exit_at {
-            if current_height >= exit_at {
+            if fetch_height >= exit_at {
                 info!("Fetcher reached exit height {}", exit_at);
                 return Ok(None);
             }
         }
 
         // Check if we need to wait for new blocks
-        if current_height > remote_tip {
+        if fetch_height > remote_tip {
             debug!(
-                "Waiting for new blocks: current={}, tip={}",
-                current_height, remote_tip
+                "Waiting for new blocks: fetch_height={}, tip={}",
+                fetch_height, remote_tip
             );
             return Ok(None);
         }
 
         // Fetch block
-        match self.node.get_block_info(current_height).await {
+        match self.node.get_block_info(fetch_height).await {
             Ok(block_info) => {
                 info!(
                     "Fetched block {} ({} bytes)",
-                    current_height,
+                    fetch_height,
                     block_info.data.len()
                 );
-                Ok(Some((current_height, block_info.data, block_info.hash)))
+                Ok(Some((fetch_height, block_info.data, block_info.hash)))
             }
             Err(e) => {
-                error!("Failed to fetch block {}: {}", current_height, e);
+                error!("Failed to fetch block {}: {}", fetch_height, e);
                 Err(e.into())
             }
         }

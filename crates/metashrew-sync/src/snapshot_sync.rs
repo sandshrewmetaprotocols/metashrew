@@ -182,8 +182,33 @@ where
     }
 
     pub async fn get_next_block_data(&self) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
+        self.get_next_block_data_with_floor(None).await
+    }
+
+    /// v9.0.5-rc.13: `min_target_height` floor for the next-block-to-fetch
+    /// decision. Defends against the fetcher-wedge bug where
+    /// `handle_reorg` silently lowers `self.current_height` (in non-reorg
+    /// edge cases — e.g. a transient bouncer/bitcoind hash mismatch) and
+    /// then `get_next_block_data` re-fetches a block the fetcher's outer
+    /// loop already sent to the processor. The outer loop drops the
+    /// duplicate (via `near_tip_should_drop`), the processor idles
+    /// forever, and the pod wedges. Production saw j stuck at height
+    /// 951049 for 8+ minutes (block 951049 committed at 01:03:28; fetcher
+    /// kept getting back 951049 because current_height never advanced
+    /// past it).
+    ///
+    /// When `min_target_height = Some(M)`, after the (still-honored)
+    /// reorg check, this method clamps the in-use height to `max(
+    /// effective_current_height, M)` so the fetcher never re-fetches
+    /// what the outer loop has already enqueued. Reorg detection still
+    /// runs and still rewinds `self.current_height` if a real reorg is
+    /// found; the floor only changes which block is RETURNED here.
+    pub async fn get_next_block_data_with_floor(
+        &self,
+        min_target_height: Option<u32>,
+    ) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
         let mut current_height = self.current_height.load(Ordering::SeqCst);
-        
+
         // Get remote tip
         let remote_tip = self.node.get_tip_height().await?;
 
@@ -212,35 +237,44 @@ where
             }
         }
 
+        // v9.0.5-rc.13: apply the floor AFTER the reorg check so a real
+        // reorg's rollback still takes effect, but a phantom rollback
+        // (no-op reorg detection that happened to clamp current_height)
+        // can't cause a wedge.
+        let fetch_height = match min_target_height {
+            Some(m) if m > current_height => m,
+            _ => current_height,
+        };
+
         // Check exit condition
         if let Some(exit_at) = self.config.exit_at {
-            if current_height >= exit_at {
+            if fetch_height >= exit_at {
                 info!("Fetcher reached exit height {}", exit_at);
                 return Ok(None);
             }
         }
 
         // Check if we need to wait for new blocks
-        if current_height > remote_tip {
+        if fetch_height > remote_tip {
             debug!(
-                "Waiting for new blocks: current={}, tip={}",
-                current_height, remote_tip
+                "Waiting for new blocks: fetch_height={}, tip={}",
+                fetch_height, remote_tip
             );
             return Ok(None);
         }
 
         // Fetch block
-        match self.node.get_block_info(current_height).await {
+        match self.node.get_block_info(fetch_height).await {
             Ok(block_info) => {
                 info!(
                     "Fetched block {} ({} bytes)",
-                    current_height,
+                    fetch_height,
                     block_info.data.len()
                 );
-                Ok(Some((current_height, block_info.data, block_info.hash)))
+                Ok(Some((fetch_height, block_info.data, block_info.hash)))
             }
             Err(e) => {
-                error!("Failed to fetch block {}: {}", current_height, e);
+                error!("Failed to fetch block {}: {}", fetch_height, e);
                 Err(e.into())
             }
         }

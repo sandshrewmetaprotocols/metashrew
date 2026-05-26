@@ -1086,7 +1086,22 @@ where
                     // height (which it can do if `handle_reorg` lowers
                     // `current_height` between iterations).
                     let min_send_height = near_tip_min_send_height(last_sent_snapshot);
-                    match engine.get_next_block_data().await {
+                    // v9.0.5-rc.13: pass min_send_height as the fetch
+                    // floor so get_next_block_data ALWAYS returns a
+                    // block at height >= last_sent + 1. Without this
+                    // floor, get_next_block_data uses self.current_height
+                    // (the engine's in-memory atomic) which handle_reorg
+                    // can silently lower in a non-reorg edge case (e.g.
+                    // a transient hash mismatch between local storage
+                    // and bouncer/bitcoind during reorg detection). The
+                    // fetcher then drops every poll via near_tip_should_drop
+                    // and the processor wedges idle forever. Production
+                    // saw this 2026-05-26: j stuck at 951049 for 8+ min
+                    // post-commit, requiring manual pod restart to clear.
+                    match engine
+                        .get_next_block_data_with_floor(Some(min_send_height))
+                        .await
+                    {
                         Ok(Some((height, block_data, block_hash))) => {
                             drop(engine);
                             if near_tip_should_drop(last_sent_snapshot, height) {

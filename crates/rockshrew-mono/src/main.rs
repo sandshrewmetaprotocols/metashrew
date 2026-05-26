@@ -84,9 +84,54 @@ fn init_tracing() {
     env_logger::builder().format_timestamp_secs().init();
 }
 
+/// Bump `RLIMIT_NOFILE` to a value that comfortably exceeds
+/// RocksDB's `set_max_open_files(50000)` ceiling. The OS-level
+/// ulimit gates the RocksDB internal cap — if RLIMIT_NOFILE is
+/// at the typical default of 1024, RocksDB's table_cache hits
+/// the ulimit first and commit_atomic fails with
+/// `IO error: Too many open files` (production wedge 2026-05-21:
+/// mork1e's node, block 892936 retried 600+ attempts).
+///
+/// We try 1_048_576 (1 << 20) first, which matches the standard
+/// systemd unit-default for daemons that need lots of FDs. If the
+/// hard limit is lower (containers / rootless runs), we set to
+/// the hard cap. Returns the resulting soft limit so it gets
+/// surfaced in startup logs.
+fn raise_nofile_limit() -> std::io::Result<(u64, u64)> {
+    let (soft_pre, hard) = rlimit::Resource::NOFILE.get()?;
+    let target = 1_048_576u64.min(hard);
+    if soft_pre < target {
+        rlimit::Resource::NOFILE.set(target, hard)?;
+    }
+    let (soft_post, _hard) = rlimit::Resource::NOFILE.get()?;
+    Ok((soft_pre, soft_post))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+
+    match raise_nofile_limit() {
+        Ok((pre, post)) if post > pre => {
+            log::info!(
+                "raised RLIMIT_NOFILE soft cap from {} to {} (matches RocksDB \
+                 set_max_open_files(50000) headroom; prevents the 'Too many \
+                 open files' wedge documented in PRODUCTION_BUGS_AUDIT.md)",
+                pre, post
+            );
+        }
+        Ok((pre, _)) => {
+            log::info!("RLIMIT_NOFILE soft cap already at {} (no bump needed)", pre);
+        }
+        Err(e) => {
+            log::warn!(
+                "failed to raise RLIMIT_NOFILE: {e}; if the indexer wedges on \
+                 'Too many open files' during commit_atomic, raise it manually \
+                 via `ulimit -n` or the container runtime"
+            );
+        }
+    }
+
     let args = rockshrew_mono::Args::parse();
     rockshrew_mono::run_prod(args).await
 }

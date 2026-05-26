@@ -144,6 +144,17 @@ pub const ATOMIC_RETRY_ERROR_THRESHOLD: u32 = 30;
 pub const ATOMIC_RETRY_ERROR_SPAM_EVERY: u32 = 10;
 /// Cap on the per-attempt backoff (ms).
 pub const ATOMIC_RETRY_BACKOFF_CAP_MS: u64 = 30_000;
+/// Maximum total attempts the retry loop will make before giving up
+/// and surfacing the underlying error to the caller. Before this cap
+/// existed (rc.3 — `150abef` "never exit on atomic-write failure") the
+/// loop spun forever on persistent failures like RocksDB "Too many open
+/// files" (mork1e's pod 2026-05-21: block 892936 retried 600+ attempts
+/// before a manual restart cleared it). At the 30 s backoff cap, 30
+/// attempts is roughly 10-15 minutes of total retry time — enough to
+/// ride out a transient compaction-induced FD spike, but short enough
+/// that operators get a clear failure signal rather than hours of
+/// silent CPU-idle spinning.
+pub const MAX_ATOMIC_COMMIT_ATTEMPTS: u32 = 30;
 
 /// Returns the milliseconds to sleep *before* `attempt` (1-indexed). Attempt 1
 /// returns 0 — no sleep before the first try.
@@ -366,8 +377,20 @@ where
     }
 
     pub async fn get_next_block_data(&self) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
+        self.get_next_block_data_with_floor(None).await
+    }
+
+    /// v9.0.5-rc.13: `min_target_height` floor for the next-block-to-fetch
+    /// decision. See `SnapshotMetashrewSync::get_next_block_data_with_floor`
+    /// for the full motivation — the short version is "defend against
+    /// fetcher wedging when handle_reorg silently lowers current_height
+    /// past what the outer fetcher loop already enqueued".
+    pub async fn get_next_block_data_with_floor(
+        &self,
+        min_target_height: Option<u32>,
+    ) -> SyncResult<Option<(u32, Vec<u8>, Vec<u8>)>> {
         let mut current_height = self.current_height.load(Ordering::SeqCst);
-        
+
         // Get remote tip
         let remote_tip = self.node.get_tip_height().await?;
 
@@ -396,35 +419,43 @@ where
             }
         }
 
+        // v9.0.5-rc.13: clamp the fetch target to >= min_target_height so
+        // the outer fetcher loop's `last_sent + 1` watermark always wins
+        // over a phantom-rolled-back current_height.
+        let fetch_height = match min_target_height {
+            Some(m) if m > current_height => m,
+            _ => current_height,
+        };
+
         // Check exit condition
         if let Some(exit_at) = self.config.exit_at {
-            if current_height >= exit_at {
+            if fetch_height >= exit_at {
                 info!("Fetcher reached exit height {}", exit_at);
                 return Ok(None);
             }
         }
 
         // Check if we need to wait for new blocks
-        if current_height > remote_tip {
+        if fetch_height > remote_tip {
             debug!(
-                "Waiting for new blocks: current={}, tip={}",
-                current_height, remote_tip
+                "Waiting for new blocks: fetch_height={}, tip={}",
+                fetch_height, remote_tip
             );
             return Ok(None);
         }
 
         // Fetch block
-        match self.node.get_block_info(current_height).await {
+        match self.node.get_block_info(fetch_height).await {
             Ok(block_info) => {
                 info!(
                     "Fetched block {} ({} bytes)",
-                    current_height,
+                    fetch_height,
                     block_info.data.len()
                 );
-                Ok(Some((current_height, block_info.data, block_info.hash)))
+                Ok(Some((fetch_height, block_info.data, block_info.hash)))
             }
             Err(e) => {
-                error!("Failed to fetch block {}: {}", current_height, e);
+                error!("Failed to fetch block {}: {}", fetch_height, e);
                 Err(e.into())
             }
         }
@@ -573,10 +604,24 @@ where
             block_data.len()
         );
 
-        // 2. Infinite-retry atomic apply. Block until commit succeeds.
+        // 2. Bounded-retry atomic apply. Block until commit succeeds OR
+        //    until we exceed MAX_ATOMIC_COMMIT_ATTEMPTS, in which case
+        //    surface the last error to the caller (previously this loop
+        //    was unbounded; see mork1e's 600-attempt wedge on block 892936
+        //    documented at MAX_ATOMIC_COMMIT_ATTEMPTS).
         let mut attempt: u32 = 0;
+        let mut last_err: Option<String> = None;
         loop {
             attempt = attempt.saturating_add(1);
+
+            if attempt > MAX_ATOMIC_COMMIT_ATTEMPTS {
+                let msg = last_err.unwrap_or_else(|| "no error captured".to_string());
+                return Err(SyncError::Storage(format!(
+                    "process_block: commit_atomic at height {} exceeded \
+                     max-retry budget ({} attempts): last error: {}",
+                    height, MAX_ATOMIC_COMMIT_ATTEMPTS, msg
+                )));
+            }
 
             // Backoff (no sleep before first attempt).
             if attempt > 1 {
@@ -616,22 +661,26 @@ where
                             return Ok(());
                         }
                         Err(commit_err) => {
+                            let msg = format!("{}", commit_err);
                             log_atomic_retry_failure(
                                 "atomic commit",
                                 height,
                                 attempt,
-                                &format!("{}", commit_err),
+                                &msg,
                             );
+                            last_err = Some(format!("commit_atomic: {}", msg));
                         }
                     }
                 }
                 Err(atomic_err) => {
+                    let msg = format!("{}", atomic_err);
                     log_atomic_retry_failure(
                         "atomic block execution",
                         height,
                         attempt,
-                        &format!("{}", atomic_err),
+                        &msg,
                     );
+                    last_err = Some(format!("process_block_atomic: {}", msg));
                 }
             }
 

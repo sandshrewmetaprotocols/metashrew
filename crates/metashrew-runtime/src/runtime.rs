@@ -84,6 +84,58 @@ use crate::traits::{BatchLike, KeyValueStoreLike};
 /// that has been successfully processed and committed to the database.
 pub const TIP_HEIGHT_KEY: &'static str = "/__INTERNAL/tip-height";
 
+/// Build a `wasmtime::Config` with the deterministic flags every
+/// metashrew indexer engine MUST use.
+///
+/// This is the single source of truth: `MetashrewRuntime::{load,new}`
+/// call it to build both the indexer engine and (with two extra
+/// flags) the view engine. External crates that need to construct
+/// their own engine for testing or specialty use cases should call
+/// this rather than reach for `wasmtime::Config::default()` directly.
+///
+/// Flags set, with rationale:
+/// - `cranelift_nan_canonicalization(true)` — float NaN payloads
+///   canonicalize across hardware (x86-64 vs ARM, SSE/AVX
+///   variants). Alkanes doesn't currently use floats, but nested
+///   wasmi sub-instances inside an alkane *can*, and any future
+///   wasm protocol might. Belt-and-suspenders.
+/// - `relaxed_simd_deterministic(true)` — relaxed SIMD ops produce
+///   different results on different CPUs without this flag. Same
+///   risk class as floats.
+/// - `memory_reservation(0x100000000)` — 4 GiB mmap'd up front so
+///   `memory.grow` doesn't need to syscall mid-execution. Without
+///   this, a host under memory pressure can fail `memory.grow`
+///   mid-block, producing a different runtime error path than a
+///   host with headroom — the same input wasm produces different
+///   write paths.
+/// - `memory_guard_size(0x10000)` — 64 KiB guard page so OOB
+///   memory accesses trap predictably instead of corrupting host
+///   memory.
+/// - `memory_init_cow(false)` — disable copy-on-write so two
+///   instances of the same module don't share underlying pages.
+///   Defense against accidental cross-instance state contamination.
+/// - `async_support(true)` — required because the indexer runs via
+///   `instantiate_async` + `start.call_async`.
+///
+/// Flags intentionally NOT set on the indexer engine, but flipped
+/// on the VIEW engine in `load()`/`new()`:
+/// - `wasm_threads(true)` — view-only. Consensus-critical that the
+///   indexer wasm cannot use shared memory + atomics; those
+///   semantics are not deterministic across thread schedules.
+/// - `consume_fuel(true)` — view-only. The indexer doesn't meter
+///   per-instruction fuel (it metered per-block via FuelTank at
+///   the alkanes layer).
+pub fn indexer_config() -> wasmtime::Config {
+    let mut config = wasmtime::Config::default();
+    config.cranelift_nan_canonicalization(true);
+    config.relaxed_simd_deterministic(true);
+    config.memory_reservation(0x100000000);
+    config.memory_guard_size(0x10000);
+    config.memory_init_cow(false);
+    config.async_support(true);
+    config
+}
+
 fn lock_err<T>(err: std::sync::PoisonError<T>) -> anyhow::Error {
     anyhow!("Mutex lock error: {}", err)
 }
@@ -431,23 +483,35 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
     ///     my_storage_backend
     /// )?;
     /// ```
-    pub async fn load(indexer: PathBuf, mut store: T, engine: wasmtime::Engine) -> Result<Self> where <T as KeyValueStoreLike>::Batch: Send {
-        // Configure the engine with settings for deterministic execution
-        let mut config = wasmtime::Config::default();
-        // Enable NaN canonicalization for deterministic floating point operations
-        config.cranelift_nan_canonicalization(true);
-        // Make relaxed SIMD deterministic (or disable it if not needed)
-        config.relaxed_simd_deterministic(true);
-        // Allocate memory at maximum size to avoid non-deterministic memory growth
-        config.memory_reservation(0x100000000); // 4GB max memory
-        config.memory_guard_size(0x10000); // 64KB guard
-                                                  // Pre-allocate memory to maximum size
-        config.memory_init_cow(false); // Disable copy-on-write to ensure consistent memory behavior
+    pub async fn load(indexer: PathBuf, mut store: T) -> Result<Self> where <T as KeyValueStoreLike>::Batch: Send {
+        // Both engines are built from the same deterministic-config base
+        // (see `indexer_config`). The view engine adds consume_fuel +
+        // wasm_threads (defense-in-depth — v9 doesn't expose the
+        // ThreadSpawn/ThreadJoin host syscalls, so wasm_threads here
+        // just allows shared-memory wasm modules to load without
+        // changing host-side behavior).
+        //
+        // History: prior to this commit, callers (rockshrew-mono)
+        // constructed the indexer engine themselves with only
+        // `async_support(true)` set and passed it in via an
+        // `engine: wasmtime::Engine` parameter on this function. The
+        // deterministic flags (NaN canonicalization, memory_reservation
+        // 4 GiB, memory_init_cow false, relaxed-SIMD-deterministic)
+        // only ever landed on the view-side async_engine the function
+        // built internally. The indexer engine — the one actually
+        // writing state — was bare defaults. This is the leading
+        // hypothesis for the g vs h 907-DIESEL drift at h=950299
+        // (same image, same wasm, same start time, divergent state).
+        //
+        // Fix: load() / new() now build BOTH engines internally from
+        // `indexer_config()` so determinism is guaranteed-by-construction.
+        // The `engine` parameter is gone.
+        let config = indexer_config();
+        let engine = wasmtime::Engine::new(&config)?;
 
-        // Configure async engine with the same deterministic settings
         let mut async_config = config.clone();
         async_config.consume_fuel(true);
-        async_config.async_support(true);
+        async_config.wasm_threads(true);
 
         let async_engine = wasmtime::Engine::new(&async_config)?;
         let module = wasmtime::Module::from_file(&engine, indexer.clone().into_os_string())
@@ -491,23 +555,15 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         })
     }
 
-    pub async fn new(indexer: &[u8], mut store: T, engine: wasmtime::Engine) -> Result<Self> where <T as KeyValueStoreLike>::Batch: Send {
-        // Configure the engine with settings for deterministic execution
-        let mut config = wasmtime::Config::default();
-        // Enable NaN canonicalization for deterministic floating point operations
-        config.cranelift_nan_canonicalization(true);
-        // Make relaxed SIMD deterministic (or disable it if not needed)
-        config.relaxed_simd_deterministic(true);
-        // Allocate memory at maximum size to avoid non-deterministic memory growth
-        config.memory_reservation(0x100000000); // 4GB max memory
-        config.memory_guard_size(0x10000); // 64KB guard
-                                                  // Pre-allocate memory to maximum size
-        config.memory_init_cow(false); // Disable copy-on-write to ensure consistent memory behavior
+    pub async fn new(indexer: &[u8], mut store: T) -> Result<Self> where <T as KeyValueStoreLike>::Batch: Send {
+        // See `load()` for the rationale on internal engine construction.
+        // Same deterministic-config base; same indexer/view split.
+        let config = indexer_config();
+        let engine = wasmtime::Engine::new(&config)?;
 
-        // Configure async engine with the same deterministic settings
         let mut async_config = config.clone();
         async_config.consume_fuel(true);
-        async_config.async_support(true);
+        async_config.wasm_threads(true);
 
         let async_engine = wasmtime::Engine::new(&async_config)?;
         let module = wasmtime::Module::new(&engine, indexer)

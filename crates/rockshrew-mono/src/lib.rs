@@ -63,6 +63,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
@@ -338,6 +340,19 @@ pub struct Args {
     /// fresh-sync deployments only.
     #[arg(long, default_value_t = false)]
     pub sync_mode: bool,
+
+    /// Path to a UNIX control socket for operator commands. When set,
+    /// rockshrew-mono binds it and accepts newline-delimited JSON commands:
+    ///   `{"cmd":"rollback","height":N}` — orphan all indexed state above N and
+    ///      resume indexing from N+1 (a programmatic, in-process rollback — a
+    ///      cleaner alternative to forcing it via the `/v4/reorg/*` HTTP trick);
+    ///   `{"cmd":"status"}` — returns the current indexed height;
+    ///   `{"cmd":"ping"}`   — liveness.
+    /// Each command is one JSON object per line; the reply is one JSON line.
+    /// A rollback runs in the indexer task at a block boundary — intended for use
+    /// at/near tip (idle processor); issuing one mid-block-application could race.
+    #[arg(long)]
+    pub control_socket: Option<PathBuf>,
 }
 
 /// Shared application state for the JSON-RPC server.
@@ -1119,6 +1134,98 @@ where
         })
         .expect("Failed to spawn processor thread");
 
+    // ── operator control socket: on-demand rollback ────────────────────────
+    // Channel from the UNIX control socket to the indexer task. Each request is
+    // (target_height, oneshot reply). The rollback itself runs in the indexer
+    // task's select loop below so it happens at a block boundary and reuses the
+    // same fetcher-watermark reset the reorg path uses. `rollback_tx` is kept
+    // alive in this scope (even when no socket is configured) so `rollback_rx`
+    // pends instead of returning a closed-channel None that would busy-loop the
+    // select.
+    let (rollback_tx, mut rollback_rx) =
+        mpsc::channel::<(u32, tokio::sync::oneshot::Sender<Result<u32, String>>)>(4);
+    if let Some(sock_path) = args.control_socket.clone() {
+        let rollback_tx = rollback_tx.clone();
+        let engine_for_status = sync_engine_arc.clone();
+        tokio::spawn(async move {
+            let _ = std::fs::remove_file(&sock_path);
+            let listener = match UnixListener::bind(&sock_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("control-socket: failed to bind {}: {}", sock_path.display(), e);
+                    return;
+                }
+            };
+            info!("control-socket: listening on {}", sock_path.display());
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("control-socket: accept error: {}", e);
+                        continue;
+                    }
+                };
+                let rollback_tx = rollback_tx.clone();
+                let engine_for_status = engine_for_status.clone();
+                tokio::spawn(async move {
+                    let (rd, mut wr) = stream.into_split();
+                    let mut lines = BufReader::new(rd).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let reply: String = match serde_json::from_str::<serde_json::Value>(line) {
+                            Ok(v) => {
+                                let cmd = v.get("cmd").and_then(|c| c.as_str()).unwrap_or("");
+                                match cmd {
+                                    "ping" => "{\"ok\":true}".to_string(),
+                                    "status" => {
+                                        let h = engine_for_status.read().await.current_height();
+                                        format!("{{\"ok\":true,\"height\":{}}}", h)
+                                    }
+                                    "rollback" => match v.get("height").and_then(|h| h.as_u64()) {
+                                        Some(h) => {
+                                            let (tx, rx) = tokio::sync::oneshot::channel();
+                                            if rollback_tx.send((h as u32, tx)).await.is_err() {
+                                                "{\"error\":\"indexer task unavailable\"}".to_string()
+                                            } else {
+                                                match rx.await {
+                                                    Ok(Ok(rb)) => {
+                                                        format!("{{\"ok\":true,\"rolled_back_to\":{}}}", rb)
+                                                    }
+                                                    Ok(Err(e)) => {
+                                                        format!("{{\"error\":{}}}", serde_json::Value::String(e))
+                                                    }
+                                                    Err(_) => {
+                                                        "{\"error\":\"rollback reply dropped\"}".to_string()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        None => "{\"error\":\"missing or invalid height\"}".to_string(),
+                                    },
+                                    other => format!(
+                                        "{{\"error\":{}}}",
+                                        serde_json::Value::String(format!("unknown cmd: {}", other))
+                                    ),
+                                }
+                            }
+                            Err(e) => format!(
+                                "{{\"error\":{}}}",
+                                serde_json::Value::String(format!("bad json: {}", e))
+                            ),
+                        };
+                        if wr.write_all(format!("{}\n", reply).as_bytes()).await.is_err() {
+                            break;
+                        }
+                        let _ = wr.flush().await;
+                    }
+                });
+            }
+        });
+    }
+
     let indexer_handle = tokio::spawn({
         let sync_engine_clone = sync_engine_arc.clone();
         let last_sent_height_idx = last_sent_height.clone();
@@ -1127,7 +1234,12 @@ where
         let mut block_count = 0u64;
         let start_time = Instant::now();
 
-        while let Some(result) = result_receiver.recv().await {
+        loop {
+        tokio::select! {
+            // Bias to draining block results first; the control socket is low-rate.
+            biased;
+            maybe_result = result_receiver.recv() => {
+            let Some(result) = maybe_result else { break; };
             match result {
                 BlockResult::Success(height) => {
                     block_count += 1;
@@ -1193,7 +1305,47 @@ where
                     break;
                 }
             }
-        }
+            } // end block-result arm
+            Some((target, reply)) = rollback_rx.recv() => {
+                warn!("control-socket: manual rollback to height {} requested", target);
+                let engine = sync_engine_clone.read().await;
+                let res: Result<(), String> = async {
+                    engine
+                        .storage()
+                        .write()
+                        .await
+                        .rollback_to_height(target)
+                        .await
+                        .map_err(|e| format!("rollback_to_height: {}", e))?;
+                    engine
+                        .runtime()
+                        .refresh_memory()
+                        .await
+                        .map_err(|e| format!("refresh_memory: {}", e))?;
+                    Ok(())
+                }
+                .await;
+                drop(engine);
+                match res {
+                    Ok(()) => {
+                        // Mirror the reorg path (see the Error arm above): reset the
+                        // fetcher's last-sent watermark so it resumes fetching from
+                        // the now-lowered processor tip.
+                        last_sent_height_idx.store(LAST_SENT_UNSET, Ordering::SeqCst);
+                        warn!(
+                            "control-socket: rolled back to {} — fetcher watermark reset; resuming from processor tip",
+                            target
+                        );
+                        let _ = reply.send(Ok(target));
+                    }
+                    Err(e) => {
+                        error!("control-socket: rollback to {} failed: {}", target, e);
+                        let _ = reply.send(Err(e));
+                    }
+                }
+            }
+        } // end tokio::select!
+        } // end loop
     }});
 
     let server_handle = tokio::spawn({

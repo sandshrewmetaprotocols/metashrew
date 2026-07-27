@@ -257,6 +257,39 @@ pub struct Args {
     pub max_reorg_depth: u32,
     #[arg(long, default_value_t = 6)]
     pub reorg_check_threshold: u32,
+
+    /// Enforce a chain-validation policy before applying each block.
+    ///
+    /// Off by default, which keeps the historical behaviour: the block
+    /// body is checked against the hash the node gave for that height,
+    /// and the header's parent is checked against what we stored — but
+    /// nothing verifies proof of work, difficulty, or that the chain is
+    /// rooted at the real genesis. That is a continuity check, not an
+    /// SPV proof; see docs/SPV_AUDIT.md.
+    ///
+    /// Enabling this replaces those inline checks with the policy named
+    /// by `--spv-type`, which additionally rejects blocks with no valid
+    /// work, blocks whose parent hash is unknown, and an endpoint
+    /// serving a different chain's genesis.
+    #[arg(long, default_value_t = false)]
+    pub enable_spv: bool,
+
+    /// Which policy `--enable-spv` enforces.
+    ///
+    ///   mainnet | bitcoin   hash binding, parent linkage, genesis
+    ///                       anchor, and proof of work
+    ///   testnet | signet | regtest
+    ///                       the same, anchored to that network
+    ///   auxpow              merged-mined chains: no proof-of-work check,
+    ///                       because the target is met by the parent
+    ///                       chain's header
+    ///   continuity          the legacy checks, named explicitly
+    ///   custom:<path>.wasm  a sandboxed module; see
+    ///                       crates/metashrew-validator-core
+    ///
+    /// Built-in policies are native Rust and never touch a wasm runtime.
+    #[arg(long, default_value = "mainnet")]
+    pub spv_type: String,
     #[arg(long)]
     pub prefetch_size: Option<usize>,
     /// Enable the `metashrew_preview` JSON-RPC method.
@@ -843,13 +876,35 @@ where
         SyncMode::Normal
     };
 
-    let sync_engine = SnapshotMetashrewSync::new(
+    let mut sync_engine = SnapshotMetashrewSync::new(
         node_adapter,
         storage_adapter,
         runtime_adapter,
         sync_config,
         sync_mode,
     );
+
+    // Chain-validation policy. Resolved before any block is fetched so a
+    // bad --spv-type or an unloadable custom validator fails at startup
+    // rather than a hundred blocks in.
+    if args.enable_spv {
+        let policy = metashrew_validator_core::Policy::parse(&args.spv_type)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let validator = metashrew_validator_core::validator_for(&policy)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        info!("SPV validation ENABLED — {}", validator.describe());
+        sync_engine.set_validator(Arc::from(validator));
+    } else {
+        // Say plainly what is not being enforced. An operator pointing
+        // --daemon-rpc-url at a remote endpoint should not have to read
+        // the source to find this out.
+        warn!(
+            "SPV validation is OFF: block bodies are checked against the hash the node \
+             reports and against the previous block, but proof of work, difficulty and \
+             genesis are NOT verified. Treat --daemon-rpc-url as trusted infrastructure. \
+             Pass --enable-spv to enforce a policy (see docs/SPV_AUDIT.md)."
+        );
+    }
 
     sync_engine.init().await;
 

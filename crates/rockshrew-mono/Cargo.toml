@@ -29,6 +29,7 @@ serde = "1.0.217"
 log = "0.4.25"
 env_logger = "0.11.6"
 hex = "0.4.3"
+metashrew-validator-core = { path = "../metashrew-validator-core", features = ["host-wasm"] }
 rocksdb = { version = "0.21.0", features = ["multi-threaded-cf"] }
 tokio = { version = "1.43.0", features = ["full", "tracing"] }
 # CancellationToken + DropGuard wire the actix handler future drop into the

@@ -33,6 +33,14 @@ where
     S: StorageAdapter,
     R: RuntimeAdapter,
 {
+    /// Opt-in chain-validation policy (`--enable-spv`).
+    ///
+    /// `None` keeps the legacy inline continuity check. `Some(_)`
+    /// replaces it wholesale: the policy is the single place that
+    /// decides whether a block may be applied, so there is no way for
+    /// the two to disagree. See `metashrew-validator-core`.
+    validator: Option<std::sync::Arc<dyn metashrew_validator_core::ChainValidator>>,
+
     node: Arc<N>,
     storage: Arc<RwLock<S>>,
     runtime: Arc<R>,
@@ -68,6 +76,8 @@ where
     /// Create a new snapshot-enabled sync engine
     pub fn new(node: N, storage: S, runtime: R, config: SyncConfig, sync_mode: SyncMode) -> Self {
         Self {
+            // Opt-in; installed later via `set_validator`.
+            validator: None,
             node: Arc::new(node),
             storage: Arc::new(RwLock::new(storage)),
             runtime: Arc::new(runtime),
@@ -280,6 +290,18 @@ where
         }
     }
 
+
+    /// Install an opt-in chain-validation policy.
+    ///
+    /// Replaces the built-in continuity check for every subsequent
+    /// block. Call before starting the sync loop.
+    pub fn set_validator(
+        &mut self,
+        validator: std::sync::Arc<dyn metashrew_validator_core::ChainValidator>,
+    ) {
+        self.validator = Some(validator);
+    }
+
     /// Validate block chain continuity like a light client (SPV-style)
     ///
     /// This performs two validations:
@@ -290,6 +312,50 @@ where
     async fn validate_block_connects(&self, height: u32, block_data: &[u8], provided_hash: &[u8]) -> SyncResult<bool> {
         use bitcoin::consensus::Encodable;
         use sha2::{Sha256, Digest};
+
+        // Opt-in policy takes over completely when configured. The
+        // inline checks below stay as the default so behaviour is
+        // unchanged for anyone who has not passed --enable-spv.
+        if let Some(validator) = &self.validator {
+            let req = metashrew_validator_core::ValidationRequest {
+                height,
+                header: block_data.get(..80).unwrap_or(block_data).to_vec(),
+                claimed_hash: {
+                    let mut h = [0u8; 32];
+                    if provided_hash.len() != 32 {
+                        error!(
+                            "\u{26a0} block {} was given a {}-byte hash, expected 32",
+                            height,
+                            provided_hash.len()
+                        );
+                        return Ok(false);
+                    }
+                    h.copy_from_slice(provided_hash);
+                    h
+                },
+                prev_hash: if height == 0 {
+                    None
+                } else {
+                    let storage = self.storage.read().await;
+                    let stored = storage.get_block_hash(height - 1).await?;
+                    drop(storage);
+                    match stored {
+                        Some(v) if v.len() == 32 => {
+                            let mut h = [0u8; 32];
+                            h.copy_from_slice(&v);
+                            Some(h)
+                        }
+                        _ => None,
+                    }
+                },
+            };
+
+            let verdict = validator.validate(&req);
+            if !verdict.accepted {
+                error!("\u{26a0} SPV REJECT at height {}: {}", height, verdict.reason);
+            }
+            return Ok(verdict.accepted);
+        }
 
         // Decode the block
         let block: bitcoin::Block = bitcoin::consensus::deserialize(block_data)

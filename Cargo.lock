@@ -2867,6 +2867,7 @@ dependencies = [
  "hex",
  "log",
  "metashrew-runtime",
+ "metashrew-validator-core",
  "num_cpus",
  "rocksdb",
  "serde",
@@ -2905,6 +2906,18 @@ dependencies = [
  "tokio-test",
  "wasmtime",
  "zstd",
+]
+
+[[package]]
+name = "metashrew-validator-core"
+version = "9.0.5-rc.10"
+dependencies = [
+ "anyhow",
+ "bitcoin 0.32.8",
+ "hex",
+ "sha2",
+ "wasmtime",
+ "wat",
 ]
 
 [[package]]
@@ -3861,6 +3874,7 @@ dependencies = [
  "metashrew-core",
  "metashrew-runtime",
  "metashrew-sync",
+ "metashrew-validator-core",
  "num_cpus",
  "once_cell",
  "rand 0.8.5",

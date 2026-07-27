@@ -698,6 +698,52 @@ impl TunneledResponse {
     }
 }
 
+/// Process-wide HTTP clients, one per SSL mode.
+///
+/// A `reqwest::Client` owns its connection pool, so it must outlive the
+/// requests that are meant to share it. Cloning one is cheap (it is an
+/// `Arc` internally) and is the documented way to share it.
+///
+/// `pool_max_idle_per_host` is sized for the block fetcher's batch: with
+/// a smaller pool than the batch, connections are closed and re-dialled
+/// between batches and the handshake cost comes straight back.
+fn shared_client(bypass_ssl: bool) -> reqwest::Client {
+    use std::sync::OnceLock;
+    static PLAIN: OnceLock<reqwest::Client> = OnceLock::new();
+    static INSECURE: OnceLock<reqwest::Client> = OnceLock::new();
+
+    fn build(bypass_ssl: bool) -> reqwest::Client {
+        let b = reqwest::ClientBuilder::new()
+            .timeout(std::time::Duration::from_secs(60))
+            .connect_timeout(std::time::Duration::from_secs(20))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST);
+        let b = if bypass_ssl {
+            debug!("Building shared HTTP client with SSL validation disabled");
+            b.danger_accept_invalid_certs(true)
+        } else {
+            b
+        };
+        b.build().unwrap_or_else(|e| {
+            // Only fails if the TLS backend cannot initialise. Fall back
+            // to a default client rather than taking the process down.
+            error!("Failed to build shared HTTP client ({e}); using defaults");
+            reqwest::Client::new()
+        })
+    }
+
+    if bypass_ssl {
+        INSECURE.get_or_init(|| build(true)).clone()
+    } else {
+        PLAIN.get_or_init(|| build(false)).clone()
+    }
+}
+
+/// Idle connections kept per host. Sized above the default block
+/// prefetch batch so a batch's connections survive to be reused by the
+/// next one.
+const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 256;
+
 /// Makes an HTTP request through an SSH tunnel if needed
 pub async fn make_request_with_tunnel(
     url: &str,
@@ -707,21 +753,16 @@ pub async fn make_request_with_tunnel(
     bypass_ssl: bool,
     existing_tunnel: Option<SshTunnel>,
 ) -> Result<TunneledResponse> {
-    use reqwest::ClientBuilder;
-
-    // Create HTTP client with appropriate SSL configuration
-    let client_builder = ClientBuilder::new()
-        .timeout(std::time::Duration::from_secs(60))
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .pool_idle_timeout(std::time::Duration::from_secs(60))
-        .pool_max_idle_per_host(10);
-
-    let client = if bypass_ssl {
-        debug!("Creating HTTP client with SSL validation disabled");
-        client_builder.danger_accept_invalid_certs(true).build()?
-    } else {
-        client_builder.build()?
-    };
+    // Reuse one client per SSL mode for the life of the process.
+    //
+    // This used to build a fresh `reqwest::Client` on every request. The
+    // pool it configured was discarded microseconds later, so *every*
+    // RPC paid a new TCP connect and a full TLS handshake. With the
+    // fetcher issuing `prefetch_size` requests concurrently that became
+    // N simultaneous TLS handshakes against one host, which the far side
+    // refuses under load — turning declared concurrency into a retry
+    // storm that then serialises on backoff.
+    let client = shared_client(bypass_ssl);
 
     // Use existing tunnel if provided, otherwise create a new one if needed
     let tunnel = if let Some(tunnel) = existing_tunnel {

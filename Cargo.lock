@@ -2760,7 +2760,7 @@ dependencies = [
 
 [[package]]
 name = "memshrew-p2p"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "memshrew-runtime"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2793,7 +2793,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-core"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "bitcoin 0.31.3",
@@ -2810,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-memory-stress"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "bitcoin 0.32.8",
  "metashrew-core",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-minimal"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "bitcoin 0.32.8",
@@ -2830,7 +2830,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-runtime"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "hex",
@@ -2847,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-support"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "bech32 0.11.1",
@@ -2859,7 +2859,7 @@ dependencies = [
 
 [[package]]
 name = "metashrew-sync"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2867,6 +2867,7 @@ dependencies = [
  "hex",
  "log",
  "metashrew-runtime",
+ "metashrew-validator-core",
  "num_cpus",
  "rocksdb",
  "serde",
@@ -2905,6 +2906,18 @@ dependencies = [
  "tokio-test",
  "wasmtime",
  "zstd",
+]
+
+[[package]]
+name = "metashrew-validator-core"
+version = "9.0.5-rc.14"
+dependencies = [
+ "anyhow",
+ "bitcoin 0.32.8",
+ "hex",
+ "sha2",
+ "wasmtime",
+ "wat",
 ]
 
 [[package]]
@@ -3814,6 +3827,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rlimit"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rocksdb"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3825,7 +3847,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-diff"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "clap",
@@ -3834,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-mono"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -3847,15 +3869,18 @@ dependencies = [
  "env_logger",
  "hex",
  "itertools 0.14.0",
+ "libc",
  "log",
  "memshrew-runtime",
  "metashrew-core",
  "metashrew-runtime",
  "metashrew-sync",
+ "metashrew-validator-core",
  "num_cpus",
  "once_cell",
  "rand 0.8.5",
  "reqwest",
+ "rlimit",
  "rocksdb",
  "rockshrew-runtime",
  "russh",
@@ -3876,7 +3901,7 @@ dependencies = [
 
 [[package]]
 name = "rockshrew-runtime"
-version = "9.0.4-rc.5"
+version = "9.0.5-rc.14"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -626,24 +626,10 @@ pub async fn parse_daemon_rpc_url(
 /// Creates a reqwest Client with appropriate SSL configuration
 #[allow(dead_code)]
 pub fn create_http_client(bypass_ssl: bool) -> Result<reqwest::Client> {
-    let client_builder = reqwest::ClientBuilder::new()
-        .timeout(std::time::Duration::from_secs(60)) // 60 seconds timeout
-        .connect_timeout(std::time::Duration::from_secs(20)) // 20 seconds connect timeout
-        .pool_idle_timeout(std::time::Duration::from_secs(60)) // Keep connections alive longer
-        .pool_max_idle_per_host(10); // Increased from 5 to 10
-
-    if bypass_ssl {
-        debug!("Creating HTTP client with SSL validation disabled");
-        client_builder
-            .danger_accept_invalid_certs(true)
-            .build()
-            .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))
-    } else {
-        debug!("Creating HTTP client with standard SSL validation");
-        client_builder
-            .build()
-            .map_err(|e| anyhow!("Failed to create HTTP client: {}", e))
-    }
+    // Delegates to the shared pool. Currently unused, but if it is
+    // reached for again it must not reintroduce a per-call client — see
+    // `shared_client`.
+    Ok(shared_client(bypass_ssl))
 }
 
 /// A response with an optional SSH tunnel that keeps the tunnel alive until the response is consumed

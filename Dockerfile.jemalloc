@@ -38,7 +38,15 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /build/metashrew
 COPY . .
 
-RUN cargo build --release -p rockshrew-mono --bin rockshrew-mono
+# CARGO_FEATURES=jemalloc-prof builds the diagnostic variant, which compiles
+# jemalloc with --enable-prof + --enable-stats so MALLOC_CONF=prof:true and the
+# full stats_print counters are available. Default (empty) is the lean image.
+ARG CARGO_FEATURES=""
+RUN if [ -n "$CARGO_FEATURES" ]; then \
+        cargo build --release -p rockshrew-mono --bin rockshrew-mono --features "$CARGO_FEATURES"; \
+    else \
+        cargo build --release -p rockshrew-mono --bin rockshrew-mono; \
+    fi
 
 # Fail the build if jemalloc did not actually land in the binary. Without
 # `unprefixed_malloc_on_supported_platforms` the plain `malloc` symbol would be

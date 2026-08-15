@@ -84,6 +84,16 @@ tikv-jemallocator = { version = "0.6", features = [
 
 [features]
 default = []
+# Heap profiling. jemalloc's `prof:*` MALLOC_CONF knobs are compiled OUT unless
+# jemalloc is built with --enable-prof, which is what tikv-jemallocator's
+# `profiling` feature turns on; without this feature `MALLOC_CONF=prof:true`
+# is rejected at startup with "Invalid conf pair: prof:true". `stats` likewise
+# gates the actual allocation counters in `stats_print` output.
+#
+# This costs a small amount of per-allocation overhead, so it is OFF by default
+# and shipped as a separate diagnostic image rather than baked into the normal
+# build. See Dockerfile.jemalloc --build-arg CARGO_FEATURES=jemalloc-prof.
+jemalloc-prof = ["tikv-jemallocator/profiling", "tikv-jemallocator/stats"]
 console = ["console-subscriber"]
 debug-tracing = ["tracing-subscriber/json"]
 ssh_e2e_tests = []

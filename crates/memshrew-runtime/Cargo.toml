@@ -12,3 +12,6 @@ async-trait = "0.1.83"
 
 [dev-dependencies]
 tempfile = "3.8.1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+wasmtime = "43"
+wat = "1"

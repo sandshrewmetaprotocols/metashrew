@@ -17,29 +17,63 @@
 use memshrew_runtime::{MemStoreAdapter, MetashrewRuntime};
 use std::time::{Duration, Instant};
 
-/// Minimal module: exports the linear memory the view path expects plus a
-/// `spin` view that never returns.
+/// Minimal module: exports the linear memory the view path expects, a
+/// `spin` view that never returns, and an `ok` view that returns "abc" via
+/// the metashrew arraybuffer convention (u32 LE length at ptr-4, data at ptr
+/// — see `try_read_arraybuffer_as_vec`).
 const SPIN_WAT: &str = r#"
 (module
   (memory (export "memory") 1)
   (func (export "spin") (result i32)
     (loop $forever
       br $forever)
-    i32.const 0))
+    i32.const 0)
+  (func (export "ok") (result i32)
+    (i32.store (i32.const 96) (i32.const 3))
+    (i32.store8 (i32.const 100) (i32.const 97))
+    (i32.store8 (i32.const 101) (i32.const 98))
+    (i32.store8 (i32.const 102) (i32.const 99))
+    i32.const 100))
 "#;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn epoch_deadline_traps_runaway_view() {
+/// Both tests set the override BEFORE constructing a runtime: the value is
+/// read once per process (OnceLock), and vitest-style parallel test threads
+/// would otherwise race which test initializes it. Setting the same value in
+/// both makes initialization order irrelevant.
+fn set_short_deadline() {
     std::env::set_var("METASHREW_VIEW_EPOCH_DEADLINE_SECS", "2");
+}
 
+async fn build_runtime() -> MetashrewRuntime<MemStoreAdapter> {
     let wasm = wat::parse_str(SPIN_WAT).expect("valid wat");
     let mut config = wasmtime::Config::default();
     config.async_support(true);
     let engine = wasmtime::Engine::new(&config).expect("engine");
-
-    let runtime = MetashrewRuntime::new(&wasm, MemStoreAdapter::new(), engine)
+    MetashrewRuntime::new(&wasm, MemStoreAdapter::new(), engine)
         .await
-        .expect("runtime");
+        .expect("runtime")
+}
+
+/// Regression guard for the epoch-interruption rollout itself: a HEALTHY
+/// view must still instantiate and succeed on the epoch-enabled engine with
+/// an armed deadline. (A store on an epoch engine with the default deadline
+/// of 0 traps instantly — this pins that instantiation and the call are both
+/// armed correctly.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn healthy_view_still_succeeds_on_epoch_engine() {
+    set_short_deadline();
+    let runtime = build_runtime().await;
+    let out = runtime
+        .view("ok".to_string(), &vec![], 0)
+        .await
+        .expect("healthy view must succeed under the epoch deadline");
+    assert_eq!(out, b"abc".to_vec());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn epoch_deadline_traps_runaway_view() {
+    set_short_deadline();
+    let runtime = build_runtime().await;
 
     let started = Instant::now();
     let err = runtime

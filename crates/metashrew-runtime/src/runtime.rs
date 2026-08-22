@@ -259,6 +259,53 @@ impl State {
 ///     Ok(())
 /// }
 /// ```
+/// Hard wall-clock bound (in epoch ticks ≈ seconds) for VIEW execution.
+///
+/// v9.0.5-rc.10 (2026-08-22 `protorunesbyoutpoint` hang incident): a poisoned
+/// per-outpoint record on mainnet (2a1538bf…2e28:0, written during a
+/// reconcile-rollback window) drove the view WASM into an unbounded
+/// storage-walk loop. Views run with `set_fuel(u64::MAX)` plus a cooperative
+/// yield interval — the yield makes a runaway view *cancellable*, but nothing
+/// ever *caps* it, so each request spun until the JSON-RPC layer's 60s
+/// timeout while holding a view-runtime semaphore permit. One poisoned
+/// record = a trivial per-request DoS.
+///
+/// The async (view) engine now enables wasmtime epoch interruption; a
+/// background ticker increments the epoch once per second, and every view
+/// store arms this deadline so a pathological view TRAPS cleanly (surfacing
+/// as a normal view error to the JSON-RPC caller) and releases its permit.
+/// Block application is untouched: the sync engine has no epoch
+/// interruption, and the preview/indexer stores on the async engine arm a
+/// `u64::MAX` deadline (see `new_with_db_indexer` / `new_with_db`).
+///
+/// Override with `METASHREW_VIEW_EPOCH_DEADLINE_SECS` (must stay below the
+/// JSON-RPC method timeout so the trap wins and frees the permit).
+pub fn view_epoch_deadline_ticks() -> u64 {
+    static TICKS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *TICKS.get_or_init(|| {
+        std::env::var("METASHREW_VIEW_EPOCH_DEADLINE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(30)
+    })
+}
+
+/// Spawn the once-per-second epoch ticker for an epoch-interruption engine.
+///
+/// Holds only a weak reference — the thread exits when the engine is
+/// dropped, so short-lived engines (tests) don't leak tickers.
+fn spawn_epoch_ticker(engine: &wasmtime::Engine) {
+    let weak = engine.weak();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        match weak.upgrade() {
+            Some(engine) => engine.increment_epoch(),
+            None => break,
+        }
+    });
+}
+
 pub struct MetashrewRuntime<T: KeyValueStoreLike> {
     /// Shared execution context containing database, block data, and state
     ///
@@ -448,8 +495,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let mut async_config = config.clone();
         async_config.consume_fuel(true);
         async_config.async_support(true);
+        // Hard wall-clock bound for VIEW execution — see
+        // `view_epoch_deadline_ticks`. Every store on this engine MUST arm an
+        // epoch deadline (views: finite; preview/indexer stores: u64::MAX).
+        async_config.epoch_interruption(true);
 
         let async_engine = wasmtime::Engine::new(&async_config)?;
+        spawn_epoch_ticker(&async_engine);
         let module = wasmtime::Module::from_file(&engine, indexer.clone().into_os_string())
             .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to load WASM module")?;
         let async_module = wasmtime::Module::from_file(&async_engine, indexer.into_os_string())
@@ -508,8 +560,13 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
         let mut async_config = config.clone();
         async_config.consume_fuel(true);
         async_config.async_support(true);
+        // Hard wall-clock bound for VIEW execution — see
+        // `view_epoch_deadline_ticks`. Every store on this engine MUST arm an
+        // epoch deadline (views: finite; preview/indexer stores: u64::MAX).
+        async_config.epoch_interruption(true);
 
         let async_engine = wasmtime::Engine::new(&async_config)?;
+        spawn_epoch_ticker(&async_engine);
         let module = wasmtime::Module::new(&engine, indexer)
             .map_err(|e| anyhow::anyhow!("{}", e)).context("Failed to load WASM module from bytes")?;
         let async_module = wasmtime::Module::new(&async_engine, indexer)
@@ -872,17 +929,30 @@ impl<T: KeyValueStoreLike + Clone + Send + Sync + 'static> MetashrewRuntime<T> {
                 store.set_fuel(u64::MAX)?;
                 store
                     .fuel_async_yield_interval(Some(10000))?;
+                // Cooperative yield above makes a runaway view CANCELLABLE;
+                // the epoch deadline makes it BOUNDED. Re-arm here so the
+                // full budget applies to the call itself (instantiation in
+                // new_with_db_async_limited armed its own). A view that
+                // exceeds the budget traps with an epoch-deadline error —
+                // surfaced to the JSON-RPC caller as a normal view failure —
+                // instead of spinning to the 60s method timeout while
+                // holding a view-runtime permit (2026-08-22
+                // protorunesbyoutpoint hang incident).
+                store.set_epoch_deadline(view_epoch_deadline_ticks());
 
                 // Execute view function
                 let func = instance
                     .get_typed_func::<(), i32>(&mut *store, symbol.as_str())
                     .map_err(|e| anyhow::anyhow!("{}", e)).with_context(|| format!("Failed to get view function '{}'", symbol))?;
 
-                // Use async call
+                // Use async call. Alternate ({:#}) formatting preserves the
+                // trap CAUSE chain — without it, an epoch-deadline trap
+                // surfaced as an opaque "error while executing at wasm
+                // backtrace", indistinguishable from any other view failure.
                 let result = func
                     .call_async(&mut *store, ())
                     .await
-                    .map_err(|e| anyhow::anyhow!("{}", e)).with_context(|| format!("Failed to execute view function '{}'", symbol))?;
+                    .map_err(|e| anyhow::anyhow!("{:#}", e)).with_context(|| format!("Failed to execute view function '{}'", symbol))?;
 
                 let memory = instance
                     .get_memory(&mut *store, "memory")
@@ -1576,7 +1646,12 @@ pub async fn setup_linker_view(
             MetashrewRuntimeContext::new(db, height, vec![]),
         ));
         {
-            wasmstore.limiter(|state| &mut state.limits)
+            wasmstore.limiter(|state| &mut state.limits);
+            // Defensive: if this preview runtime is ever constructed on the
+            // epoch-interruption (async) engine, an unarmed store would trap
+            // instantly (default deadline 0). Preview block application must
+            // stay unbounded; a no-op on non-epoch engines.
+            wasmstore.set_epoch_deadline(u64::MAX);
         }
         {
             Self::setup_linker(context.clone(), &mut linker).await
@@ -1619,6 +1694,11 @@ pub async fn setup_linker_view(
             // Use a high limit to avoid running out during block processing
             // We can't check if fuel is enabled, so just try to set it
             let _ = wasmstore.set_fuel(u64::MAX);
+            // This runtime applies PREVIEW blocks on the async
+            // (epoch-interruption) engine — block application must stay
+            // unbounded, so arm an effectively-infinite deadline (the
+            // default of 0 would trap instantly).
+            wasmstore.set_epoch_deadline(u64::MAX);
         }
         {
             Self::setup_linker(context.clone(), &mut linker).await
@@ -1681,7 +1761,14 @@ pub async fn setup_linker_view(
             MetashrewRuntimeContext::new(db, height, vec![]),
         ));
         {
-            wasmstore.limiter(|state| &mut state.limits)
+            wasmstore.limiter(|state| &mut state.limits);
+            // VIEW store on the epoch-interruption engine: arm the hard
+            // deadline BEFORE instantiate_async (a store on an
+            // epoch-interruption engine with the default deadline of 0
+            // traps immediately). `view_with_limits` re-arms the same
+            // budget right before the call so instantiation time doesn't
+            // eat into it.
+            wasmstore.set_epoch_deadline(view_epoch_deadline_ticks());
         }
         {
             Self::setup_linker(context.clone(), &mut linker).await

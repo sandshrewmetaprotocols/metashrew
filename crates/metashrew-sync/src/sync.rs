@@ -728,6 +728,29 @@ where
                         }
                         Err(commit_err) => {
                             let msg = format!("{}", commit_err);
+
+                            // An out-of-order rejection is DETERMINISTIC: it is a
+                            // function of the gap between `height` and the committed
+                            // tip, and re-executing the same block cannot change
+                            // either. Retrying it 30 times with backoff costs ~43
+                            // minutes per block (measured in production on 2026-08-24)
+                            // and, worse, DELAYS the resync signal reaching the caller,
+                            // which is the only thing that can actually fix it. Bail
+                            // immediately and let the result loop route it to
+                            // `handle_reorg`.
+                            if msg.contains("out-of-order commit rejected") {
+                                error!(
+                                    "Block {}: {} — not retryable (the committed tip \
+                                     cannot advance by re-executing this block); \
+                                     surfacing immediately for reorg handling",
+                                    height, msg
+                                );
+                                return Err(SyncError::Storage(format!(
+                                    "commit_atomic: {}",
+                                    msg
+                                )));
+                            }
+
                             log_atomic_retry_failure(
                                 "atomic commit",
                                 height,
@@ -942,8 +965,22 @@ where
                         processing_heights.remove(&failed_height);
                     }
 
-                    // Check if this is a chain validation error - trigger reorg handling
-                    if error.contains("does not connect to previous block") || error.contains("CHAIN DISCONTINUITY") {
+                    // Check if this is a chain validation error - trigger reorg handling.
+                    //
+                    // `out-of-order commit rejected` belongs here (added rc.15). It means
+                    // the fetcher cursor has drifted ahead of the committed storage tip:
+                    // `commit_atomic` only accepts `tip + 1`, so once a gap opens, every
+                    // later block is rejected for the same reason and the gap only widens.
+                    // Routing it to the generic retry branch (which does NOT rewind
+                    // `current_height`) made the divergence permanent — the wedge behind
+                    // INCIDENT-REORG-WEDGE-20260816 and -20260824. `handle_reorg` walks
+                    // back to the common ancestor and stores the rollback height, which is
+                    // exactly the reconciliation that previously required a process
+                    // restart (`heal_pointers_atomic` at startup).
+                    if error.contains("does not connect to previous block")
+                        || error.contains("CHAIN DISCONTINUITY")
+                        || error.contains("out-of-order commit rejected")
+                    {
                         warn!("Chain discontinuity detected at height {}. Triggering reorg handling.", failed_height);
 
                         // Trigger reorg handling to find common ancestor and rollback

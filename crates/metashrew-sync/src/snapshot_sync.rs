@@ -540,6 +540,27 @@ where
                         }
                         Err(commit_err) => {
                             let msg = format!("{}", commit_err);
+
+                            // rc.15: an out-of-order rejection is DETERMINISTIC —
+                            // it is a function of the gap between `height` and the
+                            // committed tip, and re-executing this block changes
+                            // neither. Retrying costs ~43 min/block in production
+                            // and delays the resync signal that is the only real
+                            // fix. Mirrors the same guard in `sync.rs`; both paths
+                            // need it (rc.6/rc.7 patched only one and the wedge
+                            // survived on the other).
+                            if msg.contains("out-of-order commit rejected") {
+                                error!(
+                                    "snapshot-path atomic commit: block {}: {} — not retryable; surfacing \
+                                     immediately for reorg handling",
+                                    height, msg
+                                );
+                                return Err(SyncError::Storage(format!(
+                                    "commit_atomic: {}",
+                                    msg
+                                )));
+                            }
+
                             crate::sync::log_atomic_retry_failure(
                                 "snapshot-path atomic commit",
                                 height,
@@ -770,6 +791,27 @@ where
                         }
                         Err(commit_err) => {
                             let msg = format!("{}", commit_err);
+
+                            // rc.15: an out-of-order rejection is DETERMINISTIC —
+                            // it is a function of the gap between `height` and the
+                            // committed tip, and re-executing this block changes
+                            // neither. Retrying costs ~43 min/block in production
+                            // and delays the resync signal that is the only real
+                            // fix. Mirrors the same guard in `sync.rs`; both paths
+                            // need it (rc.6/rc.7 patched only one and the wedge
+                            // survived on the other).
+                            if msg.contains("out-of-order commit rejected") {
+                                error!(
+                                    "snapshot-loop atomic commit: block {}: {} — not retryable; surfacing \
+                                     immediately for reorg handling",
+                                    height, msg
+                                );
+                                return Err(SyncError::Storage(format!(
+                                    "commit_atomic: {}",
+                                    msg
+                                )));
+                            }
+
                             crate::sync::log_atomic_retry_failure(
                                 "snapshot-loop atomic commit",
                                 height,
